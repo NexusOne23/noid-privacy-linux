@@ -98,7 +98,7 @@ jobs:
         run: |
           echo "Checking script header..."
           
-          head -1 noid-privacy-linux.sh | grep -q '^#!/bin/bash' && echo "✅ Shebang present" || { echo "❌ Missing shebang"; exit 1; }
+          head -1 noid-privacy-linux.sh | grep -qE '^#!(/bin/bash|/usr/bin/env bash)' && echo "✅ Shebang present" || { echo "❌ Missing shebang"; exit 1; }
           
           echo "Checking script size..."
           lines=$(wc -l < noid-privacy-linux.sh)
