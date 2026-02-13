@@ -202,6 +202,57 @@ sudo bash noid-privacy-linux.sh --ai
 
 ---
 
+## 🚀 GitHub Action
+
+Use NoID Privacy for Linux in your CI/CD pipeline to enforce privacy & security baselines:
+
+```yaml
+- name: Privacy & Security Audit
+  uses: NexusOne23/noid-privacy-linux@main
+  id: audit
+  with:
+    fail-threshold: '70'   # Fail if score < 70%
+```
+
+### Inputs
+
+| Input | Default | Description |
+|-------|---------|-------------|
+| `fail-threshold` | `0` | Minimum score to pass (0 = never fail) |
+| `ai` | `false` | Generate AI remediation prompt in summary |
+| `skip` | `''` | Comma-separated sections to skip |
+| `args` | `''` | Additional arguments for the script |
+
+### Outputs
+
+| Output | Description |
+|--------|-------------|
+| `score` | Privacy & security score (0-100) |
+| `total` | Total checks performed |
+| `pass` / `fail` / `warn` / `info` | Check counts by severity |
+| `json` | Full JSON output |
+
+### Example: Fail PR if score drops
+
+```yaml
+name: Security Gate
+on: [pull_request]
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: NexusOne23/noid-privacy-linux@main
+        with:
+          fail-threshold: '70'
+```
+
+Results appear as a rich **GitHub Actions Summary** with score, findings table, and optional AI fix prompt.
+
+📖 See [`.github/workflows/example-noid-audit.yml`](.github/workflows/example-noid-audit.yml) for a full example.
+
+---
+
 ## ✅ Perfect For
 
 - **Privacy-conscious developers** — Know what your desktop is leaking
