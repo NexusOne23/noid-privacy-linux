@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 ###############################################################################
-#  NoID Privacy for Linux v3.0.0 — Privacy & Security Audit for Linux Desktops
+#  NoID Privacy for Linux v3.0.0 — Privacy & Security Audit
 #  https://noid-privacy.com/linux | https://github.com/NexusOne23/noid-privacy-linux
 #  Fedora / RHEL / Debian / Ubuntu — Full-Spectrum Audit
 #  300+ checks across 42 sections
@@ -23,7 +23,7 @@ show_help() {
   cat <<EOF
 Usage: noid-privacy-linux.sh [OPTIONS]
 
-🛡️  NoID Privacy for Linux v${NOID_PRIVACY_VERSION} — Privacy & Security Audit for Linux Desktops
+🛡️  NoID Privacy for Linux v${NOID_PRIVACY_VERSION} — Privacy & Security Audit
 
 Options:
   --help          Show this help message
@@ -327,7 +327,7 @@ get_killswitch_tables() {
 if ! $JSON_MODE; then
 echo -e "${BOLD}${WHT}"
 echo "╔══════════════════════════════════════════════════════════════════════╗"
-echo "║  🛡️ NoID Privacy for Linux v${NOID_PRIVACY_VERSION} — Privacy & Security Audit for Linux Desktops"
+echo "║  🛡️ NoID Privacy for Linux v${NOID_PRIVACY_VERSION} — Privacy & Security Audit"
 echo "║  $NOW | $HOSTNAME | $KERNEL"
 echo "║  Arch: $ARCH | Distro: $DISTRO_PRETTY"
 echo "║  Checks: 300+ across $TOTAL_SECTIONS sections"
@@ -3612,7 +3612,7 @@ else
   echo -e "${BOLD}${WHT}╚══════════════════════════════════════════════════════════════════════╝${RST}"
   echo ""
   echo -e "${CYN}Report generated: $NOW${RST}"
-  echo -e "${CYN}by Clawde 🦝 — NoID Privacy for Linux v${NOID_PRIVACY_VERSION} | Privacy & Security Audit | https://noid-privacy.com/linux${RST}"
+  echo -e "${CYN}by NexusOne23 & Clawde 🦝 — NoID Privacy for Linux v${NOID_PRIVACY_VERSION} | https://noid-privacy.com/linux${RST}"
 
   # --- AI Mode Output ---
   if $AI_MODE; then
@@ -3624,7 +3624,7 @@ else
     echo "Copy everything below and paste it to your AI assistant (ChatGPT, Claude, Gemini, etc.):"
     echo ""
     echo "---START---"
-    echo "I ran NoID Privacy for Linux v${NOID_PRIVACY_VERSION} (Privacy & Security Audit for Linux Desktops) on my system."
+    echo "I ran NoID Privacy for Linux v${NOID_PRIVACY_VERSION} (Privacy & Security Audit) on my system."
     echo "Here are the findings that need attention:"
     echo ""
     echo "System: ${DISTRO_PRETTY} ${KERNEL} ${DESKTOP_ENV}"
