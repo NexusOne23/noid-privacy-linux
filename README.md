@@ -225,7 +225,7 @@ sudo bash noid-privacy-linux.sh --ai
 |----------|------|
 | 🪟 **Windows** | [NoID Privacy](https://github.com/NexusOne23/noid-privacy) — 630+ settings, 7 modules, Backup → Apply → Verify → Restore |
 | 🐧 **Linux** | You're here! |
-| 📱 **Android** | [NoID Privacy on Google Play](https://play.google.com/store/apps/details?id=com.noid.privacy) |
+| 📱 **Android** | [NoID Privacy on Google Play](https://play.google.com/store/apps/details?id=com.noid.privacy) — 81 checks, 10 categories, permission audit, Chrome hardening, anti-theft |
 
 ---
 
