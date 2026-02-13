@@ -219,9 +219,13 @@ sudo bash noid-privacy-linux.sh --ai
 
 ---
 
-## 🔗 Sister Project
+## 🔗 The NoID Privacy Ecosystem
 
-**[NoID Privacy](https://github.com/NexusOne23/noid-privacy)** — Windows 11 Security & Privacy Hardening Framework. 630+ settings, 7 modules, Backup → Apply → Verify → Restore pattern.
+| Platform | Link |
+|----------|------|
+| 🪟 **Windows** | [NoID Privacy](https://github.com/NexusOne23/noid-privacy) — 630+ settings, 7 modules, Backup → Apply → Verify → Restore |
+| 🐧 **Linux** | You're here! |
+| 📱 **Android** | [NoID Privacy on Google Play](https://play.google.com/store/apps/details?id=com.noid.privacy) |
 
 ---
 
