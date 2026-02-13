@@ -1,0 +1,35 @@
+name: Privacy & Security Audit
+
+on:
+  # Run on demand
+  workflow_dispatch:
+  # Run weekly on Monday at 06:00 UTC
+  schedule:
+    - cron: '0 6 * * 1'
+  # Run on PRs that touch security-relevant files
+  pull_request:
+    paths:
+      - '*.sh'
+      - '.github/workflows/**'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: NoID Privacy Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run NoID Privacy Audit
+        id: audit
+        uses: NexusOne23/noid-privacy-linux@main
+        with:
+          fail-threshold: '70'
+          # ai: 'true'        # Uncomment to generate AI remediation prompt
+          # skip: 'rootkit,containers'  # Uncomment to skip sections
+
+      - name: Print Score
+        run: echo "Security Score: ${{ steps.audit.outputs.score }}%"

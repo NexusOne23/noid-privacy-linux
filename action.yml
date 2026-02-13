@@ -1,0 +1,53 @@
+name: 'NoID Privacy for Linux'
+description: 'Privacy & security audit for Linux desktops — 300+ checks, 42 sections, AI-powered fixes'
+author: 'NexusOne23'
+
+branding:
+  icon: 'shield'
+  color: 'green'
+
+inputs:
+  fail-threshold:
+    description: 'Minimum score (0-100) to pass. The action fails if the score is below this value. Set to 0 to never fail.'
+    required: false
+    default: '0'
+  ai:
+    description: 'Enable --ai flag to generate AI remediation prompt'
+    required: false
+    default: 'false'
+  skip:
+    description: 'Comma-separated list of sections to skip (e.g. "rootkit,containers,browser")'
+    required: false
+    default: ''
+  args:
+    description: 'Additional arguments to pass to noid-privacy-linux.sh'
+    required: false
+    default: ''
+
+outputs:
+  score:
+    description: 'The privacy & security score (0-100)'
+  total:
+    description: 'Total number of checks performed'
+  pass:
+    description: 'Number of passed checks'
+  fail:
+    description: 'Number of failed checks'
+  warn:
+    description: 'Number of warnings'
+  info:
+    description: 'Number of informational findings'
+  json:
+    description: 'Full JSON output'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Run NoID Privacy Audit
+      shell: bash
+      env:
+        INPUT_FAIL_THRESHOLD: ${{ inputs.fail-threshold }}
+        INPUT_AI: ${{ inputs.ai }}
+        INPUT_SKIP: ${{ inputs.skip }}
+        INPUT_ARGS: ${{ inputs.args }}
+      run: bash "${{ github.action_path }}/entrypoint.sh"
