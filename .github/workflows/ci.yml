@@ -1,0 +1,111 @@
+name: CI - Bash Quality Checks
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  syntax-check:
+    name: Bash Syntax Check
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Check Bash syntax
+        run: |
+          echo "Bash version: $(bash --version | head -1)"
+          echo ""
+          echo "Running syntax check..."
+          
+          if bash -n noid-privacy-linux.sh; then
+            echo ""
+            echo "✅ Syntax check passed!"
+          else
+            echo ""
+            echo "❌ Syntax check FAILED!"
+            exit 1
+          fi
+
+  shellcheck:
+    name: ShellCheck Analysis
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Install ShellCheck
+        run: sudo apt-get install -y shellcheck
+      
+      - name: Run ShellCheck
+        run: |
+          echo "ShellCheck version: $(shellcheck --version | head -2 | tail -1)"
+          echo ""
+          echo "Running ShellCheck (errors and warnings)..."
+          
+          # Run with severity error and warning (ignore info/style for now)
+          if shellcheck --severity=warning --shell=bash --format=tty noid-privacy-linux.sh; then
+            echo ""
+            echo "✅ ShellCheck passed!"
+          else
+            echo ""
+            echo "⚠️ ShellCheck found issues (see above)"
+            echo "Note: This is informational — not blocking CI yet"
+          fi
+        # Don't fail CI on shellcheck warnings yet — too many for a 3600-line script
+        continue-on-error: true
+
+  validate-structure:
+    name: Validate Project Structure
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Check required files
+        run: |
+          echo "Checking project structure..."
+          
+          failed=0
+          for f in README.md LICENSE CHANGELOG.md CONTRIBUTING.md SECURITY.md CODE_OF_CONDUCT.md noid-privacy-linux.sh; do
+            if [ -f "$f" ]; then
+              echo "  ✅ $f"
+            else
+              echo "  ❌ $f (MISSING)"
+              failed=1
+            fi
+          done
+          
+          if [ "$failed" -eq 1 ]; then
+            echo ""
+            echo "❌ Missing required files!"
+            exit 1
+          else
+            echo ""
+            echo "✅ All required files present!"
+          fi
+      
+      - name: Verify script is executable-ready
+        run: |
+          echo "Checking script header..."
+          
+          head -1 noid-privacy-linux.sh | grep -q '^#!/bin/bash' && echo "✅ Shebang present" || { echo "❌ Missing shebang"; exit 1; }
+          
+          echo "Checking script size..."
+          lines=$(wc -l < noid-privacy-linux.sh)
+          echo "  Script: $lines lines"
+          
+          if [ "$lines" -lt 3000 ]; then
+            echo "⚠️ Script seems too small (expected 3000+)"
+          else
+            echo "✅ Script size looks good"
+          fi

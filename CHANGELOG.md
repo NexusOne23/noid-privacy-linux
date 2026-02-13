@@ -1,10 +1,28 @@
 # Changelog
 
-## v3.0.0 — Privacy & Security Audit for Linux Desktops (2026-02-13)
+All notable changes to NoID Privacy for Linux will be documented in this file.
 
-**Major repositioning: From server security tool to the first desktop privacy & security auditor for Linux.**
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-### New: Privacy Audit (8 new sections, 60+ new checks)
+---
+
+## [3.0.0] - 2026-02-13
+
+### 🚀 Major Release — Privacy & Security Audit for Linux Desktops
+
+**Complete repositioning: From server security tool to the first desktop privacy & security auditor for Linux.**
+
+### 🌟 Release Highlights
+
+✅ **300+ Checks** — Expanded from 250+ with 8 new privacy & desktop sections  
+✅ **42 Sections** — Up from 34 (8 new privacy/desktop sections)  
+✅ **AI-Ready Prompt** — `--ai` flag generates copy-paste prompts for ChatGPT/Claude/Gemini  
+✅ **JSON Output** — `--json` flag for machine-readable results  
+✅ **Desktop-First** — Browser privacy, app telemetry, webcam, Bluetooth, keyring auditing  
+✅ **Zero Dependencies** — Still pure Bash, still zero external requirements  
+
+### ✅ Added — Privacy Audit (8 New Sections, 60+ New Checks)
 
 #### 🔒 Browser Privacy (Section 35)
 - Firefox telemetry, health reports, WebRTC IP leaks
@@ -18,7 +36,7 @@
 - GNOME Location Services, problem reporting, usage stats
 - GNOME Tracker/file indexer detection
 - Recent files tracking configuration
-- Flatpak dangerous permissions (filesystem=host, Flatpak portal escape)
+- Flatpak dangerous permissions (filesystem=host, portal escape)
 - Snap telemetry
 - ABRT crash reporter
 - Fedora countme / Ubuntu popularity-contest
@@ -32,7 +50,6 @@
 - Hostname privacy (real name detection)
 - IPv6 privacy extensions
 - DHCP hostname leaking
-- Multicast DNS
 - cups-browsed RCE risk (CVE-2024-47176)
 
 #### 🔒 Data & Disk Privacy (Section 38)
@@ -76,25 +93,30 @@
 - Firmware update status (fwupdmgr)
 - Thunderbolt security level (DMA attack prevention)
 
-### Changed
-- Repositioned as "Privacy & Security Audit for Linux Desktops"
-- Version bumped to 3.0.0
-- Total sections: 35 → 42
-- Total checks: 250+ → 300+
-- Summary now shows "Security & Privacy Score"
-- README completely rewritten with new positioning
-- Added `--skip` support for all new sections: browser, telemetry, netprivacy, dataprivacy, session, media, btprivacy, keyring
+### ✅ Added — New Features
+- `--ai` flag: Generates AI-ready prompt with all findings for ChatGPT/Claude/Gemini
+- `--json` flag: Machine-readable JSON output for scripts and dashboards
+- `--skip` support for all new sections: browser, telemetry, netprivacy, dataprivacy, session, media, btprivacy, keyring
+- Summary now shows "Security & Privacy Score" (not just "Security Score")
 
-### Technical
+### 🔧 Changed
+- Repositioned as "Privacy & Security Audit for Linux Desktops"
+- Total sections: 34 → 42
+- Total checks: 250+ → 300+
+- README completely rewritten with new positioning
 - 5 new helper functions for multi-user gsettings/Firefox profile iteration
 - All desktop checks iterate over all human users (UID ≥ 1000)
+
+### 🔧 Technical
 - gsettings checks use proper DBUS_SESSION_BUS_ADDRESS
 - bluetoothctl calls use timeout to prevent hangs
 - Fedora 43 + Ubuntu 24.04 compatible
 
 ---
 
-## v2.0.1 (2026-02-13)
+## [2.0.1] - 2026-02-13
+
+### 🔨 Bugfix Release
 
 ### Fixed
 - `VERSION` variable collision with `/etc/os-release` → renamed to `FORTIFY_VERSION`
@@ -111,7 +133,11 @@
 - chkrootkit Linux.Xor.DDoS false positive filtered
 - Cron directory 755 on Fedora recognized as normal
 
-## v2.0.0 (2026-02-13)
+---
+
+## [2.0.0] - 2026-02-13
+
+### 🚀 Major Release — Full Security Audit
 
 ### Added
 - AppArmor support (Debian/Ubuntu)
@@ -129,10 +155,23 @@
 - 35 sections total, 250+ checks
 - 2283 lines
 
-## v1.2.0 (2026-02-12)
-
-Initial public release. 212+ checks, 30 sections, Fedora/RHEL primary.
+### Changed
+- Dual distro support: Fedora/RHEL + Debian/Ubuntu
+- Comprehensive kernel hardening section
+- Advanced network security checks
+- Container and virtualization detection
 
 ---
 
-*Fortify is built by [Clawde](https://github.com/ClawdeRaccoon) 🦝*
+## [1.2.0] - 2026-02-12
+
+### 🎉 Initial Public Release
+
+- 212+ checks across 30 sections
+- Fedora/RHEL primary support
+- Pure Bash, zero dependencies
+- Basic reporting with PASS/FAIL/WARN/INFO
+
+---
+
+**NoID Privacy for Linux** — *Know your system. Harden your privacy.*
