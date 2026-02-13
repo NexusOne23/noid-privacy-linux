@@ -1,0 +1,5 @@
+*.log
+*.tmp
+*.bak
+report-*.txt
+.DS_Store
