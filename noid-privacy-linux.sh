@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 ###############################################################################
 #  NoID Privacy for Linux v3.0.0 — Privacy & Security Audit
-#  https://noid-privacy.com/linux | https://github.com/NexusOne23/noid-privacy-linux
+#  https://noid-privacy.com/linux.html | https://github.com/NexusOne23/noid-privacy-linux
 #  Fedora / RHEL / Debian / Ubuntu — Full-Spectrum Audit
 #  300+ checks across 42 sections
 #  Requires: root
@@ -3612,7 +3612,7 @@ else
   echo -e "${BOLD}${WHT}╚══════════════════════════════════════════════════════════════════════╝${RST}"
   echo ""
   echo -e "${CYN}Report generated: $NOW${RST}"
-  echo -e "${CYN}by NexusOne23 & Clawde 🦝 — NoID Privacy for Linux v${NOID_PRIVACY_VERSION} | https://noid-privacy.com/linux${RST}"
+  echo -e "${CYN}by NexusOne23 & Clawde 🦝 — NoID Privacy for Linux v${NOID_PRIVACY_VERSION} | https://noid-privacy.com/linux.html${RST}"
 
   # --- AI Mode Output ---
   if $AI_MODE; then
