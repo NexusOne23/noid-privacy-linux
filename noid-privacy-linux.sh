@@ -263,6 +263,7 @@ DISTRO_PRETTY="Unknown Linux"
 if [[ -f /etc/os-release ]]; then
   . /etc/os-release
   DISTRO_PRETTY="${PRETTY_NAME:-$NAME}"
+  # shellcheck disable=SC2034  # DISTRO reserved for future per-distro checks
   case "${ID,,}" in
     fedora)                                DISTRO="fedora"; DISTRO_FAMILY="rhel" ;;
     rhel|centos|rocky|alma|almalinux)      DISTRO="${ID,,}"; DISTRO_FAMILY="rhel" ;;
@@ -270,7 +271,6 @@ if [[ -f /etc/os-release ]]; then
     debian|linuxmint|pop)                  DISTRO="${ID,,}"; DISTRO_FAMILY="debian" ;;
     arch|manjaro|endeavouros|artix|garuda) DISTRO="${ID,,}"; DISTRO_FAMILY="arch" ;;
     opensuse*|sles|suse)                   DISTRO="${ID,,}"; DISTRO_FAMILY="suse" ;;
-    # shellcheck disable=SC2034  # DISTRO reserved for future per-distro checks
     *)                                     DISTRO="${ID,,}"; DISTRO_FAMILY="unknown" ;;
   esac
 fi
