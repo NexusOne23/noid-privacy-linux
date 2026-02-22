@@ -32,4 +32,5 @@ jobs:
           # skip: 'rootkit,containers'  # Uncomment to skip sections
 
       - name: Print Score
-        run: echo "Security Score: ${{ steps.audit.outputs.score }}%"
+        run: |
+          echo "Security Score: ${{ steps.audit.outputs.score }}%"

@@ -1751,9 +1751,9 @@ if [[ "$DELETED_BINS" -eq 0 ]]; then
 else
   warn "Deleted binaries running: $DELETED_BINS"
   if ! $JSON_MODE; then
+    # shellcheck disable=SC2010
     while read -r d; do
       printf "       %s\n" "$d"
-    # shellcheck disable=SC2010
     done < <(ls -l /proc/*/exe 2>/dev/null | grep "(deleted)" | head -5)
   fi
 fi
