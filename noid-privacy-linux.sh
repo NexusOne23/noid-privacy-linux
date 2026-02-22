@@ -79,6 +79,7 @@ should_skip() {
 if $NO_COLOR; then
   RED=''; GRN=''; YLW=''; BLU=''; MAG=''; CYN=''; WHT=''; RST=''; BOLD=''
 else
+  # shellcheck disable=SC2034  # color palette — not all used directly
   RED='\033[0;31m'; GRN='\033[0;32m'; YLW='\033[0;33m'; BLU='\033[0;34m'
   MAG='\033[0;35m'; CYN='\033[0;36m'; WHT='\033[1;37m'; RST='\033[0m'
   BOLD='\033[1m'
@@ -269,6 +270,7 @@ if [[ -f /etc/os-release ]]; then
     debian|linuxmint|pop)                  DISTRO="${ID,,}"; DISTRO_FAMILY="debian" ;;
     arch|manjaro|endeavouros|artix|garuda) DISTRO="${ID,,}"; DISTRO_FAMILY="arch" ;;
     opensuse*|sles|suse)                   DISTRO="${ID,,}"; DISTRO_FAMILY="suse" ;;
+    # shellcheck disable=SC2034  # DISTRO reserved for future per-distro checks
     *)                                     DISTRO="${ID,,}"; DISTRO_FAMILY="unknown" ;;
   esac
 fi
@@ -415,13 +417,12 @@ for PARAM in "init_on_alloc=1" "init_on_free=1" "slab_nomerge" "pti=on" "vsyscal
 done
 
 # Grub cmdline security params (new)
-for PARAM in "spec_store_bypass_disable=on"; do
-  if echo "$CMDLINE" | grep -qw "$PARAM"; then
-    pass "Boot security param: $PARAM"
-  else
-    warn "Boot security param missing: $PARAM"
-  fi
-done
+PARAM="spec_store_bypass_disable=on"
+if echo "$CMDLINE" | grep -qw "$PARAM"; then
+  pass "Boot security param: $PARAM"
+else
+  warn "Boot security param missing: $PARAM"
+fi
 # Optional params (can break NVIDIA/hardware on desktop systems)
 for PARAM in "iommu=force" "lockdown=confidentiality"; do
   if echo "$CMDLINE" | grep -qw "$PARAM"; then
@@ -1743,6 +1744,7 @@ else
 fi
 
 # Deleted Binaries still running
+# shellcheck disable=SC2010  # /proc/*/exe requires ls -l to show symlink targets
 DELETED_BINS=$(ls -l /proc/*/exe 2>/dev/null | grep "(deleted)" | wc -l)
 if [[ "$DELETED_BINS" -eq 0 ]]; then
   pass "No deleted binaries running"
@@ -1751,6 +1753,7 @@ else
   if ! $JSON_MODE; then
     while read -r d; do
       printf "       %s\n" "$d"
+    # shellcheck disable=SC2010
     done < <(ls -l /proc/*/exe 2>/dev/null | grep "(deleted)" | head -5)
   fi
 fi
@@ -2737,7 +2740,7 @@ check_browser_privacy() {
 
   _for_each_user _bp_check_user
 
-  local chrome_bin chrome_warned=false
+  local chrome_bin
   local -A chrome_seen=()
   for chrome_bin in google-chrome google-chrome-stable chromium chromium-browser; do
     if command -v "$chrome_bin" &>/dev/null; then
@@ -3290,9 +3293,8 @@ check_desktop_session() {
       remote_found=1
     fi
   fi
-  local found_rdp=0
   _gs_rdp_cb() {
-    found_rdp=1
+    remote_found=1
     local val
     val=$(echo "$3" | xargs)
     if [[ "$val" == "true" ]]; then
