@@ -5,13 +5,14 @@
 ### Privacy & Security Audit for Linux Desktops
 
 [![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](https://github.com/NexusOne23/noid-privacy-linux/blob/main/LICENSE)
-[![Version](https://img.shields.io/badge/version-3.0.0-green.svg)](https://github.com/NexusOne23/noid-privacy-linux/releases)
+[![Version](https://img.shields.io/badge/version-3.1.0-green.svg)](https://github.com/NexusOne23/noid-privacy-linux/releases)
 [![Pure Bash](https://img.shields.io/badge/pure-bash-4EAA25.svg?logo=gnu-bash&logoColor=white)](https://github.com/NexusOne23/noid-privacy-linux)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen.svg)](https://github.com/NexusOne23/noid-privacy-linux)
 [![Checks](https://img.shields.io/badge/checks-300%2B-orange.svg)](https://github.com/NexusOne23/noid-privacy-linux)
 [![CI](https://github.com/NexusOne23/noid-privacy-linux/actions/workflows/ci.yml/badge.svg)](https://github.com/NexusOne23/noid-privacy-linux/actions)
 
 **300+ checks · 42 sections · Zero dependencies · Pure Bash · AI-powered fixes**
+**Fedora · Ubuntu · Debian · Arch · openSUSE · RHEL · Mint · Pop!_OS**
 
 [Quick Start](#-quick-start) · [What it Checks](#-what-it-checks) · [AI Fixes](#-fix-with-ai) · [Comparison](#-comparison) · [Discussions](https://github.com/NexusOne23/noid-privacy-linux/discussions)
 
@@ -88,8 +89,8 @@ sudo bash noid-privacy-linux.sh --json
 | **Firewall & Network** | iptables/nftables rules, default policies, open ports, VPN, kill-switch, DNS leaks |
 | **SSH & Auth** | Key-only auth, root login, password aging, PAM, sudo group |
 | **Encryption** | LUKS cipher strength, key size, swap encryption, entropy, certificate store |
-| **MAC & Integrity** | SELinux/AppArmor enforcing, rootkit scans, AIDE/Tripwire, package verification |
-| **Updates & Packages** | Security patches, auto-updates, repo integrity, GPG verification |
+| **MAC & Integrity** | SELinux/AppArmor (auto-detected), rootkit scans, AIDE/Tripwire, package verification |
+| **Updates & Packages** | Security patches, auto-updates, repo integrity, GPG verification (dnf/apt/pacman/zypper) |
 | **Advanced** | Fail2Ban, USB Guard, containers, systemd sandboxing, kernel modules |
 
 ### 🔒 Privacy & Desktop (Sections 35–42)
@@ -114,7 +115,7 @@ sudo bash noid-privacy-linux.sh --json
 ```
 $ sudo bash noid-privacy-linux.sh --ai
 
-  NoID Privacy for Linux v3.0.0 — Privacy & Security Audit for Linux Desktops
+  NoID Privacy for Linux v3.1.0 — Privacy & Security Audit for Linux Desktops
   2026-02-13 15:03:15 | mydesktop | 6.18.9-200.fc43.x86_64
   Arch: x86_64 | Distro: Fedora Linux 43 (Workstation Edition)
   Checks: 300+ across 42 sections
@@ -138,7 +139,7 @@ $ sudo bash noid-privacy-linux.sh --ai
   Total checks:      341 (228 pass, 4 fail, 19 warn, 90 info)
   SECURITY & PRIVACY SCORE:    89% SOLID
 
-🤖 AI-READY PROMPT saved. Copy & paste it to your AI assistant.
+Score formula: PASS×100 / (PASS + FAIL×2 + WARN)
 ```
 
 ---
@@ -170,7 +171,7 @@ $ sudo bash noid-privacy-linux.sh --ai
 | **AI-ready output** | ✅ | ❌ | ❌ | ❌ |
 | **JSON output** | ✅ | ✅ | N/A | ❌ |
 | **Kernel & firewall** | ✅ | ✅ | ⚠️ Partial | ✅ |
-| **Zero dependencies** | ✅ | ✅ | ❌ | ❌ |
+| **Zero compiled dependencies** | ✅ | ✅ | ❌ | ❌ |
 | **Desktop-focused** | ✅ | ❌ | ✅ | ❌ |
 | **Modifies system** | ❌ | ❌ | ✅ | ❌ |
 
@@ -184,7 +185,7 @@ $ sudo bash noid-privacy-linux.sh --ai
 
 | Requirement | Details |
 |---|---|
-| **OS** | Fedora 39+, Ubuntu 22.04+, Debian 12+, RHEL 9+ |
+| **OS** | Fedora 39+, Ubuntu 22.04+, Debian 12+, RHEL 9+, Arch Linux, openSUSE, Mint, Pop!_OS |
 | **Shell** | Bash 4+ |
 | **Privileges** | Root (`sudo`) for full system access |
 | **Dependencies** | None |
@@ -241,7 +242,7 @@ jobs:
   audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
       - uses: NexusOne23/noid-privacy-linux@main
         with:
           fail-threshold: '70'
@@ -282,7 +283,22 @@ Results appear as a rich **GitHub Actions Summary** with score, findings table, 
 
 ## 🔒 Privacy Promise
 
-This script makes **zero network requests**. No telemetry, no analytics, no phone-home. One file, pure Bash — read every line yourself.
+This script makes **no network requests by default**. No telemetry, no analytics, no phone-home. One file, pure Bash — read every line yourself.
+
+> **Note:** The optional DNS leak test (`netleaks` section) contacts `whoami.akamai.net` and `ifconfig.me` to verify your VPN is working. Skip it with `--skip netleaks` for a fully offline audit.
+
+---
+
+## 🔧 Troubleshooting
+
+| Issue | Solution |
+|-------|----------|
+| `Requires root` error | Run with `sudo bash noid-privacy-linux.sh` |
+| False positive on a check | Open an [issue](https://github.com/NexusOne23/noid-privacy-linux/issues) with your distro and the finding |
+| DNS leak test fails/hangs | Skip it: `--skip netleaks`. Requires `dig` and `curl`. |
+| Score seems too low | Check if `--skip` sections are relevant to your setup. Desktop-only checks may warn on servers. |
+| Script hangs on Bluetooth | Known `bluetoothctl` timeout issue. Skip: `--skip btprivacy` |
+| Missing checks for my distro | Fedora/RHEL, Ubuntu/Debian, Arch, and openSUSE are fully supported. Other distros may show more `info` results. |
 
 ---
 

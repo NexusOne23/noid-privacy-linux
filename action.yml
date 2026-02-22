@@ -12,7 +12,7 @@ inputs:
     required: false
     default: '0'
   ai:
-    description: 'Enable --ai flag to generate AI remediation prompt'
+    description: 'Enable --ai flag to generate a structured AI remediation prompt at the end of the audit. Copy-paste it to ChatGPT, Claude, or Gemini for automated fix instructions.'
     required: false
     default: 'false'
   skip:

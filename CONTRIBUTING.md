@@ -122,7 +122,7 @@ noid-privacy-linux.sh
 ### Counters
 
 The script tracks results via global counters:
-- `PASS_COUNT`, `FAIL_COUNT`, `WARN_COUNT`, `INFO_COUNT`
+- `PASS`, `FAIL`, `WARN`, `INFO`
 - These are used to calculate the final score
 
 ---
@@ -205,8 +205,10 @@ If your checks don't fit any existing section, you can propose a new one:
 - **Use `[[` for conditionals** (Bash-specific, safer than `[`)
 - **Use `command -v`** instead of `which` for command detection
 - **Use `&>/dev/null`** for suppressing output
+- **Use `printf` instead of `echo -e`** for portable colored output
 - **4-space indentation** (no tabs)
 - **Max line length:** 120 characters (soft limit)
+- **ShellCheck must pass.** Run `shellcheck --severity=warning noid-privacy-linux.sh` before submitting. CI enforces this.
 
 ### Naming Conventions
 

@@ -14,17 +14,17 @@ jobs:
   syntax-check:
     name: Bash Syntax Check
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
-      
+        uses: actions/checkout@v4.2.2
+
       - name: Check Bash syntax
         run: |
           echo "Bash version: $(bash --version | head -1)"
           echo ""
           echo "Running syntax check..."
-          
+
           if bash -n noid-privacy-linux.sh; then
             echo ""
             echo "✅ Syntax check passed!"
@@ -37,44 +37,36 @@ jobs:
   shellcheck:
     name: ShellCheck Analysis
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
-      
+        uses: actions/checkout@v4.2.2
+
       - name: Install ShellCheck
         run: sudo apt-get install -y shellcheck
-      
+
       - name: Run ShellCheck
         run: |
           echo "ShellCheck version: $(shellcheck --version | head -2 | tail -1)"
           echo ""
           echo "Running ShellCheck (errors and warnings)..."
-          
-          # Run with severity error and warning (ignore info/style for now)
-          if shellcheck --severity=warning --shell=bash --format=tty noid-privacy-linux.sh; then
-            echo ""
-            echo "✅ ShellCheck passed!"
-          else
-            echo ""
-            echo "⚠️ ShellCheck found issues (see above)"
-            echo "Note: This is informational — not blocking CI yet"
-          fi
-        # Don't fail CI on shellcheck warnings yet — too many for a 3600-line script
-        continue-on-error: true
+
+          shellcheck --severity=warning --shell=bash --format=tty noid-privacy-linux.sh
+          echo ""
+          echo "✅ ShellCheck passed!"
 
   validate-structure:
     name: Validate Project Structure
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
-      
+        uses: actions/checkout@v4.2.2
+
       - name: Check required files
         run: |
           echo "Checking project structure..."
-          
+
           failed=0
           for f in README.md LICENSE CHANGELOG.md CONTRIBUTING.md SECURITY.md CODE_OF_CONDUCT.md noid-privacy-linux.sh; do
             if [ -f "$f" ]; then
@@ -84,7 +76,7 @@ jobs:
               failed=1
             fi
           done
-          
+
           if [ "$failed" -eq 1 ]; then
             echo ""
             echo "❌ Missing required files!"
@@ -93,19 +85,47 @@ jobs:
             echo ""
             echo "✅ All required files present!"
           fi
-      
+
       - name: Verify script is executable-ready
         run: |
           echo "Checking script header..."
-          
+
           head -1 noid-privacy-linux.sh | grep -qE '^#!(/bin/bash|/usr/bin/env bash)' && echo "✅ Shebang present" || { echo "❌ Missing shebang"; exit 1; }
-          
+
           echo "Checking script size..."
           lines=$(wc -l < noid-privacy-linux.sh)
           echo "  Script: $lines lines"
-          
+
           if [ "$lines" -lt 3000 ]; then
             echo "⚠️ Script seems too small (expected 3000+)"
           else
             echo "✅ Script size looks good"
           fi
+
+  distro-test:
+    name: Distro Test (${{ matrix.distro }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distro: ubuntu:22.04
+            name: Ubuntu 22.04
+          - distro: ubuntu:24.04
+            name: Ubuntu 24.04
+          - distro: fedora:39
+            name: Fedora 39
+          - distro: fedora:43
+            name: Fedora 43
+          - distro: debian:12
+            name: Debian 12
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4.2.2
+
+      - name: Test syntax on ${{ matrix.name }}
+        run: |
+          docker run --rm -v "$PWD:/audit:ro" "${{ matrix.distro }}" \
+            bash -n /audit/noid-privacy-linux.sh
+          echo "✅ Syntax OK on ${{ matrix.name }}"

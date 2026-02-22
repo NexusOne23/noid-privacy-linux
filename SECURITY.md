@@ -31,15 +31,14 @@ When reporting a vulnerability, please include:
 - **Proof of Concept**: PoC code if applicable (optional)
 - **Suggested Fix**: If you have one (optional)
 
-### ⏱️ Response Timeline
+### ⏱️ Response Timeline (SLA)
 
-- **Initial Response**: Within 48 hours
-- **Status Update**: Within 7 days
-- **Fix Timeline**: Depends on severity
-  - Critical: 7-14 days
-  - High: 14-30 days
-  - Medium: 30-60 days
-  - Low: 60-90 days
+| Severity | Acknowledgement | Fix Target | Max Resolution |
+|----------|----------------|------------|----------------|
+| **Critical** | 24 hours | 7 days | 14 days |
+| **High** | 48 hours | 14 days | 30 days |
+| **Medium** | 7 days | 30 days | 60 days |
+| **Low** | 7 days | 60 days | 90 days |
 
 ### 🎖️ Recognition
 
@@ -57,7 +56,7 @@ NoID Privacy for Linux is designed with security in mind:
 - ✅ **Read-Only**: The script only **reads** system state — it never modifies your system
 - ✅ **No External Dependencies**: Zero third-party binaries, libraries, or package managers
 - ✅ **Pure Bash**: No Python, Ruby, Node.js, or compiled binaries
-- ✅ **No Network Requests**: The script does not phone home or download anything at runtime
+- ✅ **No Network Requests by Default**: The script does not phone home or download anything. The optional DNS leak test (`netleaks` section) contacts external services and can be skipped with `--skip netleaks`.
 - ✅ **No Data Collection**: Zero telemetry, zero analytics, zero tracking
 
 ### Code Transparency
@@ -72,7 +71,8 @@ NoID Privacy for Linux is designed with security in mind:
 
 | Version | Supported          | Notes |
 | ------- | ------------------ | ----- |
-| 3.0.x   | ✅ Fully Supported | Current release, 300+ checks, 42 sections |
+| 3.1.x   | ✅ Fully Supported | Current release, 300+ checks, 42 sections |
+| 3.0.x   | ⚠️ Limited Support  | Upgrade to 3.1.x recommended |
 | 2.0.x   | ⚠️ Limited Support  | Upgrade to 3.0.x recommended |
 | 1.x     | ❌ Not Supported   | Legacy version |
 
@@ -169,5 +169,5 @@ For licensing questions, see [LICENSE](LICENSE) or open a [Discussion](https://g
 
 ---
 
-**Last Updated**: February 13, 2026  
-**Policy Version**: 1.0
+**Last Updated**: February 22, 2026
+**Policy Version**: 1.1

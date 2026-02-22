@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 ###############################################################################
-#  NoID Privacy for Linux v3.0.0 — Privacy & Security Audit
+#  NoID Privacy for Linux v3.1.0 — Privacy & Security Audit
 #  https://noid-privacy.com/linux.html | https://github.com/NexusOne23/noid-privacy-linux
 #  Fedora / RHEL / Debian / Ubuntu — Full-Spectrum Audit
 #  300+ checks across 42 sections
 #  Requires: root
 ###############################################################################
-NOID_PRIVACY_VERSION="3.0.0"
-set +e  # Don't exit on errors — we handle them ourselves
+NOID_PRIVACY_VERSION="3.1.0"
+set +e          # Don't exit on errors — we handle them ourselves
 
 # --- Argument Parsing ---
 NO_COLOR=false
@@ -37,7 +37,7 @@ Options:
                   logs, performance, hardware, interfaces, certificates,
                   environment, systemd, desktop, ntp, fail2ban, logins,
                   hardening, permissions, modules, boot, integrity,
-                  browser, telemetry, netprivacy, dataprivacy,
+                  browser, telemetry, netprivacy, netleaks, dataprivacy,
                   session, media, btprivacy, keyring, summary
 
 Examples:
@@ -88,7 +88,8 @@ PASS=0; FAIL=0; WARN=0; INFO=0
 TOTAL_START=$(date +%s)
 TOTAL_SECTIONS=42
 
-# Safe count: strips newlines/whitespace, defaults to 0
+# Safe count: reads stdin, strips all non-digit characters, returns the number (or 0).
+# Used after `wc -l | ccount` or `grep -c | ccount` to handle whitespace and empty output.
 ccount() { local v; v=$(cat); v=${v//[^0-9]/}; echo "${v:-0}"; }
 
 # --- JSON helper: escape string for JSON ---
@@ -104,43 +105,46 @@ _json_escape() {
 pass() {
   ((PASS++))
   if $JSON_MODE; then
-    JSON_FINDINGS+=("{\"status\":\"pass\",\"section\":\"$(_json_escape "$CURRENT_SECTION")\",\"message\":\"$(_json_escape "$1")\"}")
+    JSON_FINDINGS+=("{\"severity\":\"PASS\",\"section\":\"$(_json_escape "$CURRENT_SECTION")\",\"message\":\"$(_json_escape "$1")\"}")
   else
-    echo -e "  ${GRN}✅ PASS${RST}  $1"
+    printf "  ${GRN}✅ PASS${RST}  %s\n" "$1"
   fi
 }
 fail() {
   ((FAIL++))
   FAIL_MSGS+=("$1")
   if $JSON_MODE; then
-    JSON_FINDINGS+=("{\"status\":\"fail\",\"section\":\"$(_json_escape "$CURRENT_SECTION")\",\"message\":\"$(_json_escape "$1")\"}")
+    JSON_FINDINGS+=("{\"severity\":\"FAIL\",\"section\":\"$(_json_escape "$CURRENT_SECTION")\",\"message\":\"$(_json_escape "$1")\"}")
   else
-    echo -e "  ${RED}🔴 FAIL${RST}  $1"
+    printf "  ${RED}🔴 FAIL${RST}  %s\n" "$1"
   fi
 }
 warn() {
   ((WARN++))
   WARN_MSGS+=("$1")
   if $JSON_MODE; then
-    JSON_FINDINGS+=("{\"status\":\"warn\",\"section\":\"$(_json_escape "$CURRENT_SECTION")\",\"message\":\"$(_json_escape "$1")\"}")
+    JSON_FINDINGS+=("{\"severity\":\"WARN\",\"section\":\"$(_json_escape "$CURRENT_SECTION")\",\"message\":\"$(_json_escape "$1")\"}")
   else
-    echo -e "  ${YLW}⚠️  WARN${RST}  $1"
+    printf "  ${YLW}⚠️  WARN${RST}  %s\n" "$1"
   fi
 }
 info() {
   ((INFO++))
   if $JSON_MODE; then
-    JSON_FINDINGS+=("{\"status\":\"info\",\"section\":\"$(_json_escape "$CURRENT_SECTION")\",\"message\":\"$(_json_escape "$1")\"}")
+    JSON_FINDINGS+=("{\"severity\":\"INFO\",\"section\":\"$(_json_escape "$CURRENT_SECTION")\",\"message\":\"$(_json_escape "$1")\"}")
   else
-    echo -e "  ${CYN}ℹ️  INFO${RST}  $1"
+    printf "  ${CYN}ℹ️  INFO${RST}  %s\n" "$1"
   fi
 }
 header() {
   CURRENT_SECTION="$2"
   if ! $JSON_MODE; then
-    echo -e "\n${BOLD}${MAG}━━━ [$1/$TOTAL_SECTIONS] $2 ━━━${RST}"
+    printf "\n${BOLD}${MAG}━━━ [%s/%s] %s ━━━${RST}\n" "$1" "$TOTAL_SECTIONS" "$2"
   fi
 }
+sub_header() { $JSON_MODE || printf "  ${CYN}--- %s ---${RST}\n" "$1"; }
+txt() { $JSON_MODE || printf "%s\n" "$1"; }
+txtf() { $JSON_MODE || printf "$@"; }
 
 # --- Dependency Check Helper ---
 require_cmd() {
@@ -150,8 +154,13 @@ require_cmd() {
 # --- SSH config helper: read effective value from sshd_config + includes ---
 sshd_cfg_val() {
   local key="$1" val=""
-  if [[ -f /etc/ssh/sshd_config ]]; then
-    val=$(grep -hiE "^\s*${key}\s+" /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null | tail -1 | awk '{print $2}')
+  # Primary: sshd's own parser (handles includes, Match, ordering correctly)
+  if command -v sshd &>/dev/null; then
+    val=$(sshd -T 2>/dev/null | grep -i "^${key} " | head -1 | awk '{print $2}')
+  fi
+  # Fallback: manual grep (includes first, then main config — first match wins)
+  if [[ -z "$val" && -f /etc/ssh/sshd_config ]]; then
+    val=$(grep -hiE "^\s*${key}\s+" /etc/ssh/sshd_config.d/*.conf /etc/ssh/sshd_config 2>/dev/null | head -1 | awk '{print $2}')
   fi
   echo "${val:-}"
 }
@@ -244,7 +253,7 @@ _gsettings_for_users() {
   done < /etc/passwd
 }
 
-[[ $EUID -ne 0 ]] && { echo "Requires root. Run with: sudo bash $0"; exit 1; }
+[[ $EUID -ne 0 ]] && { echo "Requires root. Run with: sudo bash \"$0\""; exit 1; }
 
 # --- Distro Detection ---
 DISTRO="unknown"
@@ -254,11 +263,13 @@ if [[ -f /etc/os-release ]]; then
   . /etc/os-release
   DISTRO_PRETTY="${PRETTY_NAME:-$NAME}"
   case "${ID,,}" in
-    fedora)          DISTRO="fedora"; DISTRO_FAMILY="rhel" ;;
-    rhel|centos|rocky|alma|almalinux) DISTRO="${ID,,}"; DISTRO_FAMILY="rhel" ;;
-    ubuntu)          DISTRO="ubuntu"; DISTRO_FAMILY="debian" ;;
-    debian)          DISTRO="debian"; DISTRO_FAMILY="debian" ;;
-    *)               DISTRO="${ID,,}"; DISTRO_FAMILY="unknown" ;;
+    fedora)                                DISTRO="fedora"; DISTRO_FAMILY="rhel" ;;
+    rhel|centos|rocky|alma|almalinux)      DISTRO="${ID,,}"; DISTRO_FAMILY="rhel" ;;
+    ubuntu)                                DISTRO="ubuntu"; DISTRO_FAMILY="debian" ;;
+    debian|linuxmint|pop)                  DISTRO="${ID,,}"; DISTRO_FAMILY="debian" ;;
+    arch|manjaro|endeavouros|artix|garuda) DISTRO="${ID,,}"; DISTRO_FAMILY="arch" ;;
+    opensuse*|sles|suse)                   DISTRO="${ID,,}"; DISTRO_FAMILY="suse" ;;
+    *)                                     DISTRO="${ID,,}"; DISTRO_FAMILY="unknown" ;;
   esac
 fi
 
@@ -316,29 +327,32 @@ has_nft_drop_on_phys() {
 
 get_killswitch_tables() {
   require_cmd nft || return
-  nft list tables 2>/dev/null | while read -r _ family table; do
+  while read -r _ family table; do
     [[ -z "$table" ]] && continue
     if nft list table "$family" "$table" 2>/dev/null | grep -qE "oifname \"$PRIMARY_IFACE\".*drop"; then
       echo "$family $table"
     fi
-  done
+  done < <(nft list tables 2>/dev/null)
 }
 
 if ! $JSON_MODE; then
-echo -e "${BOLD}${WHT}"
+printf "${BOLD}${WHT}\n"
 echo "╔══════════════════════════════════════════════════════════════════════╗"
 echo "║  🛡️ NoID Privacy for Linux v${NOID_PRIVACY_VERSION} — Privacy & Security Audit"
 echo "║  $NOW | $HOSTNAME | $KERNEL"
 echo "║  Arch: $ARCH | Distro: $DISTRO_PRETTY"
 echo "║  Checks: 300+ across $TOTAL_SECTIONS sections"
 echo "╚══════════════════════════════════════════════════════════════════════╝"
-echo -e "${RST}"
+printf "${RST}\n"
 fi
 
-if ! $JSON_MODE && [[ "$DISTRO_FAMILY" == "debian" ]]; then
-  echo -e "  ${YLW}⚠️  Partial support for $DISTRO_PRETTY — SELinux checks will be skipped${RST}"
-elif ! $JSON_MODE && [[ "$DISTRO_FAMILY" == "unknown" ]]; then
-  echo -e "  ${YLW}⚠️  Unknown distro ($DISTRO_PRETTY) — some checks may not apply${RST}"
+if ! $JSON_MODE; then
+  case "$DISTRO_FAMILY" in
+    rhel|debian) ;; # Full support
+    arch)    printf "  ${YLW}⚠️  Arch-based distro ($DISTRO_PRETTY) — some package checks adapted${RST}\n" ;;
+    suse)    printf "  ${YLW}⚠️  SUSE-based distro ($DISTRO_PRETTY) — some package checks adapted${RST}\n" ;;
+    unknown) printf "  ${YLW}⚠️  Unknown distro ($DISTRO_PRETTY) — some checks may not apply${RST}\n" ;;
+  esac
 fi
 
 ###############################################################################
@@ -401,11 +415,19 @@ for PARAM in "init_on_alloc=1" "init_on_free=1" "slab_nomerge" "pti=on" "vsyscal
 done
 
 # Grub cmdline security params (new)
-for PARAM in "iommu=force" "lockdown=confidentiality" "spec_store_bypass_disable=on"; do
+for PARAM in "spec_store_bypass_disable=on"; do
   if echo "$CMDLINE" | grep -qw "$PARAM"; then
     pass "Boot security param: $PARAM"
   else
     warn "Boot security param missing: $PARAM"
+  fi
+done
+# Optional params (can break NVIDIA/hardware on desktop systems)
+for PARAM in "iommu=force" "lockdown=confidentiality"; do
+  if echo "$CMDLINE" | grep -qw "$PARAM"; then
+    pass "Boot security param: $PARAM"
+  else
+    info "Boot security param not set: $PARAM (optional — may break NVIDIA/hardware)"
   fi
 done
 
@@ -424,10 +446,12 @@ if require_cmd systemd-analyze; then
   info "Boot: $BOOT_TIME"
 
   # Top 5 slowest boot services
-  echo -e "  ${CYN}--- Top 5 slowest boot services ---${RST}"
-  systemd-analyze blame 2>/dev/null | head -5 | while read -r line; do
-    echo -e "       $line"
-  done
+  sub_header "Top 5 slowest boot services"
+  if ! $JSON_MODE; then
+    while read -r line; do
+      printf "       %s\n" "$line"
+    done < <(systemd-analyze blame 2>/dev/null | head -5)
+  fi
 fi
 
 # GRUB Password
@@ -447,21 +471,24 @@ fi # end kernel
 
 ###############################################################################
 if ! should_skip "selinux"; then
-if [[ "$DISTRO_FAMILY" != "debian" ]]; then
+
+# Detect which MAC system is available (tool-based, not distro-based)
+HAS_SELINUX=false
+HAS_APPARMOR=false
+require_cmd getenforce && HAS_SELINUX=true
+require_cmd aa-status && HAS_APPARMOR=true
+
+if $HAS_SELINUX; then
 header "02" "SELINUX & MAC"
 ###############################################################################
 
-if require_cmd getenforce; then
-  SE_STATUS=$(getenforce)
-  if [[ "$SE_STATUS" == "Enforcing" ]]; then
-    pass "SELinux: Enforcing"
-  elif [[ "$SE_STATUS" == "Permissive" ]]; then
-    fail "SELinux: Permissive (logging only, not blocking!)"
-  else
-    fail "SELinux: Disabled"
-  fi
+SE_STATUS=$(getenforce)
+if [[ "$SE_STATUS" == "Enforcing" ]]; then
+  pass "SELinux: Enforcing"
+elif [[ "$SE_STATUS" == "Permissive" ]]; then
+  fail "SELinux: Permissive (logging only, not blocking!)"
 else
-  fail "SELinux not installed"
+  fail "SELinux: Disabled"
 fi
 
 # SELinux Booleans (dangerous ones)
@@ -491,27 +518,22 @@ if require_cmd ausearch; then
   fi
 fi
 
-else
-  # Debian/Ubuntu — check AppArmor instead
+elif $HAS_APPARMOR; then
   header "02" "APPARMOR & MAC"
 
-  if require_cmd aa-status; then
-    AA_ENFORCED=$(aa-status 2>/dev/null | grep -c "enforce" || echo 0)
-    AA_COMPLAIN=$(aa-status 2>/dev/null | grep -c "complain" || echo 0)
-    if [[ "$AA_ENFORCED" -gt 0 ]]; then
-      pass "AppArmor: $AA_ENFORCED profiles enforcing, $AA_COMPLAIN complaining"
-    else
-      warn "AppArmor: no enforcing profiles"
-    fi
-  elif require_cmd apparmor_status; then
-    if apparmor_status 2>/dev/null | grep -q "profiles are in enforce mode"; then
-      pass "AppArmor: active"
-    else
-      warn "AppArmor: not fully enforcing"
-    fi
+  AA_ENFORCED=$(aa-status 2>/dev/null | grep -c "enforce" || true)
+  AA_ENFORCED=${AA_ENFORCED:-0}
+  AA_COMPLAIN=$(aa-status 2>/dev/null | grep -c "complain" || true)
+  AA_COMPLAIN=${AA_COMPLAIN:-0}
+  if [[ "$AA_ENFORCED" -gt 0 ]]; then
+    pass "AppArmor: $AA_ENFORCED profiles enforcing, $AA_COMPLAIN complaining"
   else
-    warn "No MAC system (SELinux/AppArmor) detected"
+    warn "AppArmor: no enforcing profiles"
   fi
+
+else
+  header "02" "MANDATORY ACCESS CONTROL"
+  warn "No MAC system (SELinux/AppArmor) detected"
 fi
 fi # end selinux
 
@@ -532,7 +554,7 @@ if require_cmd firewall-cmd && systemctl is-active firewalld &>/dev/null; then
     IFACES=$(firewall-cmd --zone="$ZONE" --list-interfaces --permanent 2>/dev/null || echo "")
 
     if [[ -n "$IFACES" ]] || [[ "$ZONE" == "public" ]] || [[ "$ZONE" == "FedoraWorkstation" ]]; then
-      if [[ "$TARGET" == "DROP" || "$TARGET" == "%%REJECT%%" ]]; then
+      if [[ "$TARGET" == "DROP" || "$TARGET" == "REJECT" || "$TARGET" == "%%REJECT%%" ]]; then
         pass "Zone $ZONE: target=$TARGET"
       else
         warn "Zone $ZONE: target=$TARGET (not DROP/REJECT)"
@@ -555,16 +577,23 @@ if require_cmd firewall-cmd && systemctl is-active firewalld &>/dev/null; then
 
   # Active Zones
   ACTIVE_ZONES=$(firewall-cmd --get-active-zones 2>/dev/null)
-  info "Active zones:\n$ACTIVE_ZONES"
+  info "Active zones:"
+  if ! $JSON_MODE; then
+    while IFS= read -r zline; do
+      [[ -n "$zline" ]] && printf "  %s\n" "$zline"
+    done <<< "$ACTIVE_ZONES"
+  fi
 
   # Rich Rules
   RICH_RULES=$(firewall-cmd --list-rich-rules 2>/dev/null || echo "")
   if [[ -n "$RICH_RULES" ]]; then
     RICH_COUNT=$(echo "$RICH_RULES" | wc -l)
     info "Rich rules: $RICH_COUNT"
-    echo "$RICH_RULES" | head -5 | while read -r rule; do
-      echo -e "       $rule"
-    done
+    if ! $JSON_MODE; then
+      while read -r rule; do
+        printf "       %s\n" "$rule"
+      done < <(echo "$RICH_RULES" | head -5)
+    fi
   fi
 
   # Forward Ports
@@ -586,7 +615,8 @@ elif require_cmd ufw; then
   fi
   info "Firewall: ufw (firewalld not available)"
 elif require_cmd iptables; then
-  IPTABLES_RULES=$(iptables -L -n 2>/dev/null | grep -c "^[A-Z]" || echo 0)
+  IPTABLES_RULES=$(iptables -L -n 2>/dev/null | grep -c "^[A-Z]" || true)
+  IPTABLES_RULES=${IPTABLES_RULES:-0}
   if [[ "$IPTABLES_RULES" -gt 3 ]]; then
     pass "iptables: $IPTABLES_RULES chains with rules"
   else
@@ -635,10 +665,11 @@ if require_cmd nft; then
       ALL_RULES+=$(nft list table "$ks_family" "$ks_table" 2>/dev/null | grep "oifname")
       ALL_RULES+=$'\n'
     done <<< "$KS_TABLES"
-    RULE_COUNT=$(echo "$ALL_RULES" | grep -c "oifname" || echo 0)
+    RULE_COUNT=$(echo "$ALL_RULES" | grep -c "oifname" || true)
+    RULE_COUNT=${RULE_COUNT:-0}
     UNIQUE_RULES=$(echo "$ALL_RULES" | grep "oifname" | sort -u | wc -l)
     if [[ "$RULE_COUNT" -ne "$UNIQUE_RULES" ]]; then
-      warn "Kill-switch: $RULE_COUNT rules ($UNIQUE_RULES unique) — duplicates present"
+      info "Kill-switch: $RULE_COUNT rules ($UNIQUE_RULES unique) — duplicates from VPN management"
     else
       pass "Kill-switch: $RULE_COUNT rules (no duplicates)"
     fi
@@ -691,14 +722,14 @@ info "DNS servers: $DNS_SERVERS"
 VPN_DNS=false
 STUB_DNS=false
 for DNS in $(grep nameserver /etc/resolv.conf 2>/dev/null | awk '{print $2}'); do
-  if [[ "$DNS" =~ ^10\. ]]; then
+  if [[ "$DNS" =~ ^10\. || "$DNS" =~ ^172\.(1[6-9]|2[0-9]|3[01])\. || "$DNS" =~ ^192\.168\. || "$DNS" =~ ^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\. ]]; then
     VPN_DNS=true
   elif [[ "$DNS" == "127.0.0.53" || "$DNS" == "127.0.0.54" ]]; then
     STUB_DNS=true
   fi
 done
 if $VPN_DNS; then
-  pass "DNS via VPN (10.x.x.x range)"
+  pass "DNS via VPN (private/CGNAT range)"
 elif $STUB_DNS && $VPN_UP; then
   pass "DNS via systemd-resolved (stub resolver — VPN routes DNS)"
 else
@@ -709,32 +740,35 @@ else
   fi
 fi
 
-# DNS Leak Test
-if require_cmd dig; then
-  RESOLVED_IP=$(dig +short whoami.akamai.net @ns1-1.akamaitech.net 2>/dev/null || echo "timeout")
-  if [[ "$RESOLVED_IP" != "timeout" && -n "$RESOLVED_IP" ]]; then
-    info "DNS leak test (public IP via DNS): $RESOLVED_IP"
+# DNS Leak Test & External IP (makes network requests — skippable with --skip netleaks)
+if ! should_skip "netleaks"; then
+  if require_cmd dig; then
+    RESOLVED_IP=$(dig +short whoami.akamai.net @ns1-1.akamaitech.net 2>/dev/null || echo "timeout")
+    if [[ "$RESOLVED_IP" != "timeout" && -n "$RESOLVED_IP" ]]; then
+      info "DNS leak test (public IP via DNS): $RESOLVED_IP"
+    fi
   fi
-fi
 
-# External IP
-if require_cmd curl; then
-  EXT_IP=$(curl -s --max-time 5 ifconfig.me 2>/dev/null || echo "timeout")
-  if [[ "$EXT_IP" != "timeout" ]]; then
-    info "Public IP (HTTP): $EXT_IP"
-    if [[ "$EXT_IP" =~ ^192\.168\. ]] || [[ "$EXT_IP" =~ ^10\. ]] || [[ "$EXT_IP" =~ ^172\.(1[6-9]|2[0-9]|3[01])\. ]]; then
-      fail "Public IP is private — VPN leak?"
+  if require_cmd curl; then
+    EXT_IP=$(curl -s --max-time 5 ifconfig.me 2>/dev/null || echo "timeout")
+    if [[ "$EXT_IP" != "timeout" ]]; then
+      info "Public IP (HTTP): $EXT_IP"
+      if [[ "$EXT_IP" =~ ^192\.168\. ]] || [[ "$EXT_IP" =~ ^10\. ]] || [[ "$EXT_IP" =~ ^172\.(1[6-9]|2[0-9]|3[01])\. ]]; then
+        fail "Public IP is private — VPN leak?"
+      fi
     fi
   fi
 fi
 
-# IPv6
+# IPv6 (filter link-local fe80 and multicast ff to avoid false positives)
 if [[ -f /proc/net/if_inet6 ]]; then
-  IPV6_COUNT=$(wc -l < /proc/net/if_inet6)
-  if [[ "$IPV6_COUNT" -gt 1 ]]; then
-    warn "IPv6 active ($IPV6_COUNT addresses) — leak risk"
+  IPV6_GLOBAL=$(grep -cvE '^fe80|^ff|^fd|^0000000000000000' /proc/net/if_inet6 2>/dev/null || true)
+  IPV6_GLOBAL=${IPV6_GLOBAL:-0}
+  IPV6_TOTAL=$(wc -l < /proc/net/if_inet6)
+  if [[ "$IPV6_GLOBAL" -gt 0 ]]; then
+    warn "IPv6 active ($IPV6_GLOBAL global addresses, $IPV6_TOTAL total) — leak risk"
   else
-    pass "IPv6: disabled/minimal"
+    pass "IPv6: disabled/minimal ($IPV6_TOTAL link-local only)"
   fi
 else
   pass "IPv6: completely disabled"
@@ -836,7 +870,7 @@ for KEY in "${!SYSCTL_CHECKS[@]}"; do
   fi
 done
 
-echo -e "\n  ${CYN}--- Strict/Optional ---${RST}"
+sub_header "Strict/Optional"
 for KEY in "${!SYSCTL_STRICT[@]}"; do
   EXPECTED="${SYSCTL_STRICT[$KEY]}"
   ACTUAL=$(sysctl -n "$KEY" 2>/dev/null || echo "N/A")
@@ -940,9 +974,11 @@ if [[ "$FAILED" -eq 0 ]]; then
 else
   svc_names=$(echo "$FAILED_SVCS" | awk '{print $2}' | tr '\n' ', ' | sed 's/,$//')
   fail "$FAILED failed services: $svc_names"
-  echo "$FAILED_SVCS" | while read -r line; do
-    echo -e "       $line"
-  done
+  if ! $JSON_MODE; then
+    while read -r line; do
+      printf "       %s\n" "$line"
+    done <<< "$FAILED_SVCS"
+  fi
 fi
 
 # Timer Units
@@ -956,24 +992,28 @@ if ! should_skip "ports"; then
 header "08" "OPEN PORTS & LISTENERS"
 ###############################################################################
 
-echo -e "  ${CYN}--- TCP ---${RST}"
+sub_header "TCP"
 while read -r line; do
   [[ -z "$line" ]] && continue
   ADDR=$(echo "$line" | awk '{print $4}')
   PROC=$(echo "$line" | grep -oP 'users:\(\("\K[^"]+' || echo "unknown")
-  if echo "$ADDR" | grep -qE "^(127\.|::1|\[::1\])"; then
+  if echo "$ADDR" | grep -qE "^(127\.|::1|\[::1\]|\[?::ffff:127\.)"; then
     pass "TCP $ADDR ($PROC) — localhost only"
   else
-    fail "TCP $ADDR ($PROC) — EXTERNALLY REACHABLE"
+    if has_nft_drop_on_phys; then
+      warn "TCP $ADDR ($PROC) — externally bound, but firewall/kill-switch blocks"
+    else
+      fail "TCP $ADDR ($PROC) — EXTERNALLY REACHABLE"
+    fi
   fi
 done < <(ss -tlnp 2>/dev/null | tail -n+2)
 
-echo -e "  ${CYN}--- UDP ---${RST}"
+sub_header "UDP"
 while read -r line; do
   [[ -z "$line" ]] && continue
   ADDR=$(echo "$line" | awk '{print $4}')
   PROC=$(echo "$line" | grep -oP 'users:\(\("\K[^"]+' || echo "kernel")
-  if echo "$ADDR" | grep -qE "^(127\.|::1|\[::1\])"; then
+  if echo "$ADDR" | grep -qE "^(127\.|::1|\[::1\]|\[?::ffff:127\.)"; then
     pass "UDP $ADDR ($PROC) — localhost only"
   elif echo "$PROC" | grep -qiE "wireguard|wg|vpn"; then
     pass "UDP $ADDR (VPN/WireGuard)"
@@ -989,13 +1029,13 @@ while read -r line; do
 done < <(ss -ulnp 2>/dev/null | tail -n+2)
 
 # Connections to unusual ports
-echo -e "  ${CYN}--- Unusual destination ports ---${RST}"
-UNUSUAL_PORTS=$(ss -tnp state established 2>/dev/null | awk '{print $5}' | grep -oP ':\K\d+$' | sort -n | uniq | while read -r port; do
+sub_header "Unusual destination ports"
+UNUSUAL_PORTS=$(while read -r port; do
   case "$port" in
     80|443|53|993|465|8443|22|587|143|995|5222|5223) ;;
     *) echo "$port" ;;
   esac
-done)
+done < <(ss -tnp state established 2>/dev/null | awk '{print $5}' | grep -oP ':\K\d+$' | sort -n | uniq))
 if [[ -n "$UNUSUAL_PORTS" ]]; then
   info "Connections to non-standard ports: $(echo $UNUSUAL_PORTS | tr '\n' ' ')"
 else
@@ -1083,12 +1123,14 @@ else
     fi
 
     # SSH Key Strength
-    echo -e "  ${CYN}--- SSH Key Strength ---${RST}"
+    sub_header "SSH Key Strength"
     for USER_HOME in /home/* /root; do
       for KEY in "$USER_HOME"/.ssh/*.pub; do
         [[ -f "$KEY" ]] || continue
         BITS=$(ssh-keygen -l -f "$KEY" 2>/dev/null | awk '{print $1}')
         TYPE=$(ssh-keygen -l -f "$KEY" 2>/dev/null | awk '{print $4}' | tr -d '()')
+        # RSA thresholds: <2048 = insecure (NIST deprecated), <4096 = acceptable but 4096 recommended
+        # Ed25519/ECDSA keys are always considered strong regardless of bit size
         if [[ "$TYPE" == "RSA" ]] && [[ "${BITS:-0}" -lt 2048 ]]; then
           fail "Weak SSH key: $KEY ($BITS bit $TYPE — minimum 2048)"
         elif [[ "$TYPE" == "RSA" ]] && [[ "${BITS:-0}" -lt 4096 ]]; then
@@ -1163,15 +1205,15 @@ if [[ "$UID0_COUNT" -eq 1 ]]; then
   pass "Only 1 UID-0 account (root)"
 else
   fail "$UID0_COUNT UID-0 accounts!"
-  awk -F: '$3==0 {print "       " $1}' /etc/passwd
+  $JSON_MODE || awk -F: '$3==0 {print "       " $1}' /etc/passwd
 fi
 
 # Empty Passwords
-EMPTY_PW=$(awk -F: '($2 == "" || $2 == "!!" || $2 == "!" ) && $1 != "root" {print $1}' /etc/shadow 2>/dev/null | wc -l)
+EMPTY_PW=$(awk -F: '$2 == "" && $1 != "root" {print $1}' /etc/shadow 2>/dev/null | wc -l)
 if [[ "$EMPTY_PW" -eq 0 ]]; then
   pass "No accounts with empty password"
 else
-  fail "$EMPTY_PW accounts with empty/locked password"
+  fail "$EMPTY_PW accounts with empty password (no authentication required!)"
 fi
 
 # PAM nullok
@@ -1202,9 +1244,11 @@ info "Wheel/sudo members: $WHEEL_MEMBERS"
 # Shell users
 SHELL_USERS=$(grep -v '/nologin\|/false\|/sync\|/shutdown\|/halt' /etc/passwd | wc -l)
 info "Users with login shell: $SHELL_USERS"
-grep -v '/nologin\|/false\|/sync\|/shutdown\|/halt' /etc/passwd | while IFS=: read -r user _ uid _ _ _ shell; do
-  echo -e "       $user (UID=$uid, Shell=$shell)"
-done
+if ! $JSON_MODE; then
+  while IFS=: read -r user _ uid _ _ _ shell; do
+    printf "       %s (UID=%s, Shell=%s)\n" "$user" "$uid" "$shell"
+  done < <(grep -v '/nologin\|/false\|/sync\|/shutdown\|/halt' /etc/passwd)
+fi
 
 # Password Aging
 PASS_MAX=$(grep "^PASS_MAX_DAYS" /etc/login.defs | awk '{print $2}')
@@ -1235,7 +1279,7 @@ if require_cmd faillock; then
 fi
 
 # History File Permissions (new)
-echo -e "  ${CYN}--- History File Permissions ---${RST}"
+sub_header "History File Permissions"
 for USER_HOME in /home/* /root; do
   for HIST in .bash_history .zsh_history; do
     if [[ -f "$USER_HOME/$HIST" ]]; then
@@ -1257,7 +1301,7 @@ header "12" "FILESYSTEM SECURITY"
 ###############################################################################
 
 # SUID Files
-SUID_COUNT=$(find / -perm -4000 -type f 2>/dev/null | wc -l)
+SUID_COUNT=$(find / -xdev -perm -4000 -type f 2>/dev/null | wc -l)
 if [[ "$SUID_COUNT" -le 30 ]]; then
   pass "SUID files: $SUID_COUNT"
 else
@@ -1265,7 +1309,7 @@ else
 fi
 
 # SGID Files
-SGID_COUNT=$(find / -perm -2000 -type f 2>/dev/null | wc -l)
+SGID_COUNT=$(find / -xdev -perm -2000 -type f 2>/dev/null | wc -l)
 if [[ "$SGID_COUNT" -le 15 ]]; then
   pass "SGID files: $SGID_COUNT"
 else
@@ -1278,9 +1322,11 @@ if [[ "$WW_COUNT" -eq 0 ]]; then
   pass "World-writable files: 0"
 else
   fail "World-writable files: $WW_COUNT"
-  while read -r f; do
-    echo -e "       $f"
-  done < <(find / -xdev -perm -0002 -type f ! -path "/proc/*" ! -path "/sys/*" ! -path "/dev/*" 2>/dev/null | head -5)
+  if ! $JSON_MODE; then
+    while read -r f; do
+      printf "       %s\n" "$f"
+    done < <(find / -xdev -perm -0002 -type f ! -path "/proc/*" ! -path "/sys/*" ! -path "/dev/*" 2>/dev/null | head -5)
+  fi
 fi
 
 # Unowned Files
@@ -1320,8 +1366,8 @@ fi
 # Important file permissions
 declare -A PERM_CHECKS=(
   ["/etc/passwd"]="644"
-  ["/etc/shadow"]="000"
-  ["/etc/gshadow"]="000"
+  ["/etc/shadow"]="640"
+  ["/etc/gshadow"]="640"
   ["/etc/group"]="644"
   ["/boot/grub2/grub.cfg"]="600"
   ["/etc/crontab"]="600"
@@ -1341,7 +1387,7 @@ for FILE in "${!PERM_CHECKS[@]}"; do
 done
 
 # Banner Check (new)
-echo -e "  ${CYN}--- Login Banners ---${RST}"
+sub_header "Login Banners"
 for BANNER_FILE in /etc/issue /etc/issue.net /etc/motd; do
   if [[ -f "$BANNER_FILE" ]] && [[ -s "$BANNER_FILE" ]]; then
     if grep -qiE "(kernel|version|ubuntu|fedora|centos|debian|rhel)" "$BANNER_FILE" 2>/dev/null; then
@@ -1397,7 +1443,8 @@ if [[ -f /proc/sys/kernel/random/entropy_avail ]]; then
 fi
 
 # Swap Encryption (new)
-SWAP_ACTIVE=$(swapon --show=NAME --noheadings 2>/dev/null | grep -c . || echo 0)
+SWAP_ACTIVE=$(swapon --show=NAME --noheadings 2>/dev/null | grep -c . || true)
+SWAP_ACTIVE=${SWAP_ACTIVE:-0}
 SWAP_ACTIVE="${SWAP_ACTIVE//[^0-9]/}"
 SWAP_ACTIVE="${SWAP_ACTIVE:-0}"
 SWAP_DEVS=$(swapon --show=NAME --noheadings 2>/dev/null)
@@ -1409,6 +1456,14 @@ if [[ "$SWAP_ACTIVE" -gt 0 ]]; then
       PARENT=$(lsblk -no PKNAME "$swapdev" 2>/dev/null | head -1)
       if [[ -n "$PARENT" ]] && lsblk -no TYPE "/dev/$PARENT" 2>/dev/null | grep -q crypt; then
         : # parent is encrypted
+      elif [[ -f "$swapdev" ]]; then
+        # Swapfile: check if the filesystem it resides on is LUKS-encrypted
+        SWAP_FS_DEV=$(df -P "$swapdev" 2>/dev/null | awk 'NR==2{print $1}')
+        if [[ -n "$SWAP_FS_DEV" ]] && lsblk -no TYPE "$SWAP_FS_DEV" 2>/dev/null | grep -q crypt; then
+          : # swapfile on LUKS volume — encrypted at rest
+        else
+          SWAP_ENCRYPTED=false
+        fi
       else
         SWAP_ENCRYPTED=false
       fi
@@ -1437,7 +1492,14 @@ elif require_cmd dnf; then
   UPDATES=$(dnf check-update --quiet 2>/dev/null | grep -v "^$" | wc -l)
 elif require_cmd apt; then
   apt update -qq 2>/dev/null
-  UPDATES=$(apt list --upgradable 2>/dev/null | grep -c "upgradable" || echo 0)
+  UPDATES=$(apt list --upgradable 2>/dev/null | grep -c "upgradable" || true)
+  UPDATES=${UPDATES:-0}
+elif require_cmd pacman; then
+  UPDATES=$(pacman -Qu 2>/dev/null | wc -l || true)
+  UPDATES=${UPDATES:-0}
+elif require_cmd zypper; then
+  UPDATES=$(zypper -q lu 2>/dev/null | grep -c "^v" || true)
+  UPDATES=${UPDATES:-0}
 fi
 
 if [[ "$UPDATES" == "0" ]]; then
@@ -1451,16 +1513,43 @@ else
 fi
 
 # Security Updates
+SEC_CHECKED=false
 SEC_UPDATES=0
 if require_cmd dnf5; then
-  SEC_UPDATES=$(dnf5 check-upgrade --security --quiet 2>/dev/null | grep -v "^$" | wc -l || echo 0)
+  SEC_CHECKED=true
+  SEC_UPDATES=$(dnf5 check-upgrade --security --quiet 2>/dev/null | grep -v "^$" | wc -l || true)
+  SEC_UPDATES=${SEC_UPDATES:-0}
 elif require_cmd dnf; then
-  SEC_UPDATES=$(dnf updateinfo list --security 2>/dev/null | grep -c "/" || echo 0)
+  SEC_CHECKED=true
+  SEC_UPDATES=$(dnf updateinfo list --security 2>/dev/null | grep -c "/" || true)
+  SEC_UPDATES=${SEC_UPDATES:-0}
+elif require_cmd apt-get; then
+  SEC_CHECKED=true
+  # Ubuntu: use apt-check if available (update-notifier-common), fallback to apt-get -s
+  if [[ -x /usr/lib/update-notifier/apt-check ]]; then
+    SEC_UPDATES=$(/usr/lib/update-notifier/apt-check --human-readable 2>/dev/null | grep -oP '^\d+(?=.*security)' || true)
+    SEC_UPDATES=${SEC_UPDATES:-0}
+  else
+    SEC_UPDATES=$(apt-get upgrade -s 2>/dev/null | grep -ciE "^Inst.*security" || true)
+    SEC_UPDATES=${SEC_UPDATES:-0}
+  fi
+elif require_cmd pacman; then
+  SEC_CHECKED=true
+  # Arch: rolling release — all pending updates may contain security fixes
+  SEC_UPDATES="${UPDATES:-0}"
+elif require_cmd zypper; then
+  SEC_CHECKED=true
+  SEC_UPDATES=$(zypper -q lp --severity critical --severity important 2>/dev/null | grep -c "^v" || true)
+  SEC_UPDATES=${SEC_UPDATES:-0}
 fi
-if [[ "${SEC_UPDATES:-0}" -gt 0 ]]; then
-  fail "Security updates: $SEC_UPDATES"
+if $SEC_CHECKED; then
+  if [[ "${SEC_UPDATES:-0}" -gt 0 ]]; then
+    fail "Security updates: $SEC_UPDATES"
+  else
+    pass "No pending security updates"
+  fi
 else
-  pass "No pending security updates"
+  info "Security updates: could not check (unsupported package manager)"
 fi
 
 # Package count
@@ -1470,6 +1559,11 @@ if require_cmd rpm; then
 elif require_cmd dpkg; then
   PKG_COUNT=$(dpkg -l 2>/dev/null | grep -c "^ii")
   info "Installed packages: $PKG_COUNT"
+elif require_cmd pacman; then
+  PKG_COUNT=$(pacman -Q 2>/dev/null | wc -l)
+  info "Installed packages: $PKG_COUNT"
+else
+  info "Package count: unsupported package manager"
 fi
 
 # RPM GPG Verification
@@ -1484,6 +1578,36 @@ if require_cmd rpm; then
   # RPM GPG Key Count (new)
   GPG_KEY_COUNT=$(rpm -qa gpg-pubkey 2>/dev/null | wc -l)
   info "RPM GPG keys imported: $GPG_KEY_COUNT"
+elif require_cmd dpkg; then
+  # Debian/Ubuntu: check for unauthenticated packages and GPG key count
+  APT_NOAUTH=$(apt list --installed 2>/dev/null | grep -c "\[.*local\]" || true)
+  APT_NOAUTH=${APT_NOAUTH:-0}
+  if [[ "$APT_NOAUTH" -eq 0 ]]; then
+    pass "All APT packages from authenticated sources"
+  else
+    warn "$APT_NOAUTH APT packages from unauthenticated/local sources"
+  fi
+
+  # APT trusted key count
+  APT_KEYS=$(apt-key list 2>/dev/null | grep -c "^pub" || true)
+  if [[ "${APT_KEYS:-0}" -gt 0 ]]; then
+    info "APT trusted keys: $APT_KEYS"
+  else
+    # Newer systems use /etc/apt/trusted.gpg.d/
+    APT_KEYS=$(find /etc/apt/trusted.gpg.d/ /usr/share/keyrings/ -name "*.gpg" -o -name "*.asc" 2>/dev/null | wc -l || true)
+    info "APT trusted keyrings: ${APT_KEYS:-0}"
+  fi
+elif require_cmd pacman; then
+  # Arch: check pacman signature enforcement
+  if grep -qE "^SigLevel\s*=.*Required" /etc/pacman.conf 2>/dev/null; then
+    pass "Pacman: package signature verification required"
+  elif grep -qE "^SigLevel\s*=.*Never" /etc/pacman.conf 2>/dev/null; then
+    fail "Pacman: package signature verification DISABLED"
+  else
+    info "Pacman: default signature level (Optional)"
+  fi
+else
+  info "Package signature verification: not available for this package manager"
 fi
 
 # Automated Security Updates (new)
@@ -1491,6 +1615,18 @@ if systemctl is-active dnf-automatic.timer &>/dev/null || systemctl is-enabled d
   pass "Automated updates: dnf-automatic enabled"
 elif systemctl is-active unattended-upgrades &>/dev/null || [[ -f /etc/apt/apt.conf.d/20auto-upgrades ]]; then
   pass "Automated updates: unattended-upgrades active"
+elif require_cmd pacman; then
+  if systemctl is-active pacman-filesdb-refresh.timer &>/dev/null; then
+    info "Automated updates: pacman-filesdb-refresh timer active (partial)"
+  else
+    info "Automated updates: Arch uses rolling updates — manual 'pacman -Syu' recommended"
+  fi
+elif require_cmd zypper; then
+  if systemctl is-active packagekit.service &>/dev/null; then
+    pass "Automated updates: PackageKit service active"
+  else
+    warn "No automated security update mechanism detected"
+  fi
 else
   warn "No automated security update mechanism detected"
 fi
@@ -1510,16 +1646,19 @@ header "15" "ROOTKIT & MALWARE SCAN"
 
 # rkhunter
 if require_cmd rkhunter; then
-  echo -e "  ${CYN}Running rkhunter...${RST}"
+  $JSON_MODE || printf "  ${CYN}Running rkhunter...${RST}\n"
   RKH_OUT=$(rkhunter --check --skip-keypress --report-warnings-only 2>/dev/null || true)
-  RKH_WARNS=$(echo "$RKH_OUT" | grep -c "Warning:" || echo 0)
+  RKH_WARNS=$(echo "$RKH_OUT" | grep -c "Warning:" || true)
+  RKH_WARNS=${RKH_WARNS:-0}
   if [[ "$RKH_WARNS" -eq 0 ]]; then
     pass "rkhunter: clean"
   else
     warn "rkhunter: $RKH_WARNS warnings"
-    echo "$RKH_OUT" | grep "Warning:" | head -5 | while read -r w; do
-      echo -e "       $w"
-    done
+    if ! $JSON_MODE; then
+      while read -r w; do
+        printf "       %s\n" "$w"
+      done < <(echo "$RKH_OUT" | grep "Warning:" | head -5)
+    fi
   fi
 else
   info "rkhunter not installed — skipped"
@@ -1527,7 +1666,7 @@ fi
 
 # chkrootkit with false-positive filter
 if require_cmd chkrootkit; then
-  echo -e "  ${CYN}Running chkrootkit...${RST}"
+  $JSON_MODE || printf "  ${CYN}Running chkrootkit...${RST}\n"
   CHKRK_OUT=$(chkrootkit 2>/dev/null || true)
   # Filter known false positives
   CHKRK_FP_PATTERN="bindshell|sniffer|chkutmp|w55808|slapper|scalper|amd|wted|Xor\.DDoS"
@@ -1537,27 +1676,29 @@ if require_cmd chkrootkit; then
     pass "chkrootkit: clean (0 real INFECTED, $CHKRK_FP known false positives filtered)"
   else
     fail "chkrootkit: $CHKRK_INFECTED INFECTED (after filtering $CHKRK_FP known FPs)"
-    echo "$CHKRK_OUT" | grep "INFECTED" | grep -viE "bindshell|sniffer|chkutmp|w55808|slapper|scalper|amd|wted" | head -5 | while read -r i; do
-      echo -e "       $i"
-    done
+    if ! $JSON_MODE; then
+      while read -r i; do
+        printf "       %s\n" "$i"
+      done < <(echo "$CHKRK_OUT" | grep "INFECTED" | grep -viE "bindshell|sniffer|chkutmp|w55808|slapper|scalper|amd|wted" | head -5)
+    fi
   fi
 else
   info "chkrootkit not installed — skipped"
 fi
 
 # Suspect Cron Jobs
-echo -e "  ${CYN}--- Cron jobs (all users) ---${RST}"
+sub_header "Cron jobs (all users)"
 for USER_HOME in /home/* /root; do
   USER=$(basename "$USER_HOME")
   CRONTAB=$(crontab -l -u "$USER" 2>/dev/null | grep -v "^#" | grep -v "^$" || true)
   if [[ -n "$CRONTAB" ]]; then
     info "Crontab $USER:"
-    echo "$CRONTAB" | while read -r line; do
-      echo -e "       $line"
+    while read -r line; do
+      $JSON_MODE || printf "       %s\n" "$line"
       if echo "$line" | grep -qiE "curl|wget|nc |ncat|python.*http|bash.*http|/dev/tcp"; then
         warn "Suspicious cron entry: $line"
       fi
-    done
+    done <<< "$CRONTAB"
   fi
 done
 for CRONDIR in /etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/cron.weekly /etc/cron.monthly; do
@@ -1580,7 +1721,9 @@ if [[ -z "$SUSPECT_PROCS" ]]; then
   pass "No suspicious processes"
 else
   fail "Suspicious processes found:"
-  echo "$SUSPECT_PROCS" | while read -r p; do echo -e "       $p"; done
+  if ! $JSON_MODE; then
+    while read -r p; do printf "       %s\n" "$p"; done <<< "$SUSPECT_PROCS"
+  fi
 fi
 
 # Processes running as root
@@ -1605,9 +1748,11 @@ if [[ "$DELETED_BINS" -eq 0 ]]; then
   pass "No deleted binaries running"
 else
   warn "Deleted binaries running: $DELETED_BINS"
-  ls -l /proc/*/exe 2>/dev/null | grep "(deleted)" | head -5 | while read -r d; do
-    echo -e "       $d"
-  done
+  if ! $JSON_MODE; then
+    while read -r d; do
+      printf "       %s\n" "$d"
+    done < <(ls -l /proc/*/exe 2>/dev/null | grep "(deleted)" | head -5)
+  fi
 fi
 
 fi # end processes
@@ -1619,12 +1764,13 @@ header "17" "NETWORK SECURITY (Advanced)"
 
 # Established Connections
 ESTAB=$(ss -tnp state established 2>/dev/null | tail -n+2)
-ESTAB_COUNT=$(echo "$ESTAB" | grep -c . || echo 0)
+ESTAB_COUNT=$(echo "$ESTAB" | grep -c . || true)
+ESTAB_COUNT=${ESTAB_COUNT:-0}
 info "Established TCP connections: $ESTAB_COUNT"
-if [[ "$ESTAB_COUNT" -gt 0 ]]; then
-  echo "$ESTAB" | head -10 | while read -r line; do
-    echo -e "       $line"
-  done
+if [[ "$ESTAB_COUNT" -gt 0 ]] && ! $JSON_MODE; then
+  while read -r line; do
+    printf "       %s\n" "$line"
+  done < <(echo "$ESTAB" | head -10)
 fi
 
 # ICMP Redirect
@@ -1636,7 +1782,7 @@ else
 fi
 
 # TCP Wrappers (new)
-echo -e "  ${CYN}--- TCP Wrappers ---${RST}"
+sub_header "TCP Wrappers"
 if [[ -f /etc/hosts.allow ]]; then
   ALLOW_RULES=$(grep -v "^#" /etc/hosts.allow 2>/dev/null | grep -v "^$" | wc -l)
   DENY_RULES=$(grep -v "^#" /etc/hosts.deny 2>/dev/null | grep -v "^$" | wc -l)
@@ -1700,7 +1846,8 @@ else
   fail "Journal errors (1h): $JOURNAL_ERR"
 fi
 
-JOURNAL_CRIT=$(journalctl -p crit --since "24 hours ago" --no-pager -q 2>/dev/null | wc -l | ccount)
+JOURNAL_CRIT=$(journalctl -p crit --since "24 hours ago" --no-pager -q 2>/dev/null | grep -cvE "sudo|password is required|auth could not identify" || true)
+JOURNAL_CRIT=${JOURNAL_CRIT:-0}
 if [[ "$JOURNAL_CRIT" -eq 0 ]]; then
   pass "Journal critical (24h): 0"
 elif [[ "$JOURNAL_CRIT" -le 20 ]]; then
@@ -1762,7 +1909,7 @@ info "Uptime: $UPTIME"
 info "Load: $LOAD (CPUs: $CPU_COUNT)"
 
 if require_cmd bc; then
-  if (( $(echo "$LOAD_1 > $CPU_COUNT" | bc -l 2>/dev/null || echo 0) )); then
+  if (( $(echo "$LOAD_1 > $CPU_COUNT" | bc -l 2>/dev/null || true) )); then
     warn "Load ($LOAD_1) > CPU count ($CPU_COUNT)"
   else
     pass "Load OK: $LOAD_1 / $CPU_COUNT CPUs"
@@ -1790,7 +1937,7 @@ else
   info "No swap configured"
 fi
 
-echo -e "  ${CYN}--- Disk Usage ---${RST}"
+sub_header "Disk Usage"
 while read -r line; do
   [[ -z "$line" ]] && continue
   PCT=$(echo "$line" | awk '{print $5}' | tr -d '%')
@@ -1824,15 +1971,19 @@ else
   pass "I/O wait: ${IOWAIT:-0}%"
 fi
 
-echo -e "  ${CYN}--- Top 5 CPU ---${RST}"
-ps -eo user,pcpu,pmem,args --sort=-pcpu 2>/dev/null | head -6 | tail -5 | while read -r USER CPU MEM CMD; do
-  echo -e "       ${USER} ${CPU}% $(echo "$CMD" | cut -c1-60)"
-done
+sub_header "Top 5 CPU"
+if ! $JSON_MODE; then
+  while read -r USER CPU MEM CMD; do
+    printf "       %s %s%% %s\n" "$USER" "$CPU" "$(echo "$CMD" | cut -c1-60)"
+  done < <(ps -eo user,pcpu,pmem,args --sort=-pcpu 2>/dev/null | head -6 | tail -5)
+fi
 
-echo -e "  ${CYN}--- Top 5 Memory ---${RST}"
-ps -eo user,pcpu,pmem,args --sort=-pmem 2>/dev/null | head -6 | tail -5 | while read -r USER CPU MEM CMD; do
-  echo -e "       ${USER} ${MEM}% $(echo "$CMD" | cut -c1-60)"
-done
+sub_header "Top 5 Memory"
+if ! $JSON_MODE; then
+  while read -r USER CPU MEM CMD; do
+    printf "       %s %s%% %s\n" "$USER" "$MEM" "$(echo "$CMD" | cut -c1-60)"
+  done < <(ps -eo user,pcpu,pmem,args --sort=-pmem 2>/dev/null | head -6 | tail -5)
+fi
 
 fi # end performance
 
@@ -1841,7 +1992,7 @@ if ! should_skip "hardware"; then
 header "21" "HARDWARE & FIRMWARE"
 ###############################################################################
 
-echo -e "  ${CYN}--- CPU Vulnerabilities ---${RST}"
+sub_header "CPU Vulnerabilities"
 VULN_DIR="/sys/devices/system/cpu/vulnerabilities"
 if [[ -d "$VULN_DIR" ]]; then
   for VULN in "$VULN_DIR"/*; do
@@ -1874,22 +2025,26 @@ fi
 
 # Temperature (new — enhanced)
 if require_cmd sensors; then
-  MAX_TEMP=$(sensors 2>/dev/null | grep -oP '\+\K\d+\.\d+°C' | sort -rn | head -1)
+  # Extract only actual temp readings (value right after "Label: +"), not thresholds
+  # in parentheses (high/crit/low values are preceded by "= +" not ": +")
+  MAX_TEMP=$(sensors 2>/dev/null | grep -oP ':\s+\+\K\d+\.\d+(?=°C)' | sort -rn | head -1)
   if [[ -n "$MAX_TEMP" ]]; then
-    TEMP_NUM=$(echo "$MAX_TEMP" | grep -oP '\d+' | head -1)
+    TEMP_NUM=$(echo "$MAX_TEMP" | grep -oP '^\d+')
     if [[ "$TEMP_NUM" -gt 85 ]]; then
-      fail "Max temperature: $MAX_TEMP (CRITICAL)"
+      fail "Max temperature: ${MAX_TEMP}°C (CRITICAL)"
     elif [[ "$TEMP_NUM" -gt 70 ]]; then
-      warn "Max temperature: $MAX_TEMP (elevated)"
+      warn "Max temperature: ${MAX_TEMP}°C (elevated)"
     else
-      pass "Max temperature: $MAX_TEMP"
+      pass "Max temperature: ${MAX_TEMP}°C"
     fi
   fi
   # Show all sensor zones
-  echo -e "  ${CYN}--- Temperature Sensors ---${RST}"
-  sensors 2>/dev/null | grep -E "°C" | head -10 | while read -r line; do
-    echo -e "       $line"
-  done
+  sub_header "Temperature Sensors"
+  if ! $JSON_MODE; then
+    while read -r line; do
+      printf "       %s\n" "$line"
+    done < <(sensors 2>/dev/null | grep -E "°C" | head -10)
+  fi
 else
   info "lm_sensors not installed — temperature checks skipped"
 fi
@@ -1905,14 +2060,18 @@ if ! should_skip "interfaces"; then
 header "22" "NETWORK INTERFACES (Detail)"
 ###############################################################################
 
-ip -br addr 2>/dev/null | while read -r IFACE STATE ADDRS; do
-  echo -e "  ${CYN}$IFACE${RST} ($STATE): $ADDRS"
-done
+if ! $JSON_MODE; then
+  while read -r IFACE STATE ADDRS; do
+    printf "  ${CYN}%s${RST} (%s): %s\n" "$IFACE" "$STATE" "$ADDRS"
+  done < <(ip -br addr 2>/dev/null)
+fi
 
-echo -e "  ${CYN}--- Routing ---${RST}"
-ip route show 2>/dev/null | while read -r route; do
-  echo -e "       $route"
-done
+sub_header "Routing"
+if ! $JSON_MODE; then
+  while read -r route; do
+    printf "       %s\n" "$route"
+  done < <(ip route show 2>/dev/null)
+fi
 
 if require_cmd dig; then
   DNS_TEST=$(dig +short google.com @1.1.1.1 +time=3 2>/dev/null | head -1 || echo "FAIL")
@@ -1936,19 +2095,20 @@ if require_cmd trust; then
 fi
 
 if require_cmd openssl; then
-  find /etc/pki/tls/certs -maxdepth 1 \( -name "*.pem" -o -name "*.crt" \) 2>/dev/null | grep -v "ca-bundle" | head -20 | while read -r cert; do
+  while read -r cert; do
     if openssl x509 -checkend 0 -in "$cert" -noout 2>&1 | grep -q "will expire"; then
       warn "Expired certificate: $cert"
     fi
-  done
+  done < <(find /etc/pki/tls/certs -maxdepth 1 \( -name "*.pem" -o -name "*.crt" \) 2>/dev/null | grep -v "ca-bundle" | head -20)
 fi
 
-echo -e "  ${CYN}--- SSH Keys ---${RST}"
+sub_header "SSH Keys"
 for USER_HOME in /home/* /root; do
   USER=$(basename "$USER_HOME")
   if [[ -d "$USER_HOME/.ssh" ]]; then
     KEY_COUNT=$(ls "$USER_HOME/.ssh/"*.pub 2>/dev/null | wc -l)
-    AUTH_KEYS=$(wc -l "$USER_HOME/.ssh/authorized_keys" 2>/dev/null | awk '{print $1}' || echo 0)
+    AUTH_KEYS=$(wc -l "$USER_HOME/.ssh/authorized_keys" 2>/dev/null | awk '{print $1}' || true)
+    AUTH_KEYS=${AUTH_KEYS:-0}
     if [[ "$KEY_COUNT" -gt 0 ]] || [[ "$AUTH_KEYS" -gt 0 ]]; then
       info "SSH keys for $USER: $KEY_COUNT keys, $AUTH_KEYS authorized"
     fi
@@ -1963,17 +2123,19 @@ header "24" "ENVIRONMENT & SECRETS"
 ###############################################################################
 
 # World-readable private keys
-EXPOSED_KEYS=$(find /home /root \( -name "*.key" -o -name "id_rsa" -o -name "id_ed25519" -o -name "id_ecdsa" \) ! -name "*.pub" ! -path "*/cacert*" ! -path "*/ca-bundle*" ! -path "*public_key*" ! -path "*/roots.pem" 2>/dev/null | while read -r key; do
+EXPOSED_KEYS=$(while read -r key; do
   PERMS=$(stat -c %a "$key" 2>/dev/null)
   if [[ "$PERMS" -gt 600 ]]; then
     echo "$key ($PERMS)"
   fi
-done)
+done < <(find /home /root \( -name "*.key" -o -name "id_rsa" -o -name "id_ed25519" -o -name "id_ecdsa" \) ! -name "*.pub" ! -path "*/cacert*" ! -path "*/ca-bundle*" ! -path "*public_key*" ! -path "*/roots.pem" 2>/dev/null))
 if [[ -z "$EXPOSED_KEYS" ]]; then
   pass "No exposed private keys"
 else
   fail "Exposed private keys:"
-  echo "$EXPOSED_KEYS" | while read -r k; do echo -e "       $k"; done
+  if ! $JSON_MODE; then
+    while read -r k; do printf "       %s\n" "$k"; done <<< "$EXPOSED_KEYS"
+  fi
 fi
 
 ENV_FILES=$(find /home /root /opt /srv -name ".env" -readable 2>/dev/null | wc -l)
@@ -1994,7 +2156,7 @@ header "25" "SYSTEMD SECURITY"
 ###############################################################################
 
 if require_cmd systemd-analyze; then
-  echo -e "  ${CYN}--- systemd-analyze security (excerpt) ---${RST}"
+  sub_header "systemd-analyze security (excerpt)"
   for SVC in openclaw-gateway firewalld fail2ban auditd; do
     SCORE=$(systemd-analyze security "$SVC" 2>/dev/null | tail -1 | grep -oP '\d+\.\d+' || echo "N/A")
     if [[ "$SCORE" != "N/A" ]]; then
@@ -2037,15 +2199,20 @@ if require_cmd loginctl; then
   fi
 fi
 
-# Screen Lock
+# Screen Lock (per-user via DBUS)
 if require_cmd gsettings; then
-  LOCK_ENABLED=$(gsettings get org.gnome.desktop.screensaver lock-enabled 2>/dev/null || echo "?")
-  LOCK_DELAY=$(gsettings get org.gnome.desktop.screensaver lock-delay 2>/dev/null || echo "?")
-  if [[ "$LOCK_ENABLED" == "true" ]]; then
-    pass "Screen lock: enabled (delay: $LOCK_DELAY)"
-  elif [[ "$LOCK_ENABLED" != "?" ]]; then
-    warn "Screen lock: disabled"
-  fi
+  _gs_lock_check_cb() {
+    local user="$1" uid="$2" val
+    val=$(echo "$3" | xargs)
+    if [[ "$val" == "true" ]]; then
+      local delay
+      delay=$(_gsettings_user "$user" "$uid" "org.gnome.desktop.screensaver" "lock-delay" 2>/dev/null)
+      pass "Screen lock: enabled (delay: ${delay:-?}) [$user]"
+    elif [[ "$val" == "false" ]]; then
+      warn "Screen lock: disabled [$user]"
+    fi
+  }
+  _gsettings_for_users "org.gnome.desktop.screensaver" "lock-enabled" _gs_lock_check_cb
 fi
 
 # Auto-Login
@@ -2078,7 +2245,8 @@ fi
 if systemctl is-active chronyd &>/dev/null; then
   pass "chronyd: active"
   if require_cmd chronyc; then
-    CHRONY_SOURCES=$(chronyc sources 2>/dev/null | grep -c "^\^" || echo 0)
+    CHRONY_SOURCES=$(chronyc sources 2>/dev/null | grep -c "^\^" || true)
+    CHRONY_SOURCES=${CHRONY_SOURCES:-0}
     info "Chrony sources: $CHRONY_SOURCES"
 
     # Network Time Security (NTS) check (new)
@@ -2133,20 +2301,25 @@ if ! should_skip "logins"; then
 header "29" "RECENT LOGINS & ACTIVITY"
 ###############################################################################
 
-echo -e "  ${CYN}--- Last 5 logins ---${RST}"
-last -n 5 2>/dev/null | head -5 | while read -r line; do
-  echo -e "       $line"
-done
+sub_header "Last 5 logins"
+if ! $JSON_MODE; then
+  while read -r line; do
+    printf "       %s\n" "$line"
+  done < <(last -n 5 2>/dev/null | head -5)
+fi
 
-echo -e "  ${CYN}--- Failed logins ---${RST}"
-lastb -n 5 2>/dev/null | head -5 | while read -r line; do
-  [[ -n "$line" ]] && echo -e "       $line"
-done
+sub_header "Failed logins"
+if ! $JSON_MODE; then
+  while read -r line; do
+    [[ -n "$line" ]] && printf "       %s\n" "$line"
+  done < <(lastb -n 5 2>/dev/null | head -5)
+fi
 
 USERS_LOGGED=$(who | wc -l)
 info "Currently logged in: $USERS_LOGGED users"
 
-SUDO_USAGE=$(journalctl _COMM=sudo --since "1 hour ago" --no-pager 2>/dev/null | grep -c "COMMAND" || echo 0)
+SUDO_USAGE=$(journalctl _COMM=sudo --since "1 hour ago" --no-pager 2>/dev/null | grep -c "COMMAND" || true)
+SUDO_USAGE=${SUDO_USAGE:-0}
 info "Sudo commands (1h): $SUDO_USAGE"
 
 fi # end logins
@@ -2157,7 +2330,7 @@ header "30" "ADVANCED HARDENING"
 ###############################################################################
 
 # Coredump Service Check (new)
-echo -e "  ${CYN}--- Core Dump Service ---${RST}"
+sub_header "Core Dump Service"
 if systemctl is-active systemd-coredump.socket &>/dev/null; then
   warn "systemd-coredump socket: active"
 else
@@ -2175,7 +2348,7 @@ if [[ -f /etc/systemd/coredump.conf ]]; then
 fi
 
 # USB Guard (new)
-echo -e "  ${CYN}--- USB Guard ---${RST}"
+sub_header "USB Guard"
 if require_cmd usbguard; then
   if systemctl is-active usbguard &>/dev/null; then
     pass "USBGuard: active"
@@ -2189,7 +2362,7 @@ else
 fi
 
 # Compiler Check (new)
-echo -e "  ${CYN}--- Development Tools ---${RST}"
+sub_header "Development Tools"
 COMPILERS_FOUND=""
 for COMP in gcc g++ cc make as; do
   if require_cmd "$COMP"; then
@@ -2197,9 +2370,13 @@ for COMP in gcc g++ cc make as; do
   fi
 done
 if [[ -n "$COMPILERS_FOUND" ]]; then
-  warn "Compilers/build tools present: $COMPILERS_FOUND(risk on production systems)"
+  if [[ -n "$DESKTOP_ENV" && "$DESKTOP_ENV" != "unknown" ]]; then
+    info "Compilers/build tools present: $COMPILERS_FOUND(normal for development desktop)"
+  else
+    warn "Compilers/build tools present: $COMPILERS_FOUND(risk on production systems)"
+  fi
 else
-  pass "No compilers/build tools found (production-safe)"
+  pass "No compilers/build tools found"
 fi
 
 # Prelink Check (new)
@@ -2210,7 +2387,7 @@ else
 fi
 
 # AIDE/Tripwire — File Integrity Monitoring (new)
-echo -e "  ${CYN}--- File Integrity Monitoring ---${RST}"
+sub_header "File Integrity Monitoring"
 FIM_FOUND=false
 if require_cmd aide; then
   pass "AIDE installed (file integrity monitoring)"
@@ -2225,7 +2402,7 @@ if ! $FIM_FOUND; then
 fi
 
 # Cron Permission Check (new)
-echo -e "  ${CYN}--- Cron/At Permissions ---${RST}"
+sub_header "Cron/At Permissions"
 if [[ -f /etc/cron.allow ]]; then
   pass "cron.allow exists (whitelist approach)"
 elif [[ -f /etc/cron.deny ]]; then
@@ -2251,7 +2428,7 @@ header "31" "KERNEL MODULES & INTEGRITY"
 ###############################################################################
 
 # Suspicious kernel modules (new)
-echo -e "  ${CYN}--- Suspicious Module Check ---${RST}"
+sub_header "Suspicious Module Check"
 SUSPICIOUS_MODS=$(lsmod 2>/dev/null | awk '{print $1}' | grep -iE "backdoor|rootkit|hide|keylog|sniff|inject" || true)
 if [[ -z "$SUSPICIOUS_MODS" ]]; then
   pass "No suspicious kernel modules loaded"
@@ -2260,10 +2437,12 @@ else
 fi
 
 # Unnecessary filesystem modules (new)
-echo -e "  ${CYN}--- Disabled Filesystem Modules ---${RST}"
+sub_header "Disabled Filesystem Modules"
 for FS_MOD in cramfs freevxfs jffs2 hfs hfsplus squashfs udf; do
   if grep -rqs "install $FS_MOD /bin/false\|install $FS_MOD /bin/true" /etc/modprobe.d/ 2>/dev/null; then
     pass "Module $FS_MOD: disabled"
+  elif [[ "$FS_MOD" == "squashfs" ]] && command -v flatpak &>/dev/null; then
+    info "Module squashfs: loaded (required by Flatpak)"
   else
     if lsmod 2>/dev/null | grep -q "^${FS_MOD}\s"; then
       warn "Module $FS_MOD: loaded (should be disabled)"
@@ -2274,7 +2453,7 @@ for FS_MOD in cramfs freevxfs jffs2 hfs hfsplus squashfs udf; do
 done
 
 # USB storage module
-if grep -rqs "install usb-storage /bin/false\|install usb-storage /bin/true\|blacklist usb-storage" /etc/modprobe.d/ 2>/dev/null; then
+if grep -rqs "install usb[-_]storage /bin/false\|install usb[-_]storage /bin/true\|blacklist usb[-_]storage" /etc/modprobe.d/ 2>/dev/null; then
   pass "USB storage module: disabled"
 else
   warn "USB storage module: not disabled"
@@ -2356,7 +2535,7 @@ info "Installed kernels: $KERNEL_COUNT"
 
 # systemd-analyze blame top 5 (new)
 if require_cmd systemd-analyze; then
-  echo -e "  ${CYN}--- Boot Security Analysis ---${RST}"
+  sub_header "Boot Security Analysis"
   # Check for rescue/emergency shell
   if systemctl is-enabled rescue.service &>/dev/null 2>&1; then
     info "Rescue shell: enabled (physical access risk)"
@@ -2374,10 +2553,13 @@ header "34" "SYSTEM INTEGRITY CHECKS"
 ###############################################################################
 
 # File Integrity — key system binaries
-echo -e "  ${CYN}--- Critical Binary Integrity ---${RST}"
+sub_header "Critical Binary Integrity"
 if require_cmd rpm; then
-  RPM_VERIFY_ALL=$(rpm -Va 2>/dev/null | grep -cE "^..5" || echo 0)
-  RPM_VERIFY_BIN=$(rpm -Va 2>/dev/null | grep -E "^..5" | grep -cv " c " || echo 0)
+  RPM_VA_OUTPUT=$(rpm -Va 2>/dev/null || true)
+  RPM_VERIFY_ALL=$(echo "$RPM_VA_OUTPUT" | grep -cE "^..5" || true)
+  RPM_VERIFY_ALL=${RPM_VERIFY_ALL:-0}
+  RPM_VERIFY_BIN=$(echo "$RPM_VA_OUTPUT" | grep -E "^..5" | grep -cv " c " || true)
+  RPM_VERIFY_BIN=${RPM_VERIFY_BIN:-0}
   if [[ "$RPM_VERIFY_ALL" -eq 0 ]]; then
     pass "RPM verify: all package files intact"
   elif [[ "$RPM_VERIFY_BIN" -eq 0 ]]; then
@@ -2394,10 +2576,23 @@ elif require_cmd debsums; then
   else
     warn "debsums: $DEB_VERIFY files modified"
   fi
+elif [[ "$DISTRO_FAMILY" == "debian" ]]; then
+  info "Package integrity: install 'debsums' for Debian file verification (apt install debsums)"
+elif require_cmd pacman; then
+  # Arch: verify installed package files
+  PAC_VERIFY=$(pacman -Qkk 2>/dev/null | grep -c "MODIFIED" || true)
+  PAC_VERIFY=${PAC_VERIFY:-0}
+  if [[ "$PAC_VERIFY" -eq 0 ]]; then
+    pass "Pacman verify: all package files intact"
+  elif [[ "$PAC_VERIFY" -le 10 ]]; then
+    warn "Pacman verify: $PAC_VERIFY modified files"
+  else
+    fail "Pacman verify: $PAC_VERIFY modified files!"
+  fi
 fi
 
 # Check for world-writable directories in PATH
-echo -e "  ${CYN}--- PATH Security ---${RST}"
+sub_header "PATH Security"
 WW_PATH=0
 IFS=: read -ra PATH_DIRS <<< "$PATH"
 for DIR in "${PATH_DIRS[@]}"; do
@@ -2425,13 +2620,20 @@ check_browser_privacy() {
 
   _bp_check_user() {
     local user="$1" uid="$2" home="$3"
-    local ff_dir="$home/.mozilla/firefox"
-    [[ -d "$ff_dir" ]] || return
+    # Check both standard and Flatpak Firefox profile locations
+    local ff_dirs=(
+      "$home/.mozilla/firefox"
+      "$home/.var/app/org.mozilla.firefox/.mozilla/firefox"
+    )
 
     local prefs_files=()
-    while IFS= read -r -d '' f; do
-      prefs_files+=("$f")
-    done < <(find "$ff_dir" -maxdepth 2 -name "prefs.js" -print0 2>/dev/null)
+    local ff_dir
+    for ff_dir in "${ff_dirs[@]}"; do
+      [[ -d "$ff_dir" ]] || continue
+      while IFS= read -r -d '' f; do
+        prefs_files+=("$f")
+      done < <(find "$ff_dir" -maxdepth 2 -name "prefs.js" -print0 2>/dev/null)
+    done
 
     [[ ${#prefs_files[@]} -eq 0 ]] && return
     found_any=true
@@ -2619,7 +2821,7 @@ check_app_telemetry() {
       [[ -z "$app" ]] && continue
       local perms
       perms="$(flatpak info --show-permissions "$app" 2>/dev/null)"
-      if echo "$perms" | grep -qE "filesystems=.*host|talk-name=org\.freedesktop\.Flatpak"; then
+      if echo "$perms" | grep -qE "filesystems=host([;,[:space:]]|$)|filesystems=host-os([;,[:space:]]|$)|talk-name=org\.freedesktop\.Flatpak"; then
         warn "Flatpak '$app' has dangerous permissions (host filesystem or Flatpak portal)"
         ((dangerous++))
       fi
@@ -2640,7 +2842,7 @@ check_app_telemetry() {
   fi
 
   local abrt_active
-  abrt_active="$(systemctl list-units --state=active --no-legend 'abrt-*' 2>/dev/null | ccount)"
+  abrt_active="$(systemctl list-units --state=active --no-legend 'abrt-*' 2>/dev/null | wc -l | ccount)"
   if [[ "$abrt_active" -gt 0 ]]; then
     warn "ABRT crash reporter active ($abrt_active services) — sends crash data"
   else
@@ -2862,7 +3064,8 @@ check_data_privacy() {
     local recent_file="$home/.local/share/recently-used.xbel"
     if [[ -f "$recent_file" ]]; then
       local size
-      size="$(stat -c%s "$recent_file" 2>/dev/null || echo 0)"
+      size="$(stat -c%s "$recent_file" 2>/dev/null || true)"
+      size=${size:-0}
       if [[ "$size" -gt 1048576 ]]; then
         warn "recently-used.xbel is $(_human_size "$size") [$user] — consider clearing"
       elif [[ "$size" -gt 102400 ]]; then
@@ -2900,7 +3103,8 @@ check_data_privacy() {
     local bashrc="$home/.bashrc"
     if [[ -f "$histfile" ]]; then
       local lines
-      lines="$(wc -l < "$histfile" 2>/dev/null || echo 0)"
+      lines="$(wc -l < "$histfile" 2>/dev/null || true)"
+      lines=${lines:-0}
       if [[ "$lines" -gt 10000 ]]; then
         warn "Bash history has $lines lines [$user] — may contain sensitive data"
       fi
@@ -3127,12 +3331,12 @@ check_desktop_session() {
     local val
     val=$(echo "$3" | xargs)
     if [[ "$val" == "true" ]]; then
-      warn "User switching allowed without re-auth for $1"
-    else
       pass "User switching restricted for $1"
+    else
+      info "User switching allowed for $1"
     fi
   }
-  _gsettings_for_users "org.gnome.desktop.lockdown" "disable-lock-screen" _gs_switch_cb
+  _gsettings_for_users "org.gnome.desktop.lockdown" "disable-user-switching" _gs_switch_cb
   [[ "$found_switch" -eq 0 ]] && info "No active sessions for user-switch check"
 
   local userlist_checked=0
@@ -3260,7 +3464,7 @@ check_media_privacy() {
     if grep -rqs '"access.allowed"' "$confdir/" 2>/dev/null; then
       info "PipeWire access control rules found in $confdir"
     fi
-    if grep -rqs 'module-protocol-native.*socket' "$confdir/" 2>/dev/null | grep -v '/run/user'; then
+    if grep -rs 'module-protocol-native.*socket' "$confdir/" 2>/dev/null | grep -qv '/run/user'; then
       warn "PipeWire may expose socket beyond local user"
       pw_remote=1
     fi
@@ -3527,7 +3731,7 @@ check_keyring_security
 if ! should_skip "summary"; then
 CURRENT_SECTION="SUMMARY"
 if ! $JSON_MODE; then
-  echo -e "\n${BOLD}${MAG}━━━ SUMMARY ━━━${RST}"
+  printf "\n${BOLD}${MAG}━━━ SUMMARY ━━━${RST}\n"
 fi
 ###############################################################################
 
@@ -3535,6 +3739,9 @@ TOTAL_END=$(date +%s)
 DURATION=$((TOTAL_END - TOTAL_START))
 
 # Weighted Score: PASS*100 / (PASS + FAIL*2 + WARN)
+# FAIL is weighted 2x because failures are more critical than warnings.
+# INFO is excluded from the score — it's purely informational.
+# Example: 200 PASS, 5 FAIL, 10 WARN → 200*100 / (200 + 10 + 10) = 90%
 SCORE_DENOM=$((PASS + FAIL * 2 + WARN))
 if [[ "$SCORE_DENOM" -gt 0 ]]; then
   SCORE=$(( (PASS * 100) / SCORE_DENOM ))
@@ -3582,7 +3789,6 @@ if $JSON_MODE; then
   printf '    "score": %d\n' "$SCORE"
   printf '  },\n'
   printf '  "findings": [\n'
-  local i
   for ((i=0; i<${#JSON_FINDINGS[@]}; i++)); do
     if [[ $i -lt $((${#JSON_FINDINGS[@]} - 1)) ]]; then
       printf '    %s,\n' "${JSON_FINDINGS[$i]}"
@@ -3595,24 +3801,24 @@ if $JSON_MODE; then
 else
   # --- Normal Summary Output ---
   echo ""
-  echo -e "${BOLD}${WHT}╔══════════════════════════════════════════════════════════════════════╗${RST}"
-  echo -e "${BOLD}${WHT}║                          FINAL RESULTS${RST}"
-  echo -e "${BOLD}${WHT}╠══════════════════════════════════════════════════════════════════════╣${RST}"
-  echo -e "${BOLD}${WHT}║${RST}  Total checks:      ${BOLD}$((PASS + FAIL + WARN + INFO))${RST} ($PASS pass, $FAIL fail, $WARN warn, $INFO info)"
-  echo -e "${BOLD}${WHT}║${RST}  ${GRN}✅ Passed:${RST}           ${BOLD}$PASS${RST}"
-  echo -e "${BOLD}${WHT}║${RST}  ${RED}🔴 Failed:${RST}           ${BOLD}$FAIL${RST}"
-  echo -e "${BOLD}${WHT}║${RST}  ${YLW}⚠️  Warnings:${RST}        ${BOLD}$WARN${RST}"
-  echo -e "${BOLD}${WHT}║${RST}  ${CYN}ℹ️  Info:${RST}             ${BOLD}$INFO${RST}"
-  echo -e "${BOLD}${WHT}╠══════════════════════════════════════════════════════════════════════╣${RST}"
-  echo -e "${BOLD}${WHT}║${RST}  Score formula:     PASS×100 / (PASS + FAIL×2 + WARN)"
-  echo -e "${BOLD}${WHT}║${RST}  ${BOLD}SECURITY & PRIVACY SCORE:${RST}    ${RATING_COLOR}${BOLD}${SCORE}% ${RATING}${RST}"
-  echo -e "${BOLD}${WHT}║${RST}  Kernel:            $KERNEL"
-  echo -e "${BOLD}${WHT}║${RST}  Uptime:            $(uptime -p 2>/dev/null || echo 'N/A')"
-  echo -e "${BOLD}${WHT}║${RST}  Scan duration:     ${DURATION} seconds"
-  echo -e "${BOLD}${WHT}╚══════════════════════════════════════════════════════════════════════╝${RST}"
+  printf "${BOLD}${WHT}╔══════════════════════════════════════════════════════════════════════╗${RST}\n"
+  printf "${BOLD}${WHT}║                          FINAL RESULTS${RST}\n"
+  printf "${BOLD}${WHT}╠══════════════════════════════════════════════════════════════════════╣${RST}\n"
+  printf "${BOLD}${WHT}║${RST}  Total checks:      ${BOLD}$((PASS + FAIL + WARN + INFO))${RST} ($PASS pass, $FAIL fail, $WARN warn, $INFO info)\n"
+  printf "${BOLD}${WHT}║${RST}  ${GRN}✅ Passed:${RST}           ${BOLD}$PASS${RST}\n"
+  printf "${BOLD}${WHT}║${RST}  ${RED}🔴 Failed:${RST}           ${BOLD}$FAIL${RST}\n"
+  printf "${BOLD}${WHT}║${RST}  ${YLW}⚠️  Warnings:${RST}        ${BOLD}$WARN${RST}\n"
+  printf "${BOLD}${WHT}║${RST}  ${CYN}ℹ️  Info:${RST}             ${BOLD}$INFO${RST}\n"
+  printf "${BOLD}${WHT}╠══════════════════════════════════════════════════════════════════════╣${RST}\n"
+  printf "${BOLD}${WHT}║${RST}  Score formula:     PASS×100 / (PASS + FAIL×2 + WARN)\n"
+  printf "${BOLD}${WHT}║${RST}  ${BOLD}SECURITY & PRIVACY SCORE:${RST}    ${RATING_COLOR}${BOLD}${SCORE}%% ${RATING}${RST}\n"
+  printf "${BOLD}${WHT}║${RST}  Kernel:            $KERNEL\n"
+  printf "${BOLD}${WHT}║${RST}  Uptime:            $(uptime -p 2>/dev/null || echo 'N/A')\n"
+  printf "${BOLD}${WHT}║${RST}  Scan duration:     ${DURATION} seconds\n"
+  printf "${BOLD}${WHT}╚══════════════════════════════════════════════════════════════════════╝${RST}\n"
   echo ""
-  echo -e "${CYN}Report generated: $NOW${RST}"
-  echo -e "${CYN}by NexusOne23 & Clawde 🦝 — NoID Privacy for Linux v${NOID_PRIVACY_VERSION} | https://noid-privacy.com/linux.html${RST}"
+  printf "${CYN}Report generated: $NOW${RST}\n"
+  printf "${CYN}by NexusOne23 & Claude 🤖 — NoID Privacy for Linux v${NOID_PRIVACY_VERSION} | https://noid-privacy.com/linux.html${RST}\n"
 
   # --- AI Mode Output ---
   if $AI_MODE; then

@@ -177,7 +177,7 @@ if [[ "$AI_RUN" == "true" ]]; then
   echo "::endgroup::"
 
   # Extract AI prompt (everything after the AI marker)
-  AI_PROMPT=$(echo "$AI_OUTPUT" | sed -n '/AI-READY PROMPT/,$ p' || true)
+  AI_PROMPT=$(echo "$AI_OUTPUT" | sed -n '/AI ASSISTANT PROMPT/,$ p' || true)
   if [[ -n "$AI_PROMPT" ]]; then
     {
       echo ""
