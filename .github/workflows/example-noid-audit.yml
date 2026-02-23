@@ -3,9 +3,6 @@ name: Privacy & Security Audit
 on:
   # Run on demand
   workflow_dispatch:
-  # Run weekly on Monday at 06:00 UTC
-  schedule:
-    - cron: '0 6 * * 1'
   # Run on PRs that touch security-relevant files
   pull_request:
     paths:

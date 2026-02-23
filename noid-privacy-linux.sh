@@ -1491,7 +1491,7 @@ if require_cmd dnf5; then
 elif require_cmd dnf; then
   UPDATES=$(dnf check-update --quiet 2>/dev/null | grep -v "^$" | wc -l)
 elif require_cmd apt; then
-  apt update -qq 2>/dev/null
+  apt update -qq &>/dev/null
   UPDATES=$(apt list --upgradable 2>/dev/null | grep -c "upgradable" || true)
   UPDATES=${UPDATES:-0}
 elif require_cmd pacman; then
@@ -1527,7 +1527,7 @@ elif require_cmd apt-get; then
   SEC_CHECKED=true
   # Ubuntu: use apt-check if available (update-notifier-common), fallback to apt-get -s
   if [[ -x /usr/lib/update-notifier/apt-check ]]; then
-    SEC_UPDATES=$(/usr/lib/update-notifier/apt-check --human-readable 2>/dev/null | grep -oP '^\d+(?=.*security)' || true)
+    SEC_UPDATES=$(/usr/lib/update-notifier/apt-check --human-readable 2>&1 | grep -oP '^\d+(?=.*security)' || true)
     SEC_UPDATES=${SEC_UPDATES:-0}
   else
     SEC_UPDATES=$(apt-get upgrade -s 2>/dev/null | grep -ciE "^Inst.*security" || true)
@@ -1543,7 +1543,9 @@ elif require_cmd zypper; then
   SEC_UPDATES=${SEC_UPDATES:-0}
 fi
 if $SEC_CHECKED; then
-  if [[ "${SEC_UPDATES:-0}" -gt 0 ]]; then
+  SEC_UPDATES=$(echo "${SEC_UPDATES:-0}" | tr -dc '0-9')
+  SEC_UPDATES=${SEC_UPDATES:-0}
+  if [[ "${SEC_UPDATES}" -gt 0 ]]; then
     fail "Security updates: $SEC_UPDATES"
   else
     pass "No pending security updates"
