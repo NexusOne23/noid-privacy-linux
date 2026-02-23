@@ -77,10 +77,9 @@ should_skip() {
 
 # --- Colors ---
 if $NO_COLOR; then
-  RED=''; GRN=''; YLW=''; BLU=''; MAG=''; CYN=''; WHT=''; RST=''; BOLD=''
+  RED=''; GRN=''; YLW=''; MAG=''; CYN=''; WHT=''; RST=''; BOLD=''
 else
-  # shellcheck disable=SC2034  # color palette — not all used directly
-  RED='\033[0;31m'; GRN='\033[0;32m'; YLW='\033[0;33m'; BLU='\033[0;34m'
+  RED='\033[0;31m'; GRN='\033[0;32m'; YLW='\033[0;33m'
   MAG='\033[0;35m'; CYN='\033[0;36m'; WHT='\033[1;37m'; RST='\033[0m'
   BOLD='\033[1m'
 fi
