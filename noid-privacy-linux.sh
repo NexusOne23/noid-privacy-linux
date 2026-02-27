@@ -6,7 +6,7 @@
 #  300+ checks across 42 sections
 #  Requires: root
 ###############################################################################
-NOID_PRIVACY_VERSION="3.1.0"
+NOID_PRIVACY_VERSION="3.2.0"
 set +e          # Don't exit on errors — we handle them ourselves
 
 # --- Argument Parsing ---
@@ -238,6 +238,26 @@ _human_size() {
   else
     echo "${bytes}B"
   fi
+}
+
+# Read effective systemd drop-in config value (main config + drop-in dirs, last wins)
+# Usage: _systemd_conf_val <unit_conf> <key>
+# Example: _systemd_conf_val /etc/systemd/coredump.conf Storage
+_systemd_conf_val() {
+  local base_conf="$1" key="$2" val=""
+  local dropin_dir="${base_conf%.conf}.conf.d"
+  # Main config
+  if [[ -f "$base_conf" ]]; then
+    val=$(grep -i "^${key}\s*=" "$base_conf" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d ' ')
+  fi
+  # Drop-in overrides (alphabetical, last one wins)
+  for dropin in "${dropin_dir}"/*.conf; do
+    [[ -f "$dropin" ]] || continue
+    local dval
+    dval=$(grep -i "^${key}\s*=" "$dropin" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d ' ')
+    [[ -n "$dval" ]] && val="$dval"
+  done
+  echo "$val"
 }
 
 _gsettings_for_users() {
@@ -553,16 +573,41 @@ if require_cmd firewall-cmd && systemctl is-active firewalld &>/dev/null; then
     PORTS=$(firewall-cmd --zone="$ZONE" --list-ports --permanent 2>/dev/null || echo "")
     IFACES=$(firewall-cmd --zone="$ZONE" --list-interfaces --permanent 2>/dev/null || echo "")
 
-    if [[ -n "$IFACES" ]] || [[ "$ZONE" == "public" ]] || [[ "$ZONE" == "FedoraWorkstation" ]]; then
-      if [[ "$TARGET" == "DROP" || "$TARGET" == "REJECT" || "$TARGET" == "%%REJECT%%" ]]; then
+    # Get default zone to know which applies to unassigned interfaces
+    _DEFAULT_ZONE=$(firewall-cmd --get-default-zone 2>/dev/null || echo "")
+
+    # Only evaluate zones that are actively in use:
+    # - Zones with interfaces explicitly assigned, OR
+    # - The default zone (applies to any interface not in another zone)
+    # Zones with no interfaces and not the default zone are inactive — skip them.
+    _ZONE_IS_DEFAULT=false
+    [[ "$ZONE" == "$_DEFAULT_ZONE" ]] && _ZONE_IS_DEFAULT=true
+
+    if [[ -n "$IFACES" ]] || $_ZONE_IS_DEFAULT; then
+      # Check if all assigned interfaces are VPN/virtual (not physical internet-facing)
+      _ALL_VPN=true
+      for _iface in $IFACES; do
+        if ! echo "$_iface" | grep -qE "^(tun|wg|proton|pvpn|lo)"; then
+          _ALL_VPN=false
+          break
+        fi
+      done
+      # VPN-only zones or empty default zones with VPN traffic are not directly internet-facing
+      if [[ -z "$IFACES" ]] && $_ZONE_IS_DEFAULT; then
+        info "Zone $ZONE (default): target=$TARGET, no interfaces assigned"
+      elif $_ALL_VPN && [[ -n "$IFACES" ]]; then
+        info "Zone $ZONE: target=$TARGET (VPN-only interfaces: $IFACES)"
+      elif [[ "$TARGET" == "DROP" || "$TARGET" == "REJECT" || "$TARGET" == "%%REJECT%%" ]]; then
         pass "Zone $ZONE: target=$TARGET"
       else
         warn "Zone $ZONE: target=$TARGET (not DROP/REJECT)"
       fi
-      if [[ -n "$SERVICES" ]]; then
+      if [[ -n "$SERVICES" ]] && ! $_ALL_VPN && [[ -n "$IFACES" ]]; then
         warn "Zone $ZONE open services: $SERVICES"
+      elif [[ -n "$SERVICES" ]] && [[ -n "$IFACES" ]]; then
+        info "Zone $ZONE services: $SERVICES (VPN-only)"
       fi
-      if [[ -n "$PORTS" ]]; then
+      if [[ -n "$PORTS" ]] && ! $_ALL_VPN; then
         warn "Zone $ZONE open ports: $PORTS"
       fi
       if [[ -n "$IFACES" ]]; then
@@ -606,6 +651,24 @@ if require_cmd firewall-cmd && systemctl is-active firewalld &>/dev/null; then
   if firewall-cmd --query-masquerade &>/dev/null; then
     warn "Masquerading active"
   fi
+
+  # Firewall Policies (firewalld 0.9+: inter-zone traffic control)
+  FWD_POLICIES=$(firewall-cmd --list-policies 2>/dev/null || true)
+  if [[ -n "$FWD_POLICIES" ]]; then
+    sub_header "Firewall Policies"
+    while IFS= read -r policy; do
+      [[ -z "$policy" ]] && continue
+      PTARGET=$(firewall-cmd --policy="$policy" --get-target 2>/dev/null || echo "unknown")
+      PINGRESS=$(firewall-cmd --policy="$policy" --query-ingress-zone=HOST 2>/dev/null && echo "HOST→" || true)
+      if [[ "$PTARGET" == "DROP" || "$PTARGET" == "REJECT" ]]; then
+        pass "Policy '$policy': target=$PTARGET (blocks inter-zone traffic)"
+      elif [[ "$PTARGET" == "CONTINUE" || "$PTARGET" == "ACCEPT" ]]; then
+        info "Policy '$policy': target=$PTARGET"
+      else
+        info "Policy '$policy': target=$PTARGET"
+      fi
+    done <<< "$FWD_POLICIES"
+  fi
 elif require_cmd ufw; then
   UFW_STATUS=$(ufw status 2>/dev/null | head -1)
   if echo "$UFW_STATUS" | grep -qi "active"; then
@@ -635,14 +698,28 @@ header "04" "NFTABLES & KILL-SWITCH"
 ###############################################################################
 
 if require_cmd nft; then
+  # Detect if firewalld manages nftables as its backend (default on Fedora/RHEL)
+  _NFTABLES_BACKEND=false
+  if systemctl is-active firewalld &>/dev/null; then
+    _FWD_BE=$(grep -i "^FirewallBackend" /etc/firewalld/firewalld.conf 2>/dev/null | cut -d= -f2 | tr -d ' ')
+    # Default backend on modern systems (Fedora 31+, RHEL 8+) is nftables
+    if [[ -z "$_FWD_BE" || "${_FWD_BE,,}" == "nftables" ]]; then
+      _NFTABLES_BACKEND=true
+    fi
+  fi
+
   if systemctl is-active nftables &>/dev/null; then
-    pass "nftables: active"
+    pass "nftables: active (standalone)"
+  elif $_NFTABLES_BACKEND; then
+    pass "nftables: active via firewalld backend"
   else
     warn "nftables: inactive"
   fi
 
   if systemctl is-enabled nftables &>/dev/null; then
-    pass "nftables: boot-persistent"
+    pass "nftables: boot-persistent (standalone)"
+  elif $_NFTABLES_BACKEND; then
+    pass "nftables: boot-persistent via firewalld"
   else
     warn "nftables: not boot-persistent"
   fi
@@ -674,7 +751,24 @@ if require_cmd nft; then
       pass "Kill-switch: $RULE_COUNT rules (no duplicates)"
     fi
   else
-    warn "No VPN kill-switch found (no nftables drop on $PRIMARY_IFACE)"
+    # Also check for WireGuard/ProtonVPN-style killswitch via ip routing rules
+    # These use policy routing (ip rule) to suppress default routes when VPN is down
+    _IP_RULE_KS=false
+    if require_cmd ip; then
+      # Look for fwmark-based rules that send non-VPN traffic to a blackhole table
+      if ip rule show 2>/dev/null | grep -qE "not from all fwmark|from all fwmark.*blackhole|suppress_prefixlength"; then
+        _IP_RULE_KS=true
+      fi
+      # ProtonVPN specific: rules that suppress default routes without VPN mark
+      if ip rule show 2>/dev/null | grep -qE "lookup (main|default).*suppress|from all lookup.*fwmark"; then
+        _IP_RULE_KS=true
+      fi
+    fi
+    if $_IP_RULE_KS; then
+      pass "VPN kill-switch detected via ip routing rules (WireGuard/policy routing)"
+    else
+      warn "No VPN kill-switch found (no nftables drop on $PRIMARY_IFACE, no ip rule killswitch)"
+    fi
   fi
 else
   info "nftables not installed — skipped"
@@ -786,7 +880,23 @@ for GW in $LAN_GW_LIST; do
   if ! ping -c1 -W1 "$GW" &>/dev/null; then
     pass "LAN blocked: $GW"
   else
-    if [[ "$GW" == "$ACTUAL_GW" ]]; then
+    # Check if this gateway belongs to a VPN interface (e.g. WireGuard killswitch dummy)
+    # These are intentionally reachable — they are the VPN's own internal addresses
+    _GW_IS_VPN=false
+    if require_cmd ip; then
+      _GW_IFACE=$(ip route get "$GW" 2>/dev/null | grep -oP 'dev \K\S+' | head -1)
+      if echo "$_GW_IFACE" | grep -qE "^(tun|wg|proton|pvpn)"; then
+        _GW_IS_VPN=true
+      fi
+      # Also check if the GW IP is assigned to a VPN interface itself
+      if ip addr show 2>/dev/null | grep -qP "inet\s+${GW//./\\.}/"; then
+        _VPN_IFACE_OF_IP=$(ip addr show 2>/dev/null | grep -B3 "inet ${GW//./\\.}/" | grep -oP "^\d+:\s*\K\S+" | head -1)
+        echo "$_VPN_IFACE_OF_IP" | grep -qE "^(tun|wg|proton|pvpn)" && _GW_IS_VPN=true
+      fi
+    fi
+    if $_GW_IS_VPN; then
+      pass "LAN gateway $GW: VPN internal address (expected — WireGuard/killswitch interface)"
+    elif [[ "$GW" == "$ACTUAL_GW" ]]; then
       warn "LAN gateway reachable: $GW (kill-switch?)"
     else
       warn "LAN reachable: $GW (kill-switch?)"
@@ -831,7 +941,7 @@ declare -A SYSCTL_CHECKS=(
   ["fs.protected_symlinks"]=1
   ["fs.protected_fifos"]=2
   ["fs.protected_regular"]=2
-  ["kernel.unprivileged_bpf_disabled"]=1
+  ["kernel.unprivileged_bpf_disabled"]=1  # 2 is also accepted (stricter)
   ["net.core.bpf_jit_harden"]=2
   ["dev.tty.ldisc_autoload"]=0
   ["net.ipv4.conf.all.accept_redirects"]=0
@@ -841,7 +951,7 @@ declare -A SYSCTL_CHECKS=(
   ["net.ipv4.conf.all.accept_source_route"]=0
   ["net.ipv4.conf.all.log_martians"]=1
   ["net.ipv4.conf.default.log_martians"]=1
-  ["net.ipv4.conf.all.rp_filter"]=1
+  ["net.ipv4.conf.all.rp_filter"]=1  # 2 (loose) also accepted — needed for WireGuard/VPN
   ["net.ipv4.tcp_syncookies"]=1
   ["net.ipv4.icmp_echo_ignore_broadcasts"]=1
   ["net.ipv4.icmp_ignore_bogus_error_responses"]=1
@@ -856,6 +966,14 @@ declare -A SYSCTL_STRICT=(
   ["kernel.kexec_load_disabled"]=1
 )
 
+# Params where any value >= expected is acceptable (more = stricter)
+declare -A SYSCTL_MIN_OK=(
+  ["kernel.yama.ptrace_scope"]=1
+  ["kernel.unprivileged_bpf_disabled"]=1
+  ["net.ipv4.conf.all.rp_filter"]=1
+  ["net.ipv4.conf.default.rp_filter"]=1
+)
+
 for KEY in "${!SYSCTL_CHECKS[@]}"; do
   EXPECTED="${SYSCTL_CHECKS[$KEY]}"
   ACTUAL=$(sysctl -n "$KEY" 2>/dev/null || echo "N/A")
@@ -863,8 +981,8 @@ for KEY in "${!SYSCTL_CHECKS[@]}"; do
     warn "sysctl $KEY: not available"
   elif [[ "$ACTUAL" -eq "$EXPECTED" ]]; then
     pass "sysctl $KEY = $ACTUAL"
-  elif [[ "$KEY" == "kernel.yama.ptrace_scope" ]] && [[ "$ACTUAL" -ge "$EXPECTED" ]]; then
-    pass "sysctl $KEY = $ACTUAL (>=$EXPECTED)"
+  elif [[ -n "${SYSCTL_MIN_OK[$KEY]+x}" ]] && [[ "$ACTUAL" -ge "${SYSCTL_MIN_OK[$KEY]}" ]]; then
+    pass "sysctl $KEY = $ACTUAL (>=${SYSCTL_MIN_OK[$KEY]} — hardened)"
   else
     fail "sysctl $KEY = $ACTUAL (expected: $EXPECTED)"
   fi
@@ -935,23 +1053,28 @@ for SVC in $SHOULD_BE_OFF; do
   fi
 done
 
-# wsdd special check (binary permissions + running processes)
-for WSDD_BIN in /usr/libexec/gvfsd-wsdd /usr/bin/wsdd; do
-  if [[ -f "$WSDD_BIN" ]]; then
-    PERMS=$(stat -c %a "$WSDD_BIN" 2>/dev/null)
-    if [[ "$PERMS" == "000" ]] || [[ "$PERMS" == "0" ]]; then
-      pass "$(basename "$WSDD_BIN"): blocked (chmod 000)"
-    else
-      warn "$(basename "$WSDD_BIN"): permissions $PERMS (should be 000)"
-    fi
-  fi
-done
-# wsdd running processes
-WSDD_PROCS=$(pgrep -c -f "wsdd|gvfsd-wsdd" 2>/dev/null | ccount)
-if [[ "$WSDD_PROCS" -gt 0 ]]; then
-  warn "wsdd processes running: $WSDD_PROCS"
+# wsdd (Web Services Discovery) check
+# Distinguish between standalone wsdd.service and GNOME's gvfsd-wsdd (activated on-demand by GVFS)
+_WSDD_SVC_ACTIVE=false
+systemctl is-active wsdd.service &>/dev/null && _WSDD_SVC_ACTIVE=true
+systemctl is-active wsdd2.service &>/dev/null && _WSDD_SVC_ACTIVE=true
+
+if $_WSDD_SVC_ACTIVE; then
+  warn "wsdd.service active — WS-Discovery broadcasts hostname on local network"
+elif pgrep -x wsdd &>/dev/null; then
+  warn "wsdd process running (not via systemd service)"
 else
-  pass "No wsdd processes running"
+  pass "wsdd (standalone): not running"
+fi
+
+# gvfsd-wsdd is part of GNOME's gvfs — started on-demand for network browsing.
+# It is firewall-protected on hardened systems. Warn only if firewall is absent.
+if pgrep -x gvfsd-wsdd &>/dev/null; then
+  if systemctl is-active firewalld &>/dev/null || systemctl is-active ufw &>/dev/null; then
+    info "gvfsd-wsdd (GNOME network browsing): running — firewall-protected"
+  else
+    warn "gvfsd-wsdd running without active firewall — WS-Discovery exposed on LAN"
+  fi
 fi
 
 # Critical services that should be ON
@@ -1450,7 +1573,15 @@ SWAP_ACTIVE="${SWAP_ACTIVE:-0}"
 SWAP_DEVS=$(swapon --show=NAME --noheadings 2>/dev/null)
 if [[ "$SWAP_ACTIVE" -gt 0 ]]; then
   SWAP_ENCRYPTED=true
+  SWAP_HAS_REAL=false
   while read -r swapdev; do
+    [[ -z "$swapdev" ]] && continue
+    # ZRAM is in-memory compression — not persistent storage, no encryption needed
+    if [[ "$swapdev" =~ ^/dev/zram ]]; then
+      info "Swap: $swapdev is ZRAM (in-memory compression — no encryption needed)"
+      continue
+    fi
+    SWAP_HAS_REAL=true
     if ! lsblk -no TYPE "$swapdev" 2>/dev/null | grep -q crypt; then
       # Check if parent is crypt
       PARENT=$(lsblk -no PKNAME "$swapdev" 2>/dev/null | head -1)
@@ -1469,7 +1600,9 @@ if [[ "$SWAP_ACTIVE" -gt 0 ]]; then
       fi
     fi
   done <<< "$SWAP_DEVS"
-  if $SWAP_ENCRYPTED; then
+  if ! $SWAP_HAS_REAL; then
+    pass "Swap: ZRAM only (in-memory — no disk persistence risk)"
+  elif $SWAP_ENCRYPTED; then
     pass "Swap: encrypted"
   else
     warn "Swap: NOT encrypted (memory contents at risk)"
@@ -1612,8 +1745,18 @@ else
   info "Package signature verification: not available for this package manager"
 fi
 
-# Automated Security Updates (new)
-if systemctl is-active dnf-automatic.timer &>/dev/null || systemctl is-enabled dnf-automatic.timer &>/dev/null 2>&1; then
+# Automated Security Updates
+# dnf5-automatic (Fedora 41+) and legacy dnf-automatic (Fedora ≤40, RHEL)
+if systemctl is-active dnf5-automatic.timer &>/dev/null || systemctl is-enabled dnf5-automatic.timer &>/dev/null 2>&1; then
+  # Check if configured for security-only updates
+  _DNF5_AUTO_CONF="/etc/dnf/dnf5-plugins/automatic.conf"
+  _DNF5_UPGRADE_TYPE=$(grep -i "^upgrade_type" "$_DNF5_AUTO_CONF" 2>/dev/null | cut -d= -f2 | tr -d ' ')
+  if [[ "${_DNF5_UPGRADE_TYPE,,}" == "security" ]]; then
+    pass "Automated updates: dnf5-automatic enabled (security-only)"
+  else
+    pass "Automated updates: dnf5-automatic enabled (upgrade_type=${_DNF5_UPGRADE_TYPE:-default})"
+  fi
+elif systemctl is-active dnf-automatic.timer &>/dev/null || systemctl is-enabled dnf-automatic.timer &>/dev/null 2>&1; then
   pass "Automated updates: dnf-automatic enabled"
 elif systemctl is-active unattended-upgrades &>/dev/null || [[ -f /etc/apt/apt.conf.d/20auto-upgrades ]]; then
   pass "Automated updates: unattended-upgrades active"
@@ -2253,16 +2396,25 @@ if systemctl is-active chronyd &>/dev/null; then
     CHRONY_SOURCES=${CHRONY_SOURCES:-0}
     info "Chrony sources: $CHRONY_SOURCES"
 
-    # Network Time Security (NTS) check (new)
-    NTS_SOURCES=$(chronyc -n sources 2>/dev/null | grep -c "NTS" | ccount)
+    # Network Time Security (NTS) check
+    # Primary: chronyc authdata shows "NTS" for authenticated sources (chrony 4.0+)
+    NTS_SOURCES=$(chronyc -n authdata 2>/dev/null | grep -c "NTS" | ccount)
     if [[ "$NTS_SOURCES" -gt 0 ]]; then
-      pass "NTS (Network Time Security): $NTS_SOURCES source(s) with NTS"
+      pass "NTS (Network Time Security): $NTS_SOURCES active source(s) using NTS"
     else
-      # Check config for NTS
-      if grep -qiE "^\s*nts" /etc/chrony.conf 2>/dev/null || grep -qiE "^\s*nts" /etc/chrony/chrony.conf 2>/dev/null; then
-        pass "NTS configured in chrony.conf"
+      # Fallback: check chrony.conf for 'nts' keyword on server/pool lines
+      _NTS_CONF=false
+      for _chrony_conf in /etc/chrony.conf /etc/chrony/chrony.conf; do
+        [[ -f "$_chrony_conf" ]] || continue
+        if grep -qiE "^(server|pool)\s+.*\bnts\b" "$_chrony_conf" 2>/dev/null; then
+          _NTS_CONF=true
+          break
+        fi
+      done
+      if $_NTS_CONF; then
+        pass "NTS (Network Time Security) configured in chrony.conf"
       else
-        warn "NTS (Network Time Security) not configured — time traffic unencrypted"
+        info "NTS (Network Time Security) not configured — consider adding 'nts' to chrony server lines"
       fi
     fi
   fi
@@ -2340,15 +2492,14 @@ if systemctl is-active systemd-coredump.socket &>/dev/null; then
 else
   pass "systemd-coredump socket: inactive"
 fi
-if [[ -f /etc/systemd/coredump.conf ]]; then
-  COREDUMP_STORAGE=$(grep -i "^Storage=" /etc/systemd/coredump.conf 2>/dev/null | cut -d= -f2)
-  if [[ "$COREDUMP_STORAGE" == "none" ]]; then
-    pass "Coredump storage: none (disabled)"
-  elif [[ -n "$COREDUMP_STORAGE" ]]; then
-    warn "Coredump storage: $COREDUMP_STORAGE (should be 'none')"
-  else
-    info "Coredump storage: default (not explicitly set)"
-  fi
+# Read effective storage setting — check drop-ins too (they override main config)
+COREDUMP_STORAGE=$(_systemd_conf_val /etc/systemd/coredump.conf Storage)
+if [[ "${COREDUMP_STORAGE,,}" == "none" ]]; then
+  pass "Coredump storage: none (disabled)"
+elif [[ -n "$COREDUMP_STORAGE" ]]; then
+  warn "Coredump storage: $COREDUMP_STORAGE (should be 'none')"
+else
+  info "Coredump storage: default/external (not explicitly disabled)"
 fi
 
 # USB Guard (new)
@@ -2624,9 +2775,13 @@ check_browser_privacy() {
 
   _bp_check_user() {
     local user="$1" uid="$2" home="$3"
-    # Check both standard and Flatpak Firefox profile locations
+    # Check all known Firefox profile locations:
+    # - Standard:       ~/.mozilla/firefox  (most distros)
+    # - XDG-compliant:  ~/.config/mozilla/firefox  (Fedora 33+, some others)
+    # - Flatpak:        ~/.var/app/org.mozilla.firefox/.mozilla/firefox
     local ff_dirs=(
       "$home/.mozilla/firefox"
+      "$home/.config/mozilla/firefox"
       "$home/.var/app/org.mozilla.firefox/.mozilla/firefox"
     )
 
@@ -2927,12 +3082,16 @@ check_network_privacy() {
     val="$(sed -n '/^\[connection\]/,/^\[/{ s/^ethernet\.cloned-mac-address\s*=\s*//p; }' "$conf_file" 2>/dev/null)"
     [[ -n "$val" ]] && eth_clone="$val"
   done
-  if [[ "$eth_clone" == "random" || "$eth_clone" == "stable" ]]; then
-    pass "Ethernet MAC cloning set to '$eth_clone'"
+  if [[ "$eth_clone" == "random" ]]; then
+    pass "Ethernet MAC randomization: random (new MAC on each connection)"
+  elif [[ "$eth_clone" == "stable" ]]; then
+    # 'stable' derives a consistent MAC from connection-UUID — not truly random.
+    # With a static IP it provides no privacy benefit (IP is the stable identifier).
+    info "Ethernet MAC: stable (consistent per connection — not truly random; with static IP, IP is the identifier)"
   elif [[ -n "$eth_clone" ]]; then
     info "Ethernet cloned-mac-address=$eth_clone"
   else
-    info "Ethernet MAC randomization not configured (uses permanent MAC)"
+    info "Ethernet MAC randomization not configured (uses permanent hardware MAC)"
   fi
 
   if systemctl is-active --quiet avahi-daemon.service 2>/dev/null; then
@@ -2943,12 +3102,22 @@ check_network_privacy() {
 
   local avahi_conf="/etc/avahi/avahi-daemon.conf"
   if [[ -f "$avahi_conf" ]]; then
-    local pub_host
-    pub_host="$(sed -n '/^\[publish\]/,/^\[/{ s/^publish-hostname\s*=\s*//p; }' "$avahi_conf" 2>/dev/null)"
-    if [[ "$pub_host" == "no" ]]; then
-      pass "Avahi hostname publishing disabled"
+    # Only meaningful if avahi can actually run (not masked or statically disabled)
+    # NOTE: systemctl is-enabled exits non-zero for masked/disabled, so we use || true
+    # NOT || echo "disabled" which would append "disabled" to the captured output.
+    local avahi_enabled
+    avahi_enabled=$(systemctl is-enabled avahi-daemon.service 2>/dev/null) || true
+    [[ -z "$avahi_enabled" ]] && avahi_enabled="unknown"
+    if [[ "$avahi_enabled" == "masked" || "$avahi_enabled" == "disabled" || "$avahi_enabled" == "static" ]]; then
+      info "Avahi is $avahi_enabled — config check skipped"
     else
-      warn "Avahi publishes hostname (publish-hostname=${pub_host:-yes})"
+      local pub_host
+      pub_host="$(sed -n '/^\[publish\]/,/^\[/{ s/^publish-hostname\s*=\s*//p; }' "$avahi_conf" 2>/dev/null)"
+      if [[ "$pub_host" == "no" ]]; then
+        pass "Avahi hostname publishing disabled"
+      else
+        warn "Avahi publishes hostname (publish-hostname=${pub_host:-yes})"
+      fi
     fi
   fi
 
@@ -2997,7 +3166,21 @@ check_network_privacy() {
 
   local ipv6_disabled
   ipv6_disabled="$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)"
-  if [[ "$ipv6_disabled" == "1" ]]; then
+  # Also check NetworkManager: ipv6.method=disabled means NM prevents IPv6 on that interface
+  # even if the kernel sysctl is not set. This is the standard Fedora/RHEL way to disable IPv6.
+  local _ipv6_nm_disabled=false
+  if require_cmd nmcli; then
+    while IFS= read -r _cname; do
+      [[ -z "$_cname" ]] && continue
+      local _ipv6method
+      _ipv6method=$(nmcli -t -f ipv6.method connection show "$_cname" 2>/dev/null | grep -oP '(?<=ipv6\.method:).*' | head -1)
+      if [[ "$_ipv6method" == "disabled" ]]; then
+        _ipv6_nm_disabled=true
+        break
+      fi
+    done < <(nmcli -t -f NAME connection show --active 2>/dev/null)
+  fi
+  if [[ "$ipv6_disabled" == "1" ]] || $_ipv6_nm_disabled; then
     pass "IPv6 disabled — privacy extensions not needed"
   else
     local tempaddr
@@ -3011,17 +3194,37 @@ check_network_privacy() {
     fi
   fi
 
-  local dhcp_hostname=""
-  for conf_file in /etc/NetworkManager/NetworkManager.conf /etc/NetworkManager/conf.d/*.conf; do
-    [[ -f "$conf_file" ]] || continue
-    local val
-    val="$(sed -n '/^\[ipv4\]/,/^\[/{ s/^dhcp-send-hostname\s*=\s*//p; }' "$conf_file" 2>/dev/null)"
-    [[ -n "$val" ]] && dhcp_hostname="$val"
-  done
-  if [[ "$dhcp_hostname" == "false" || "$dhcp_hostname" == "no" ]]; then
-    pass "DHCP hostname sending disabled"
+  # Check if any active connection actually uses DHCP (static IP = no DHCP at all)
+  local _uses_dhcp=false
+  if require_cmd nmcli; then
+    while IFS= read -r _cname; do
+      [[ -z "$_cname" ]] && continue
+      local _method
+      _method=$(nmcli -t -f ipv4.method connection show "$_cname" 2>/dev/null | grep -oP '(?<=ipv4\.method:).*' | head -1)
+      if [[ "$_method" == "auto" || "$_method" == "link-local" ]]; then
+        _uses_dhcp=true
+        break
+      fi
+    done < <(nmcli -t -f NAME connection show --active 2>/dev/null)
   else
-    warn "DHCP sends hostname to network (dhcp-send-hostname=${dhcp_hostname:-true})"
+    _uses_dhcp=true  # can't check — assume DHCP
+  fi
+
+  if ! $_uses_dhcp; then
+    pass "DHCP hostname: N/A (all connections use static IP — no DHCP sent)"
+  else
+    local dhcp_hostname=""
+    for conf_file in /etc/NetworkManager/NetworkManager.conf /etc/NetworkManager/conf.d/*.conf; do
+      [[ -f "$conf_file" ]] || continue
+      local val
+      val="$(sed -n '/^\[ipv4\]/,/^\[/{ s/^dhcp-send-hostname\s*=\s*//p; }' "$conf_file" 2>/dev/null)"
+      [[ -n "$val" ]] && dhcp_hostname="$val"
+    done
+    if [[ "$dhcp_hostname" == "false" || "$dhcp_hostname" == "no" ]]; then
+      pass "DHCP hostname sending disabled"
+    else
+      warn "DHCP sends hostname to network (dhcp-send-hostname=${dhcp_hostname:-true})"
+    fi
   fi
 
   local mdns_val=""
@@ -3148,7 +3351,8 @@ check_data_privacy() {
   core_soft="$(ulimit -Sc 2>/dev/null)"
   if [[ "$core_pattern" == *"systemd-coredump"* ]]; then
     local core_storage
-    core_storage="$(grep -i "^Storage\s*=" /etc/systemd/coredump.conf 2>/dev/null | cut -d= -f2 | tr -d ' ')"
+    # Read effective setting — drop-ins override main config
+    core_storage="$(_systemd_conf_val /etc/systemd/coredump.conf Storage)"
     if [[ "${core_storage,,}" == "none" ]]; then
       pass "Core dumps disabled (systemd-coredump storage=none)"
     else
