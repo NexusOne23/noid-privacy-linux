@@ -2,7 +2,7 @@
 
 All 42 sections with descriptions of what each checks and why it matters.
 
-> **Version:** 3.0.0 | **Total Checks:** 300+ | **Sections:** 42
+> **Version:** 3.2.1 | **Total Checks:** 300+ | **Sections:** 42
 
 ---
 
@@ -150,7 +150,8 @@ After all 42 sections, NoID Privacy for Linux calculates a **Security & Privacy 
 
 | Score | Rating | Meaning |
 |-------|--------|---------|
-| 90%+ | 🟢 EXCELLENT | Well-hardened system |
+| 95%+ | 🏰 FORTRESS | Exceptionally hardened system |
+| 90-94% | 🟢 EXCELLENT | Well-hardened system |
 | 75-89% | 🟡 SOLID | Good baseline, some improvements possible |
 | 50-74% | 🟠 NEEDS WORK | Significant gaps in security/privacy |
 | <50% | 🔴 CRITICAL | Immediate attention required |
