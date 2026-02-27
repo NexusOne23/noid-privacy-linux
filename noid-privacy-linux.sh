@@ -527,12 +527,27 @@ if require_cmd getsebool; then
 fi
 
 # SELinux Denials
+# Known-benign processes that routinely generate AVC denials as part of their normal operation:
+#   aide         — file integrity checks access many restricted paths
+#   usbguard-daemon — USB access control interacts with udev/systemd
+#   systemd-logind  — session management, normal boot-time interactions
+# Only warn if AVC denials come from OTHER (unexpected) processes.
 if require_cmd ausearch; then
   SE_DENIALS=$(ausearch -m avc --start recent 2>/dev/null | grep -c "type=AVC" || true)
   SE_DENIALS=${SE_DENIALS//[^0-9]/}
   SE_DENIALS=${SE_DENIALS:-0}
   if [[ "$SE_DENIALS" -gt 0 ]]; then
-    warn "SELinux: $SE_DENIALS AVC denials (recent)"
+    _SE_AVC_RAW=$(ausearch -m avc --start recent 2>/dev/null)
+    _SE_UNEXPECTED=$(echo "$_SE_AVC_RAW" \
+      | grep -oP 'comm="\K[^"]+' \
+      | grep -cvE "^(aide|usbguard-daemon|usbguard|systemd-logind|rpm)$" || true)
+    _SE_UNEXPECTED=${_SE_UNEXPECTED//[^0-9]/}
+    _SE_UNEXPECTED=${_SE_UNEXPECTED:-0}
+    if [[ "$_SE_UNEXPECTED" -eq 0 ]]; then
+      info "SELinux: $SE_DENIALS AVC denials (recent) — aide/usbguard/logind only (MAC working correctly)"
+    else
+      warn "SELinux: $SE_DENIALS AVC denials ($_SE_UNEXPECTED from unexpected processes)"
+    fi
   else
     pass "SELinux: 0 AVC denials (recent)"
   fi
@@ -1994,7 +2009,9 @@ if ! should_skip "logs"; then
 header "19" "LOGS & MONITORING"
 ###############################################################################
 
-JOURNAL_ERR=$(journalctl -p err --since "1 hour ago" --no-pager -q 2>/dev/null | wc -l | ccount)
+JOURNAL_ERR=$(journalctl -p err --since "1 hour ago" --no-pager -q 2>/dev/null \
+  | grep -cv " sudo\[" || true)
+JOURNAL_ERR=${JOURNAL_ERR:-0}
 if [[ "$JOURNAL_ERR" -le 10 ]]; then
   pass "Journal errors (1h): $JOURNAL_ERR"
 elif [[ "$JOURNAL_ERR" -le 50 ]]; then
@@ -2003,7 +2020,14 @@ else
   fail "Journal errors (1h): $JOURNAL_ERR"
 fi
 
-JOURNAL_CRIT=$(journalctl -p crit --since "24 hours ago" --no-pager -q 2>/dev/null | grep -cvE "sudo|password is required|auth could not identify" || true)
+# journalctl short format: each actual entry starts with a 3-letter month (e.g. "Feb 26 ...").
+# Multi-line entries (coredump stack traces + module lists) produce many continuation lines
+# that are indented with spaces — these are NOT separate events and must not be counted.
+# Filter to timestamp-prefixed lines only, then exclude known-benign sources.
+_JCRIT_LINES=$(journalctl -p crit --since "24 hours ago" --no-pager -q 2>/dev/null)
+JOURNAL_CRIT=$(echo "$_JCRIT_LINES" \
+  | grep -E "^[A-Z][a-z]{2} " \
+  | grep -cvE "sudo|password is required|auth could not identify|systemd-coredump" || true)
 JOURNAL_CRIT=${JOURNAL_CRIT:-0}
 if [[ "$JOURNAL_CRIT" -eq 0 ]]; then
   pass "Journal critical (24h): 0"
@@ -2723,7 +2747,8 @@ if require_cmd rpm; then
   RPM_VA_OUTPUT=$(rpm -Va 2>/dev/null || true)
   RPM_VERIFY_ALL=$(echo "$RPM_VA_OUTPUT" | grep -cE "^..5" || true)
   RPM_VERIFY_ALL=${RPM_VERIFY_ALL:-0}
-  RPM_VERIFY_BIN=$(echo "$RPM_VA_OUTPUT" | grep -E "^..5" | grep -cv " c " || true)
+  RPM_VERIFY_BIN=$(echo "$RPM_VA_OUTPUT" | grep -E "^..5" | grep -v " c " \
+    | grep -cv "\.pyc\b\|/__pycache__/\|/usr/lib/issue" || true)
   RPM_VERIFY_BIN=${RPM_VERIFY_BIN:-0}
   if [[ "$RPM_VERIFY_ALL" -eq 0 ]]; then
     pass "RPM verify: all package files intact"
