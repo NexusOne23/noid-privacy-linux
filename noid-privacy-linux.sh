@@ -659,7 +659,6 @@ if require_cmd firewall-cmd && systemctl is-active firewalld &>/dev/null; then
     while IFS= read -r policy; do
       [[ -z "$policy" ]] && continue
       PTARGET=$(firewall-cmd --policy="$policy" --get-target 2>/dev/null || echo "unknown")
-      PINGRESS=$(firewall-cmd --policy="$policy" --query-ingress-zone=HOST 2>/dev/null && echo "HOST→" || true)
       if [[ "$PTARGET" == "DROP" || "$PTARGET" == "REJECT" ]]; then
         pass "Policy '$policy': target=$PTARGET (blocks inter-zone traffic)"
       elif [[ "$PTARGET" == "CONTINUE" || "$PTARGET" == "ACCEPT" ]]; then
