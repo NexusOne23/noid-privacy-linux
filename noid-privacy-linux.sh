@@ -6,7 +6,7 @@
 #  300+ checks across 42 sections
 #  Requires: root
 ###############################################################################
-NOID_PRIVACY_VERSION="3.2.0"
+NOID_PRIVACY_VERSION="3.2.1"
 set +e          # Don't exit on errors — we handle them ourselves
 
 # --- Argument Parsing ---
@@ -1059,9 +1059,20 @@ _WSDD_SVC_ACTIVE=false
 systemctl is-active wsdd.service &>/dev/null && _WSDD_SVC_ACTIVE=true
 systemctl is-active wsdd2.service &>/dev/null && _WSDD_SVC_ACTIVE=true
 
+# Check for standalone wsdd processes (not gvfsd-wsdd children).
+# gvfsd-wsdd spawns wsdd with --no-host → does NOT announce this host on the LAN.
+# Only flag wsdd processes that lack --no-host (true standalone broadcast daemons).
+_WSDD_STANDALONE_PROC=false
+while IFS= read -r _wpid; do
+  _wcmd=$(tr '\0' ' ' < "/proc/$_wpid/cmdline" 2>/dev/null)
+  if ! echo "$_wcmd" | grep -q -- '--no-host'; then
+    _WSDD_STANDALONE_PROC=true
+  fi
+done < <(pgrep -x wsdd 2>/dev/null)
+
 if $_WSDD_SVC_ACTIVE; then
   warn "wsdd.service active — WS-Discovery broadcasts hostname on local network"
-elif pgrep -x wsdd &>/dev/null; then
+elif $_WSDD_STANDALONE_PROC; then
   warn "wsdd process running (not via systemd service)"
 else
   pass "wsdd (standalone): not running"
