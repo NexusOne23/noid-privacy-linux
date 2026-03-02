@@ -5,7 +5,7 @@
 ### Privacy & Security Audit for Linux Desktops
 
 [![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](https://github.com/NexusOne23/noid-privacy-linux/blob/main/LICENSE)
-[![Version](https://img.shields.io/badge/version-3.2.1-green.svg)](https://github.com/NexusOne23/noid-privacy-linux/releases)
+[![Version](https://img.shields.io/badge/version-3.2.2-green.svg)](https://github.com/NexusOne23/noid-privacy-linux/releases)
 [![Pure Bash](https://img.shields.io/badge/pure-bash-4EAA25.svg?logo=gnu-bash&logoColor=white)](https://github.com/NexusOne23/noid-privacy-linux)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen.svg)](https://github.com/NexusOne23/noid-privacy-linux)
 [![Checks](https://img.shields.io/badge/checks-300%2B-orange.svg)](https://github.com/NexusOne23/noid-privacy-linux)
@@ -115,7 +115,7 @@ sudo bash noid-privacy-linux.sh --json
 ```
 $ sudo bash noid-privacy-linux.sh --ai
 
-  NoID Privacy for Linux v3.2.1 — Privacy & Security Audit for Linux Desktops
+  NoID Privacy for Linux v3.2.2 — Privacy & Security Audit for Linux Desktops
   2026-02-13 15:03:15 | mydesktop | 6.18.9-200.fc43.x86_64
   Arch: x86_64 | Distro: Fedora Linux 43 (Workstation Edition)
   Checks: 300+ across 42 sections
@@ -283,9 +283,9 @@ Results appear as a rich **GitHub Actions Summary** with score, findings table, 
 
 ## 🔒 Privacy Promise
 
-This script makes **no network requests by default**. No telemetry, no analytics, no phone-home. One file, pure Bash — read every line yourself.
+This script makes **no network requests** for telemetry, analytics, or phone-home. One file, pure Bash — read every line yourself.
 
-> **Note:** The optional DNS leak test (`netleaks` section) contacts `whoami.akamai.net` and `ifconfig.me` to verify your VPN is working. Skip it with `--skip netleaks` for a fully offline audit.
+> **Note:** The `vpn`, `interfaces`, and `netleaks` sections make network requests (ping, dig, curl) to test connectivity, DNS, and VPN leaks. Skip them with `--skip vpn --skip interfaces --skip netleaks` for a fully offline audit.
 
 ---
 

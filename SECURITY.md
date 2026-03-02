@@ -56,7 +56,7 @@ NoID Privacy for Linux is designed with security in mind:
 - ✅ **Read-Only**: The script only **reads** system state — it never modifies your system
 - ✅ **No External Dependencies**: Zero third-party binaries, libraries, or package managers
 - ✅ **Pure Bash**: No Python, Ruby, Node.js, or compiled binaries
-- ✅ **No Network Requests by Default**: The script does not phone home or download anything. The optional DNS leak test (`netleaks` section) contacts external services and can be skipped with `--skip netleaks`.
+- ✅ **No Network Requests by Default**: The script does not phone home or download anything. The `vpn`, `interfaces`, and `netleaks` sections make network requests (ping, dig, curl) to test connectivity, DNS, and VPN leaks. Skip them with `--skip vpn --skip interfaces --skip netleaks` for a fully offline audit.
 - ✅ **No Data Collection**: Zero telemetry, zero analytics, zero tracking
 
 ### Code Transparency
@@ -169,5 +169,5 @@ For licensing questions, see [LICENSE](LICENSE) or open a [Discussion](https://g
 
 ---
 
-**Last Updated**: February 27, 2026
-**Policy Version**: 1.2
+**Last Updated**: March 2, 2026
+**Policy Version**: 1.3

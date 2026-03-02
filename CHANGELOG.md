@@ -7,6 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.2.2] - 2026-03-02
+
+### 🔴 High Fixes
+
+- **Permissions: numeric comparison instead of bitwise**: `stat -c %a` returns octal strings that were compared as decimal integers (`555 < 600` → false PASS, but `555 = r-xr-xr-x` = world-readable). Fixed at 5 locations (history files, system file permissions, private keys, cron dirs/files) using proper octal bitmask comparison: `(( (8#${PERMS} & 8#077) != 0 ))`.
+
+- **Firewalld: hardcoded zone list + default zone logic**: Zone enumeration used a hardcoded list missing `trusted`, `home`, `internal`, `work`, `FedoraServer`, `nm-shared`, and custom zones. Replaced with dynamic `firewall-cmd --get-zones`. Additionally, the default zone without explicit interfaces was skipped entirely — but it applies to ALL unassigned interfaces. Now evaluates services/ports on the default zone as exposed.
+
+- **openssl x509 -checkend: grep substring match**: `grep -q "will expire"` matched both "Certificate will expire" AND "Certificate will **not** expire" (substring). Every valid cert was falsely flagged. Fixed by using `openssl x509 -checkend` exit code (0 = valid, 1 = expired) instead of text parsing. Also added multi-distro cert paths (`/etc/pki/tls/certs` + `/etc/ssl/certs`).
+
+### 🟡 Medium Fixes
+
+- **IPv6 NetworkManager: break on first disabled connection**: `break` after first `disabled` result caused false PASS when multiple connections were active (e.g. eth0=disabled, wg0=auto). Now checks ALL active connections; breaks only on first NOT disabled.
+
+- **ICMP Redirect: only conf.all checked**: Missing `net.ipv4.conf.default.accept_redirects` check. New interfaces inherit from `conf.default`, so `conf.all=0` alone is insufficient. Now checks both and warns if only `conf.all` is disabled.
+
+- **Unowned files find without timeout**: `find / -xdev -nouser -o -nogroup` could hang on slow/remote filesystems. Added `timeout 30`.
+
+- **SSH service name: Debian/Ubuntu uses `ssh.service`**: Only `sshd.service` was checked. Debian/Ubuntu uses `ssh.service` (alias). Added `ssh` to service detection and SSH hardening section.
+
+- **RDP remote_found set before value check**: `remote_found=1` was set unconditionally when the gsettings key existed, before checking if RDP was actually enabled (`true`). Now only sets flag when value is `true`.
+
+- **APT security updates: locale-dependent parsing**: `apt-check --human-readable` output depends on system locale. Switched to raw `apt-check` (outputs `UPDATES;SECURITY` to stderr, locale-independent).
+
+- **World-writable detail find without timeout**: Added `timeout 30` to prevent hangs on slow filesystems.
+
+### 🟢 Low Fixes
+
+- **ssh-keygen double execution**: `ssh-keygen -l -f` was called twice per key (once for bits, once for type). Cached result in variable.
+
+- **Podman user/root identical scope**: Both `podman ps -q` calls ran as root, producing identical results. Removed misleading "user" count, kept only root container count.
+
+- **Audit watch sub-path matching**: Grep for `-w /etc/ssh ` (trailing space) didn't match more specific rules like `-w /etc/ssh/sshd_config`. Fixed to match sub-paths.
+
+- **systemctl --user portal check removed**: `systemctl --user` as root returns root's user session, not the desktop user's. Removed redundant portal check (already covered by device enumeration).
+
+- **Chrony status message**: `"chronyd: active"` → `"chrony: active"` for consistency with service naming.
+
+### 🔧 Calibration Fixes
+
+- **SUID files threshold**: Pass ≤30 → Pass ≤20, Warn 21-35, Fail >35. Fedora Workstation has ~15-20 SUID binaries; >20 warrants investigation.
+
+- **SGID files threshold**: Pass ≤15 → Pass ≤10, Warn 11-20, Fail >20. Typical systems have 5-8 SGID files.
+
+- **Unowned files threshold**: Pass ≤25 → Pass =0, Warn 1-5, Fail >5. Hardened systems should have zero unowned files; 25 was far too permissive.
+
+- **`recent-files-max-age=0` logic bug**: Was reported as WARN "kept forever" — but GNOME defines `max-age=0` as "list always empty" (disabled). Now correctly reported as PASS.
+
+- **DoH mode 3 severity**: Was PASS like mode 2 (strict). Mode 3 is fallback-only (falls back to plain DNS on failure). Now INFO to distinguish from strict DoH.
+
+- **IPv6 privacy extensions false positive**: NM check was too strict — `ipv6.method=manual` and `link-local` (functionally equivalent to disabled without configured addresses) were not accepted. Loopback interface was also checked unnecessarily. Now accepts `manual`/`link-local` as IPv6-off and skips `lo`.
+
+- **sshd systemd-security severity**: Was WARN at score 9.6. sshd inherently needs root/PAM/filesystem access — a high exposure score is expected and unavoidable. Now INFO (same as firewalld, fail2ban, auditd).
+
+- **openssl checkend stdout leak**: `openssl x509 -checkend -noout` still prints "Certificate will not expire" to stdout in some OpenSSL versions. Only stderr was suppressed (`2>/dev/null`), causing raw text to leak into the report. Fixed with `&>/dev/null`.
+
+- **at.allow/deny false positive**: Check warned "Neither at.allow nor at.deny exists" even when `at` was not installed. Now skips entirely if `at` command is not available.
+
+---
+
 ## [3.2.1] - 2026-02-27
 
 ### 🐛 Bug Fixes

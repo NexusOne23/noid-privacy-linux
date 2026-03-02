@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 ###############################################################################
-#  NoID Privacy for Linux v3.1.0 — Privacy & Security Audit
+#  NoID Privacy for Linux v3.2.2 — Privacy & Security Audit
 #  https://noid-privacy.com/linux.html | https://github.com/NexusOne23/noid-privacy-linux
 #  Fedora / RHEL / Debian / Ubuntu — Full-Spectrum Audit
 #  300+ checks across 42 sections
 #  Requires: root
 ###############################################################################
-NOID_PRIVACY_VERSION="3.2.1"
+NOID_PRIVACY_VERSION="3.2.2"
 set +e          # Don't exit on errors — we handle them ourselves
+
+# Bash 4+ required for associative arrays and other features
+if (( BASH_VERSINFO[0] < 4 )); then
+  echo "Error: Bash 4.0+ required (found ${BASH_VERSION})" >&2; exit 1
+fi
 
 # --- Argument Parsing ---
 NO_COLOR=false
@@ -99,6 +104,9 @@ _json_escape() {
   s="${s//\"/\\\"}"
   s="${s//$'\n'/\\n}"
   s="${s//$'\t'/\\t}"
+  s="${s//$'\r'/\\r}"
+  s="${s//$'\b'/\\b}"
+  s="${s//$'\f'/\\f}"
   printf '%s' "$s"
 }
 
@@ -222,6 +230,7 @@ _ff_pref() {
 
 _gsettings_user() {
   local user="$1" uid="$2" schema="$3" key="$4"
+  require_cmd sudo || return 1
   local bus="unix:path=/run/user/${uid}/bus"
   [[ -S "/run/user/${uid}/bus" ]] || return 1
   sudo -u "$user" DBUS_SESSION_BUS_ADDRESS="$bus" gsettings get "$schema" "$key" 2>/dev/null
@@ -533,11 +542,11 @@ fi
 #   systemd-logind  — session management, normal boot-time interactions
 # Only warn if AVC denials come from OTHER (unexpected) processes.
 if require_cmd ausearch; then
-  SE_DENIALS=$(ausearch -m avc --start recent 2>/dev/null | grep -c "type=AVC" || true)
+  _SE_AVC_RAW=$(ausearch -m avc --start recent 2>/dev/null)
+  SE_DENIALS=$(echo "$_SE_AVC_RAW" | grep -c "type=AVC" || true)
   SE_DENIALS=${SE_DENIALS//[^0-9]/}
   SE_DENIALS=${SE_DENIALS:-0}
   if [[ "$SE_DENIALS" -gt 0 ]]; then
-    _SE_AVC_RAW=$(ausearch -m avc --start recent 2>/dev/null)
     _SE_UNEXPECTED=$(echo "$_SE_AVC_RAW" \
       | grep -oP 'comm="\K[^"]+' \
       | grep -cvE "^(aide|usbguard-daemon|usbguard|systemd-logind|rpm)$" || true)
@@ -580,16 +589,14 @@ header "03" "FIREWALL"
 if require_cmd firewall-cmd && systemctl is-active firewalld &>/dev/null; then
   pass "firewalld: active"
 
-  # Check zones
-  for ZONE in public external dmz block drop FedoraWorkstation; do
+  # Check zones (permanent config only — runtime overrides are not checked)
+  _DEFAULT_ZONE=$(firewall-cmd --get-default-zone 2>/dev/null || echo "")
+  for ZONE in $(firewall-cmd --get-zones 2>/dev/null); do
     TARGET=$(firewall-cmd --zone="$ZONE" --get-target --permanent 2>/dev/null || echo "")
     [[ -z "$TARGET" ]] && continue  # zone doesn't exist
     SERVICES=$(firewall-cmd --zone="$ZONE" --list-services --permanent 2>/dev/null || echo "")
     PORTS=$(firewall-cmd --zone="$ZONE" --list-ports --permanent 2>/dev/null || echo "")
     IFACES=$(firewall-cmd --zone="$ZONE" --list-interfaces --permanent 2>/dev/null || echo "")
-
-    # Get default zone to know which applies to unassigned interfaces
-    _DEFAULT_ZONE=$(firewall-cmd --get-default-zone 2>/dev/null || echo "")
 
     # Only evaluate zones that are actively in use:
     # - Zones with interfaces explicitly assigned, OR
@@ -609,7 +616,18 @@ if require_cmd firewall-cmd && systemctl is-active firewalld &>/dev/null; then
       done
       # VPN-only zones or empty default zones with VPN traffic are not directly internet-facing
       if [[ -z "$IFACES" ]] && $_ZONE_IS_DEFAULT; then
-        info "Zone $ZONE (default): target=$TARGET, no interfaces assigned"
+        # Default zone applies to all unassigned interfaces — evaluate as exposed
+        if [[ "$TARGET" == "DROP" || "$TARGET" == "REJECT" || "$TARGET" == "%%REJECT%%" ]]; then
+          pass "Zone $ZONE (default): target=$TARGET"
+        else
+          warn "Zone $ZONE (default): target=$TARGET (not DROP/REJECT — applies to unassigned interfaces)"
+        fi
+        if [[ -n "$SERVICES" ]]; then
+          warn "Zone $ZONE (default) open services: $SERVICES"
+        fi
+        if [[ -n "$PORTS" ]]; then
+          warn "Zone $ZONE (default) open ports: $PORTS"
+        fi
       elif $_ALL_VPN && [[ -n "$IFACES" ]]; then
         info "Zone $ZONE: target=$TARGET (VPN-only interfaces: $IFACES)"
       elif [[ "$TARGET" == "DROP" || "$TARGET" == "REJECT" || "$TARGET" == "%%REJECT%%" ]]; then
@@ -622,7 +640,7 @@ if require_cmd firewall-cmd && systemctl is-active firewalld &>/dev/null; then
       elif [[ -n "$SERVICES" ]] && [[ -n "$IFACES" ]]; then
         info "Zone $ZONE services: $SERVICES (VPN-only)"
       fi
-      if [[ -n "$PORTS" ]] && ! $_ALL_VPN; then
+      if [[ -n "$PORTS" ]] && ! $_ALL_VPN && [[ -n "$IFACES" ]]; then
         warn "Zone $ZONE open ports: $PORTS"
       fi
       if [[ -n "$IFACES" ]]; then
@@ -795,6 +813,9 @@ if ! should_skip "vpn"; then
 header "05" "VPN & NETWORK"
 ###############################################################################
 
+# NOTE: This section makes network requests (ping, dig).
+# Use --skip vpn to avoid network traffic from this section.
+
 # Internet Connectivity Test
 if ping -c1 -W5 1.1.1.1 &>/dev/null; then
   pass "Internet connectivity: OK"
@@ -851,7 +872,7 @@ fi
 # DNS Leak Test & External IP (makes network requests — skippable with --skip netleaks)
 if ! should_skip "netleaks"; then
   if require_cmd dig; then
-    RESOLVED_IP=$(dig +short whoami.akamai.net @ns1-1.akamaitech.net 2>/dev/null || echo "timeout")
+    RESOLVED_IP=$(dig +short +time=5 whoami.akamai.net @ns1-1.akamaitech.net 2>/dev/null || echo "timeout")
     if [[ "$RESOLVED_IP" != "timeout" && -n "$RESOLVED_IP" ]]; then
       info "DNS leak test (public IP via DNS): $RESOLVED_IP"
     fi
@@ -1054,7 +1075,7 @@ if ! should_skip "services"; then
 header "07" "SERVICES & DAEMONS"
 ###############################################################################
 
-SHOULD_BE_OFF="sshd telnet.socket rsh.socket rlogin.socket rexec.socket vsftpd httpd nginx cups avahi-daemon bluetooth.service rpcbind nfs-server smb nmb"
+SHOULD_BE_OFF="sshd ssh telnet.socket rsh.socket rlogin.socket rexec.socket vsftpd httpd nginx cups avahi-daemon bluetooth.service rpcbind nfs-server smb nmb"
 for SVC in $SHOULD_BE_OFF; do
   if systemctl is-active "$SVC" &>/dev/null; then
     fail "Service running: $SVC"
@@ -1205,7 +1226,8 @@ if ! should_skip "ssh"; then
 header "09" "SSH HARDENING"
 ###############################################################################
 
-if systemctl is-masked sshd &>/dev/null || [[ "$(systemctl is-enabled sshd 2>&1)" == "masked" ]]; then
+if { systemctl is-masked sshd &>/dev/null || systemctl is-masked ssh &>/dev/null; } || \
+   [[ "$(systemctl is-enabled sshd 2>&1)" == "masked" ]] || [[ "$(systemctl is-enabled ssh 2>&1)" == "masked" ]]; then
   pass "SSH: masked + inactive — maximum security"
 else
   SSHD_CONFIG="/etc/ssh/sshd_config"
@@ -1259,12 +1281,19 @@ else
     # LoginGraceTime (new)
     LGT=$(sshd_cfg_val LoginGraceTime)
     if [[ -n "$LGT" ]]; then
-      # Convert to seconds for comparison
-      LGT_NUM=$(echo "$LGT" | grep -oP '^\d+')
-      if [[ -n "$LGT_NUM" ]] && [[ "$LGT_NUM" -le 60 ]]; then
-        pass "SSH: LoginGraceTime $LGT"
+      # Convert to seconds: sshd -T returns seconds, but config fallback may return 1m/2m/1h
+      LGT_SEC="$LGT"
+      if [[ "$LGT" =~ ^([0-9]+)m$ ]]; then
+        LGT_SEC=$(( ${BASH_REMATCH[1]} * 60 ))
+      elif [[ "$LGT" =~ ^([0-9]+)h$ ]]; then
+        LGT_SEC=$(( ${BASH_REMATCH[1]} * 3600 ))
+      elif [[ "$LGT" =~ ^([0-9]+)s?$ ]]; then
+        LGT_SEC="${BASH_REMATCH[1]}"
+      fi
+      if [[ "$LGT_SEC" =~ ^[0-9]+$ ]] && [[ "$LGT_SEC" -le 60 ]]; then
+        pass "SSH: LoginGraceTime $LGT (${LGT_SEC}s)"
       else
-        warn "SSH: LoginGraceTime $LGT (recommended: <=60s)"
+        warn "SSH: LoginGraceTime $LGT (${LGT_SEC}s, recommended: <=60s)"
       fi
     else
       warn "SSH: LoginGraceTime not set (default 120s — too long)"
@@ -1273,10 +1302,12 @@ else
     # SSH Key Strength
     sub_header "SSH Key Strength"
     for USER_HOME in /home/* /root; do
+      [[ -d "$USER_HOME" ]] || continue
       for KEY in "$USER_HOME"/.ssh/*.pub; do
         [[ -f "$KEY" ]] || continue
-        BITS=$(ssh-keygen -l -f "$KEY" 2>/dev/null | awk '{print $1}')
-        TYPE=$(ssh-keygen -l -f "$KEY" 2>/dev/null | awk '{print $4}' | tr -d '()')
+        _KEY_INFO=$(ssh-keygen -l -f "$KEY" 2>/dev/null) || continue
+        BITS=$(echo "$_KEY_INFO" | awk '{print $1}')
+        TYPE=$(echo "$_KEY_INFO" | awk '{print $4}' | tr -d '()')
         # RSA thresholds: <2048 = insecure (NIST deprecated), <4096 = acceptable but 4096 recommended
         # Ed25519/ECDSA keys are always considered strong regardless of bit size
         if [[ "$TYPE" == "RSA" ]] && [[ "${BITS:-0}" -lt 2048 ]]; then
@@ -1327,7 +1358,7 @@ if require_cmd auditctl; then
 
   CRITICAL_WATCHES="/etc/passwd /etc/shadow /etc/sudoers /etc/ssh /etc/pam.d"
   for WATCH in $CRITICAL_WATCHES; do
-    if auditctl -l 2>/dev/null | grep -q "$WATCH"; then
+    if auditctl -l 2>/dev/null | grep -q -- "-w ${WATCH}"; then
       pass "Audit watch: $WATCH"
     else
       warn "Audit watch missing: $WATCH"
@@ -1375,11 +1406,16 @@ for PAM_FILE in /etc/pam.d/system-auth /etc/pam.d/password-auth; do
   fi
 done
 
-# securetty
+# securetty — empty or missing file blocks root on all TTYs (hardened),
+# but only if pam_securetty.so is in the PAM stack.
 if [[ -f /etc/securetty ]]; then
-  pass "securetty present"
+  if [[ ! -s /etc/securetty ]]; then
+    pass "securetty present and empty (root TTY login blocked)"
+  else
+    pass "securetty present"
+  fi
 else
-  warn "securetty missing (root login on any TTY possible)"
+  info "securetty absent (root TTY restriction depends on PAM config)"
 fi
 
 # Sudo group
@@ -1429,11 +1465,12 @@ fi
 # History File Permissions (new)
 sub_header "History File Permissions"
 for USER_HOME in /home/* /root; do
+  [[ -d "$USER_HOME" ]] || continue
   for HIST in .bash_history .zsh_history; do
     if [[ -f "$USER_HOME/$HIST" ]]; then
       PERMS=$(stat -c %a "$USER_HOME/$HIST" 2>/dev/null)
-      if [[ "$PERMS" -gt 600 ]]; then
-        warn "History file too open: $USER_HOME/$HIST ($PERMS, should be <=600)"
+      if (( (8#${PERMS:-777} & 8#077) != 0 )); then
+        warn "History file too open: $USER_HOME/$HIST ($PERMS, should be 600 or stricter)"
       else
         pass "History file: $USER_HOME/$HIST ($PERMS)"
       fi
@@ -1449,23 +1486,27 @@ header "12" "FILESYSTEM SECURITY"
 ###############################################################################
 
 # SUID Files
-SUID_COUNT=$(find / -xdev -perm -4000 -type f 2>/dev/null | wc -l)
-if [[ "$SUID_COUNT" -le 30 ]]; then
+SUID_COUNT=$(timeout 30 find / -xdev -perm -4000 -type f 2>/dev/null | wc -l)
+if [[ "$SUID_COUNT" -le 25 ]]; then
   pass "SUID files: $SUID_COUNT"
+elif [[ "$SUID_COUNT" -le 40 ]]; then
+  warn "SUID files: $SUID_COUNT (>25)"
 else
-  warn "SUID files: $SUID_COUNT (>30)"
+  fail "SUID files: $SUID_COUNT (>40)"
 fi
 
 # SGID Files
-SGID_COUNT=$(find / -xdev -perm -2000 -type f 2>/dev/null | wc -l)
-if [[ "$SGID_COUNT" -le 15 ]]; then
+SGID_COUNT=$(timeout 30 find / -xdev -perm -2000 -type f 2>/dev/null | wc -l)
+if [[ "$SGID_COUNT" -le 10 ]]; then
   pass "SGID files: $SGID_COUNT"
+elif [[ "$SGID_COUNT" -le 20 ]]; then
+  warn "SGID files: $SGID_COUNT (>10)"
 else
-  warn "SGID files: $SGID_COUNT (>15)"
+  fail "SGID files: $SGID_COUNT (>20)"
 fi
 
 # World-Writable
-WW_COUNT=$(find / -xdev -perm -0002 -type f ! -path "/proc/*" ! -path "/sys/*" ! -path "/dev/*" 2>/dev/null | wc -l)
+WW_COUNT=$(timeout 30 find / -xdev -perm -0002 -type f ! -path "/proc/*" ! -path "/sys/*" ! -path "/dev/*" 2>/dev/null | wc -l)
 if [[ "$WW_COUNT" -eq 0 ]]; then
   pass "World-writable files: 0"
 else
@@ -1473,16 +1514,18 @@ else
   if ! $JSON_MODE; then
     while read -r f; do
       printf "       %s\n" "$f"
-    done < <(find / -xdev -perm -0002 -type f ! -path "/proc/*" ! -path "/sys/*" ! -path "/dev/*" 2>/dev/null | head -5)
+    done < <(timeout 30 find / -xdev -perm -0002 -type f ! -path "/proc/*" ! -path "/sys/*" ! -path "/dev/*" 2>/dev/null | head -5)
   fi
 fi
 
 # Unowned Files
-UNOWNED=$(find / -xdev \( -nouser -o -nogroup \) 2>/dev/null | wc -l)
-if [[ "$UNOWNED" -le 25 ]]; then
-  pass "Unowned files: $UNOWNED"
+UNOWNED=$(timeout 30 find / -xdev \( -nouser -o -nogroup \) 2>/dev/null | wc -l)
+if [[ "$UNOWNED" -eq 0 ]]; then
+  pass "Unowned files: 0"
+elif [[ "$UNOWNED" -le 10 ]]; then
+  warn "Unowned files: $UNOWNED (investigate)"
 else
-  warn "Unowned files: $UNOWNED (>25)"
+  fail "Unowned files: $UNOWNED (>10)"
 fi
 
 # /tmp Permissions
@@ -1526,7 +1569,7 @@ for FILE in "${!PERM_CHECKS[@]}"; do
   if [[ -f "$FILE" ]]; then
     EXPECTED="${PERM_CHECKS[$FILE]}"
     ACTUAL=$(stat -c %a "$FILE" 2>/dev/null)
-    if [[ "$ACTUAL" -le "$EXPECTED" ]]; then
+    if (( (8#${ACTUAL:-777} & ~8#$EXPECTED) == 0 )); then
       pass "Permissions $FILE: $ACTUAL"
     else
       warn "Permissions $FILE: $ACTUAL (expected: <=$EXPECTED)"
@@ -1538,7 +1581,7 @@ done
 sub_header "Login Banners"
 for BANNER_FILE in /etc/issue /etc/issue.net /etc/motd; do
   if [[ -f "$BANNER_FILE" ]] && [[ -s "$BANNER_FILE" ]]; then
-    if grep -qiE "(kernel|version|ubuntu|fedora|centos|debian|rhel)" "$BANNER_FILE" 2>/dev/null; then
+    if grep -qiE "(Linux kernel [0-9]|Fedora release|Ubuntu [0-9]|CentOS|Debian GNU|RHEL|Red Hat)" "$BANNER_FILE" 2>/dev/null; then
       warn "$BANNER_FILE leaks system info"
     else
       pass "$BANNER_FILE: no system info leaked"
@@ -1649,7 +1692,7 @@ if require_cmd dnf5; then
 elif require_cmd dnf; then
   UPDATES=$(dnf check-update --quiet 2>/dev/null | grep -v "^$" | wc -l)
 elif require_cmd apt; then
-  apt update -qq &>/dev/null
+  # No apt update — this is a read-only audit, don't write to /var/lib/apt/lists/
   UPDATES=$(apt list --upgradable 2>/dev/null | grep -c "upgradable" || true)
   UPDATES=${UPDATES:-0}
 elif require_cmd pacman; then
@@ -1685,7 +1728,8 @@ elif require_cmd apt-get; then
   SEC_CHECKED=true
   # Ubuntu: use apt-check if available (update-notifier-common), fallback to apt-get -s
   if [[ -x /usr/lib/update-notifier/apt-check ]]; then
-    SEC_UPDATES=$(/usr/lib/update-notifier/apt-check --human-readable 2>&1 | grep -oP '^\d+(?=.*security)' || true)
+    # apt-check without --human-readable outputs "UPDATES;SECURITY" to stderr (locale-independent)
+    SEC_UPDATES=$(/usr/lib/update-notifier/apt-check 2>&1 | cut -d';' -f2 || true)
     SEC_UPDATES=${SEC_UPDATES:-0}
   else
     SEC_UPDATES=$(apt-get upgrade -s 2>/dev/null | grep -ciE "^Inst.*security" || true)
@@ -1839,7 +1883,7 @@ if require_cmd chkrootkit; then
   $JSON_MODE || printf "  ${CYN}Running chkrootkit...${RST}\n"
   CHKRK_OUT=$(chkrootkit 2>/dev/null || true)
   # Filter known false positives
-  CHKRK_FP_PATTERN="bindshell|sniffer|chkutmp|w55808|slapper|scalper|amd|wted|Xor\.DDoS"
+  CHKRK_FP_PATTERN="bindshell|sniffer|chkutmp|w55808|slapper|scalper|wted|Xor\.DDoS"
   CHKRK_INFECTED=$(echo "$CHKRK_OUT" | grep "INFECTED" | grep -viE "$CHKRK_FP_PATTERN" | wc -l | ccount)
   CHKRK_FP=$(echo "$CHKRK_OUT" | grep "INFECTED" | grep -ciE "$CHKRK_FP_PATTERN" | ccount)
   if [[ "$CHKRK_INFECTED" -eq 0 ]]; then
@@ -1849,7 +1893,7 @@ if require_cmd chkrootkit; then
     if ! $JSON_MODE; then
       while read -r i; do
         printf "       %s\n" "$i"
-      done < <(echo "$CHKRK_OUT" | grep "INFECTED" | grep -viE "bindshell|sniffer|chkutmp|w55808|slapper|scalper|amd|wted" | head -5)
+      done < <(echo "$CHKRK_OUT" | grep "INFECTED" | grep -viE "$CHKRK_FP_PATTERN" | head -5)
     fi
   fi
 else
@@ -1859,6 +1903,7 @@ fi
 # Suspect Cron Jobs
 sub_header "Cron jobs (all users)"
 for USER_HOME in /home/* /root; do
+  [[ -d "$USER_HOME" ]] || continue
   USER=$(basename "$USER_HOME")
   CRONTAB=$(crontab -l -u "$USER" 2>/dev/null | grep -v "^#" | grep -v "^$" || true)
   if [[ -n "$CRONTAB" ]]; then
@@ -1946,9 +1991,12 @@ if [[ "$ESTAB_COUNT" -gt 0 ]] && ! $JSON_MODE; then
 fi
 
 # ICMP Redirect
-ICMP_REDIR=$(sysctl -n net.ipv4.conf.all.accept_redirects 2>/dev/null)
-if [[ "$ICMP_REDIR" -eq 0 ]]; then
-  pass "ICMP redirects: blocked"
+ICMP_REDIR_ALL=$(sysctl -n net.ipv4.conf.all.accept_redirects 2>/dev/null)
+ICMP_REDIR_DEF=$(sysctl -n net.ipv4.conf.default.accept_redirects 2>/dev/null)
+if [[ "${ICMP_REDIR_ALL:-1}" -eq 0 ]] && [[ "${ICMP_REDIR_DEF:-1}" -eq 0 ]]; then
+  pass "ICMP redirects: blocked (all+default)"
+elif [[ "${ICMP_REDIR_ALL:-1}" -eq 0 ]]; then
+  warn "ICMP redirects: conf.all=0, but conf.default=${ICMP_REDIR_DEF} (new interfaces may accept)"
 else
   fail "ICMP redirects: accepted"
 fi
@@ -1986,11 +2034,11 @@ if require_cmd docker; then
 fi
 
 if require_cmd podman; then
-  PODMAN_CONTAINERS=$(podman ps -q 2>/dev/null | wc -l)
-  info "Podman containers (user): $PODMAN_CONTAINERS"
-  PODMAN_ROOT=$(sudo podman ps -q 2>/dev/null | wc -l)
+  PODMAN_ROOT=$(podman ps -q 2>/dev/null | wc -l)
   if [[ "$PODMAN_ROOT" -gt 0 ]]; then
     warn "Podman root containers: $PODMAN_ROOT"
+  else
+    pass "Podman containers (root): 0"
   fi
 fi
 
@@ -2240,6 +2288,8 @@ fi # end hardware
 if ! should_skip "interfaces"; then
 header "22" "NETWORK INTERFACES (Detail)"
 ###############################################################################
+# NOTE: This section makes network requests (dig).
+# Use --skip interfaces to avoid network traffic from this section.
 
 if ! $JSON_MODE; then
   while read -r IFACE STATE ADDRS; do
@@ -2276,11 +2326,14 @@ if require_cmd trust; then
 fi
 
 if require_cmd openssl; then
-  while read -r cert; do
-    if openssl x509 -checkend 0 -in "$cert" -noout 2>&1 | grep -q "will expire"; then
-      warn "Expired certificate: $cert"
-    fi
-  done < <(find /etc/pki/tls/certs -maxdepth 1 \( -name "*.pem" -o -name "*.crt" \) 2>/dev/null | grep -v "ca-bundle" | head -20)
+  for _CERT_DIR in /etc/pki/tls/certs /etc/ssl/certs; do
+    [[ -d "$_CERT_DIR" ]] || continue
+    while read -r cert; do
+      if ! openssl x509 -checkend 0 -in "$cert" -noout &>/dev/null; then
+        warn "Expired certificate: $cert"
+      fi
+    done < <(find "$_CERT_DIR" -maxdepth 1 \( -name "*.pem" -o -name "*.crt" \) 2>/dev/null | grep -v "ca-bundle" | head -20)
+  done
 fi
 
 sub_header "SSH Keys"
@@ -2306,7 +2359,7 @@ header "24" "ENVIRONMENT & SECRETS"
 # World-readable private keys
 EXPOSED_KEYS=$(while read -r key; do
   PERMS=$(stat -c %a "$key" 2>/dev/null)
-  if [[ "$PERMS" -gt 600 ]]; then
+  if (( (8#${PERMS:-777} & 8#077) != 0 )); then
     echo "$key ($PERMS)"
   fi
 done < <(find /home /root \( -name "*.key" -o -name "id_rsa" -o -name "id_ed25519" -o -name "id_ecdsa" \) ! -name "*.pub" ! -path "*/cacert*" ! -path "*/ca-bundle*" ! -path "*public_key*" ! -path "*/roots.pem" 2>/dev/null))
@@ -2338,7 +2391,7 @@ header "25" "SYSTEMD SECURITY"
 
 if require_cmd systemd-analyze; then
   sub_header "systemd-analyze security (excerpt)"
-  for SVC in openclaw-gateway firewalld fail2ban auditd; do
+  for SVC in sshd firewalld fail2ban auditd; do
     SCORE=$(systemd-analyze security "$SVC" 2>/dev/null | tail -1 | grep -oP '\d+\.\d+' || echo "N/A")
     if [[ "$SCORE" != "N/A" ]]; then
       SCORE_INT=$(echo "$SCORE" | cut -d. -f1)
@@ -2347,7 +2400,7 @@ if require_cmd systemd-analyze; then
       elif [[ "$SCORE_INT" -le 6 ]]; then
         info "systemd-security $SVC: $SCORE"
       else
-        if [[ "$SVC" == "firewalld" || "$SVC" == "fail2ban" || "$SVC" == "auditd" ]]; then
+        if [[ "$SVC" == "sshd" || "$SVC" == "firewalld" || "$SVC" == "fail2ban" || "$SVC" == "auditd" ]]; then
           info "systemd-security $SVC: $SCORE (security service, needs root)"
         else
           warn "systemd-security $SVC: $SCORE (poor)"
@@ -2423,8 +2476,8 @@ if require_cmd timedatectl; then
   info "Timezone: $TZ"
 fi
 
-if systemctl is-active chronyd &>/dev/null; then
-  pass "chronyd: active"
+if systemctl is-active chronyd &>/dev/null || systemctl is-active chrony &>/dev/null; then
+  pass "chrony: active"
   if require_cmd chronyc; then
     CHRONY_SOURCES=$(chronyc sources 2>/dev/null | grep -c "^\^" || true)
     CHRONY_SOURCES=${CHRONY_SOURCES:-0}
@@ -2432,7 +2485,7 @@ if systemctl is-active chronyd &>/dev/null; then
 
     # Network Time Security (NTS) check
     # Primary: chronyc authdata shows "NTS" for authenticated sources (chrony 4.0+)
-    NTS_SOURCES=$(chronyc -n authdata 2>/dev/null | grep -c "NTS" | ccount)
+    NTS_SOURCES=$(chronyc -n authdata 2>/dev/null | awk '$3 == "NTS" {c++} END {print c+0}')
     if [[ "$NTS_SOURCES" -gt 0 ]]; then
       pass "NTS (Network Time Security): $NTS_SOURCES active source(s) using NTS"
     else
@@ -2601,12 +2654,14 @@ else
 fi
 
 # At Permission Check (new)
-if [[ -f /etc/at.allow ]]; then
-  pass "at.allow exists (whitelist approach)"
-elif [[ -f /etc/at.deny ]]; then
-  info "at.deny exists (blacklist approach — at.allow preferred)"
-else
-  warn "Neither at.allow nor at.deny exists"
+if require_cmd at; then
+  if [[ -f /etc/at.allow ]]; then
+    pass "at.allow exists (whitelist approach)"
+  elif [[ -f /etc/at.deny ]]; then
+    info "at.deny exists (blacklist approach — at.allow preferred)"
+  else
+    warn "Neither at.allow nor at.deny exists"
+  fi
 fi
 
 fi # end hardening
@@ -2672,9 +2727,9 @@ for CRONDIR in /etc/crontab /etc/cron.hourly /etc/cron.daily /etc/cron.weekly /e
     PERMS=$(stat -c '%a' "$CRONDIR" 2>/dev/null)
     if [[ "$OWNER" != "root" ]]; then
       fail "$CRONDIR owner: $OWNER (should be root)"
-    elif [[ -d "$CRONDIR" ]] && [[ "$PERMS" -le 755 ]]; then
+    elif [[ -d "$CRONDIR" ]] && (( (8#${PERMS:-777} & ~8#755) == 0 )); then
       pass "$CRONDIR: owner=$OWNER, perms=$PERMS"
-    elif [[ -f "$CRONDIR" ]] && [[ "$PERMS" -gt 600 ]]; then
+    elif [[ -f "$CRONDIR" ]] && (( (8#${PERMS:-777} & 8#077) != 0 )); then
       warn "$CRONDIR permissions: $PERMS (too open for file)"
     else
       pass "$CRONDIR: owner=$OWNER, perms=$PERMS"
@@ -2868,8 +2923,10 @@ check_browser_privacy() {
       fi
 
       val="$(_ff_pref "$pf" "network.trr.mode")"
-      if [[ "$val" == "2" || "$val" == "3" ]]; then
-        pass "DNS-over-HTTPS active (mode $val) [$label]"
+      if [[ "$val" == "2" ]]; then
+        pass "DNS-over-HTTPS strict (mode 2) [$label]"
+      elif [[ "$val" == "3" ]]; then
+        info "DNS-over-HTTPS fallback mode (mode 3 — falls back to plain DNS on failure) [$label]"
       elif [[ -z "$val" || "$val" == "0" ]]; then
         warn "DNS-over-HTTPS not configured [$label]"
       else
@@ -2979,11 +3036,14 @@ check_app_telemetry() {
     if [[ "$val" == "true" ]]; then
       local age
       age="$(_gsettings_user "$user" "$uid" "org.gnome.desktop.privacy" "recent-files-max-age" 2>/dev/null)"
+      age="${age##*uint32 }"    # Strip GVariant type prefix (e.g. "uint32 30" → "30")
       age="${age//[^0-9]/}"
-      if [[ -n "$age" && "$age" -le 7 && "$age" -gt 0 ]]; then
+      if [[ "$age" == "0" ]]; then
+        pass "Recent files: max-age=0 (list always empty) [$user]"
+      elif [[ -n "$age" && "$age" -le 7 && "$age" -gt 0 ]]; then
+        pass "Recent files kept for ${age} days [$user]"
+      elif [[ -n "$age" && "$age" -le 30 ]]; then
         info "Recent files kept for ${age} days [$user]"
-      elif [[ "$age" == "0" ]]; then
-        warn "Recent files kept forever [$user]"
       else
         warn "Recent files enabled (max age: ${age:-unlimited} days) [$user]"
       fi
@@ -3045,9 +3105,9 @@ check_app_telemetry() {
 
   if [[ "$DISTRO_FAMILY" == "rhel" ]]; then
     local dnf_conf="/etc/dnf/dnf.conf"
-    if [[ -f "$dnf_conf" ]] && grep -qi "^countme\s*=\s*true" "$dnf_conf" 2>/dev/null; then
+    if [[ -f "$dnf_conf" ]] && grep -qi "^countme[[:space:]]*=[[:space:]]*true" "$dnf_conf" 2>/dev/null; then
       warn "Fedora countme enabled in dnf.conf"
-    elif [[ -f "$dnf_conf" ]] && grep -qi "^countme\s*=\s*false" "$dnf_conf" 2>/dev/null; then
+    elif [[ -f "$dnf_conf" ]] && grep -qi "^countme[[:space:]]*=[[:space:]]*false" "$dnf_conf" 2>/dev/null; then
       pass "Fedora countme disabled in dnf.conf"
     else
       info "Fedora countme not set (default: enabled per-repo)"
@@ -3071,7 +3131,7 @@ check_app_telemetry() {
   if [[ -f "$nm_conf" ]]; then
     if grep -qi "^\[connectivity\]" "$nm_conf" 2>/dev/null; then
       local uri
-      uri="$(sed -n '/^\[connectivity\]/,/^\[/{ s/^uri\s*=\s*//p; }' "$nm_conf" 2>/dev/null)"
+      uri="$(sed -n '/^\[connectivity\]/,/^\[/{ s/^uri[[:space:]]*=[[:space:]]*//p; }' "$nm_conf" 2>/dev/null)"
       if [[ -z "$uri" || "$uri" == "" ]]; then
         pass "NetworkManager connectivity check disabled"
       else
@@ -3099,7 +3159,7 @@ check_network_privacy() {
   for conf_file in /etc/NetworkManager/NetworkManager.conf /etc/NetworkManager/conf.d/*.conf; do
     [[ -f "$conf_file" ]] || continue
     local val
-    val="$(sed -n '/^\[device\]/,/^\[/{ s/^wifi\.scan-rand-mac-address\s*=\s*//p; }' "$conf_file" 2>/dev/null)"
+    val="$(sed -n '/^\[device\]/,/^\[/{ s/^wifi\.scan-rand-mac-address[[:space:]]*=[[:space:]]*//p; }' "$conf_file" 2>/dev/null)"
     [[ -n "$val" ]] && nm_wifi_rand="$val"
   done
   if [[ "$nm_wifi_rand" == "yes" || "$nm_wifi_rand" == "true" ]]; then
@@ -3114,7 +3174,7 @@ check_network_privacy() {
   for conf_file in /etc/NetworkManager/NetworkManager.conf /etc/NetworkManager/conf.d/*.conf; do
     [[ -f "$conf_file" ]] || continue
     local val
-    val="$(sed -n '/^\[connection\]/,/^\[/{ s/^ethernet\.cloned-mac-address\s*=\s*//p; }' "$conf_file" 2>/dev/null)"
+    val="$(sed -n '/^\[connection\]/,/^\[/{ s/^ethernet\.cloned-mac-address[[:space:]]*=[[:space:]]*//p; }' "$conf_file" 2>/dev/null)"
     [[ -n "$val" ]] && eth_clone="$val"
   done
   if [[ "$eth_clone" == "random" ]]; then
@@ -3147,7 +3207,7 @@ check_network_privacy() {
       info "Avahi is $avahi_enabled — config check skipped"
     else
       local pub_host
-      pub_host="$(sed -n '/^\[publish\]/,/^\[/{ s/^publish-hostname\s*=\s*//p; }' "$avahi_conf" 2>/dev/null)"
+      pub_host="$(sed -n '/^\[publish\]/,/^\[/{ s/^publish-hostname[[:space:]]*=[[:space:]]*//p; }' "$avahi_conf" 2>/dev/null)"
       if [[ "$pub_host" == "no" ]]; then
         pass "Avahi hostname publishing disabled"
       else
@@ -3203,17 +3263,23 @@ check_network_privacy() {
   ipv6_disabled="$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)"
   # Also check NetworkManager: ipv6.method=disabled means NM prevents IPv6 on that interface
   # even if the kernel sysctl is not set. This is the standard Fedora/RHEL way to disable IPv6.
-  local _ipv6_nm_disabled=false
+  local _ipv6_nm_disabled=true
   if require_cmd nmcli; then
+    local _has_active=false
     while IFS= read -r _cname; do
       [[ -z "$_cname" ]] && continue
+      _has_active=true
       local _ipv6method
       _ipv6method=$(nmcli -t -f ipv6.method connection show "$_cname" 2>/dev/null | grep -oP '(?<=ipv6\.method:).*' | head -1)
-      if [[ "$_ipv6method" == "disabled" ]]; then
-        _ipv6_nm_disabled=true
+      # disabled = off, manual/link-local without addresses = functionally off
+      if [[ "$_ipv6method" != "disabled" && "$_ipv6method" != "manual" && "$_ipv6method" != "link-local" ]]; then
+        _ipv6_nm_disabled=false
         break
       fi
-    done < <(nmcli -t -f NAME connection show --active 2>/dev/null)
+    done < <(nmcli -t -f NAME connection show --active 2>/dev/null | grep -v '^lo$')
+    $_has_active || _ipv6_nm_disabled=false
+  else
+    _ipv6_nm_disabled=false
   fi
   if [[ "$ipv6_disabled" == "1" ]] || $_ipv6_nm_disabled; then
     pass "IPv6 disabled — privacy extensions not needed"
@@ -3252,7 +3318,7 @@ check_network_privacy() {
     for conf_file in /etc/NetworkManager/NetworkManager.conf /etc/NetworkManager/conf.d/*.conf; do
       [[ -f "$conf_file" ]] || continue
       local val
-      val="$(sed -n '/^\[ipv4\]/,/^\[/{ s/^dhcp-send-hostname\s*=\s*//p; }' "$conf_file" 2>/dev/null)"
+      val="$(sed -n '/^\[ipv4\]/,/^\[/{ s/^dhcp-send-hostname[[:space:]]*=[[:space:]]*//p; }' "$conf_file" 2>/dev/null)"
       [[ -n "$val" ]] && dhcp_hostname="$val"
     done
     if [[ "$dhcp_hostname" == "false" || "$dhcp_hostname" == "no" ]]; then
@@ -3284,6 +3350,8 @@ check_network_privacy() {
     info "Multicast DNS set to '$mdns_val'"
   fi
 
+  # Conservative: flags any active cups-browsed regardless of patch level.
+  # Patched builds (cups-filters >= 2.0.1) are not vulnerable to CVE-2024-47176.
   if systemctl is-active --quiet cups-browsed.service 2>/dev/null; then
     fail "cups-browsed active — CVE-2024-47176 Remote Code Execution risk!"
   elif systemctl is-enabled --quiet cups-browsed.service 2>/dev/null; then
@@ -3495,7 +3563,7 @@ check_desktop_session() {
   local autologin_found=0
   for conf in /etc/gdm*/custom.conf /etc/gdm*/daemon.conf; do
     [[ -f "$conf" ]] || continue
-    if grep -qi '^\s*AutomaticLoginEnable\s*=\s*true' "$conf" 2>/dev/null; then
+    if grep -qi '^\s*AutomaticLoginEnable[[:space:]]*=[[:space:]]*true' "$conf" 2>/dev/null; then
       local autouser
       autouser=$(grep -i '^\s*AutomaticLogin\s*=' "$conf" | head -1 | cut -d= -f2 | xargs)
       fail "Auto-login enabled in $conf${autouser:+ (user: $autouser)}"
@@ -3506,14 +3574,14 @@ check_desktop_session() {
 
   local guest_found=0
   if [[ -d /etc/lightdm ]]; then
-    if grep -rqs '^\s*allow-guest\s*=\s*true' /etc/lightdm/; then
+    if grep -rqs '^\s*allow-guest[[:space:]]*=[[:space:]]*true' /etc/lightdm/; then
       fail "LightDM guest account enabled"
       guest_found=1
     fi
   fi
   for conf in /etc/gdm*/custom.conf; do
     [[ -f "$conf" ]] || continue
-    if grep -qi '^\s*TimedLoginEnable\s*=\s*true' "$conf" 2>/dev/null; then
+    if grep -qi '^\s*TimedLoginEnable[[:space:]]*=[[:space:]]*true' "$conf" 2>/dev/null; then
       warn "GDM timed login enabled in $conf"
       guest_found=1
     fi
@@ -3534,7 +3602,6 @@ check_desktop_session() {
     fi
   fi
   _gs_rdp_cb() {
-    remote_found=1
     local val
     val=$(echo "$3" | xargs)
     if [[ "$val" == "true" ]]; then
@@ -3591,7 +3658,7 @@ check_desktop_session() {
     local db="/etc/dconf/db/gdm.d"
     local userlist_disabled=0
     if [[ -d "$db" ]]; then
-      if grep -rqs 'disable-user-list\s*=\s*true' "$db/"; then
+      if grep -rqs 'disable-user-list[[:space:]]*=[[:space:]]*true' "$db/"; then
         userlist_disabled=1
       fi
     fi
@@ -3721,9 +3788,6 @@ check_media_privacy() {
     info "xdg-desktop-portal is running (screen sharing available when requested)"
   else
     info "xdg-desktop-portal not running"
-  fi
-  if systemctl --user is-active xdg-desktop-portal.service &>/dev/null 2>&1; then
-    info "Portal service active for current user"
   fi
 }
 
