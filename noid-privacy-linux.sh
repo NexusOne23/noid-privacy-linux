@@ -1486,17 +1486,17 @@ header "12" "FILESYSTEM SECURITY"
 ###############################################################################
 
 # SUID Files
-SUID_COUNT=$(timeout 30 find / -xdev -perm -4000 -type f 2>/dev/null | wc -l)
-if [[ "$SUID_COUNT" -le 25 ]]; then
+SUID_COUNT=$(timeout 30 find / -xdev -not -path '/.snapshots/*' -perm -4000 -type f 2>/dev/null | wc -l)
+if [[ "$SUID_COUNT" -le 30 ]]; then
   pass "SUID files: $SUID_COUNT"
-elif [[ "$SUID_COUNT" -le 40 ]]; then
-  warn "SUID files: $SUID_COUNT (>25)"
+elif [[ "$SUID_COUNT" -le 45 ]]; then
+  warn "SUID files: $SUID_COUNT (>30, investigate)"
 else
-  fail "SUID files: $SUID_COUNT (>40)"
+  fail "SUID files: $SUID_COUNT (>45)"
 fi
 
 # SGID Files
-SGID_COUNT=$(timeout 30 find / -xdev -perm -2000 -type f 2>/dev/null | wc -l)
+SGID_COUNT=$(timeout 30 find / -xdev -not -path '/.snapshots/*' -perm -2000 -type f 2>/dev/null | wc -l)
 if [[ "$SGID_COUNT" -le 10 ]]; then
   pass "SGID files: $SGID_COUNT"
 elif [[ "$SGID_COUNT" -le 20 ]]; then
@@ -1506,7 +1506,7 @@ else
 fi
 
 # World-Writable
-WW_COUNT=$(timeout 30 find / -xdev -perm -0002 -type f ! -path "/proc/*" ! -path "/sys/*" ! -path "/dev/*" 2>/dev/null | wc -l)
+WW_COUNT=$(timeout 30 find / -xdev -not -path '/.snapshots/*' -perm -0002 -type f ! -path "/proc/*" ! -path "/sys/*" ! -path "/dev/*" 2>/dev/null | wc -l)
 if [[ "$WW_COUNT" -eq 0 ]]; then
   pass "World-writable files: 0"
 else
@@ -1514,18 +1514,18 @@ else
   if ! $JSON_MODE; then
     while read -r f; do
       printf "       %s\n" "$f"
-    done < <(timeout 30 find / -xdev -perm -0002 -type f ! -path "/proc/*" ! -path "/sys/*" ! -path "/dev/*" 2>/dev/null | head -5)
+    done < <(timeout 30 find / -xdev -not -path '/.snapshots/*' -perm -0002 -type f ! -path "/proc/*" ! -path "/sys/*" ! -path "/dev/*" 2>/dev/null | head -5)
   fi
 fi
 
 # Unowned Files
-UNOWNED=$(timeout 30 find / -xdev \( -nouser -o -nogroup \) 2>/dev/null | wc -l)
+UNOWNED=$(timeout 30 find / -xdev -not -path '/.snapshots/*' -not -path '/var/lib/gdm/*' \( -nouser -o -nogroup \) 2>/dev/null | wc -l)
 if [[ "$UNOWNED" -eq 0 ]]; then
   pass "Unowned files: 0"
-elif [[ "$UNOWNED" -le 10 ]]; then
+elif [[ "$UNOWNED" -le 5 ]]; then
   warn "Unowned files: $UNOWNED (investigate)"
 else
-  fail "Unowned files: $UNOWNED (>10)"
+  fail "Unowned files: $UNOWNED (>5)"
 fi
 
 # /tmp Permissions

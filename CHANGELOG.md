@@ -47,11 +47,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 🔧 Calibration Fixes
 
-- **SUID files threshold**: Pass ≤30 → Pass ≤20, Warn 21-35, Fail >35. Fedora Workstation has ~15-20 SUID binaries; >20 warrants investigation.
+- **SUID files threshold**: Pass ≤25 → Pass ≤30, Warn 31-45, Fail >45. Fedora Workstation with GNOME + NVIDIA has ~23 SUID binaries; ≤30 is normal for a desktop install.
 
 - **SGID files threshold**: Pass ≤15 → Pass ≤10, Warn 11-20, Fail >20. Typical systems have 5-8 SGID files.
 
-- **Unowned files threshold**: Pass ≤25 → Pass =0, Warn 1-5, Fail >5. Hardened systems should have zero unowned files; 25 was far too permissive.
+- **Unowned files threshold**: Pass ≤10 → Pass =0, Warn 1-5, Fail >5. Hardened systems should have zero unowned files; 10 was too permissive.
+
+- **Btrfs snapshot exclusion**: All `find` commands in Section 12 (SUID, SGID, World-Writable, Unowned) now exclude `/.snapshots/*` to prevent false positives from Btrfs snapshots with stale UIDs/permissions.
+
+- **GDM runtime files exclusion**: Unowned files check now excludes `/var/lib/gdm/*` — GDM creates runtime files (ibus, PulseAudio, dconf, WirePlumber) in a user namespace that appear as unowned to `find -nouser/-nogroup`.
 
 - **`recent-files-max-age=0` logic bug**: Was reported as WARN "kept forever" — but GNOME defines `max-age=0` as "list always empty" (disabled). Now correctly reported as PASS.
 
