@@ -10,6 +10,9 @@
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen.svg)](https://github.com/NexusOne23/noid-privacy-linux)
 [![Checks](https://img.shields.io/badge/checks-300%2B-orange.svg)](https://github.com/NexusOne23/noid-privacy-linux)
 [![CI](https://github.com/NexusOne23/noid-privacy-linux/actions/workflows/ci.yml/badge.svg)](https://github.com/NexusOne23/noid-privacy-linux/actions)
+[![GitHub Stars](https://img.shields.io/github/stars/NexusOne23/noid-privacy-linux?style=flat&logo=github)](https://github.com/NexusOne23/noid-privacy-linux/stargazers)
+[![Last Commit](https://img.shields.io/github/last-commit/NexusOne23/noid-privacy-linux?style=flat)](https://github.com/NexusOne23/noid-privacy-linux/commits)
+[![Website](https://img.shields.io/badge/Website-noid--privacy.com-0078D4?style=flat&logo=globe)](https://noid-privacy.com)
 
 **300+ checks · 42 sections · Zero dependencies · Pure Bash · AI-powered fixes**
 **Fedora · Ubuntu · Debian · Arch · openSUSE · RHEL · Mint · Pop!_OS**
@@ -30,6 +33,8 @@ sudo bash noid-privacy-linux.sh --ai
 300+ privacy & security checks. Zero dependencies. The `--ai` flag generates a ready-to-paste prompt — hand it to ChatGPT, Claude, or Gemini to **fix every finding automatically**.
 
 > **This tool is read-only.** It does not modify your system. No files changed, no configs touched, no services restarted.
+
+> **🪟 Running Windows too?** [NoID Privacy for Windows](https://noid-privacy.com) hardens **630+ settings** with full Backup → Apply → Verify → Restore. One-time purchase, no subscription.
 
 ---
 
@@ -267,7 +272,7 @@ Results appear as a rich **GitHub Actions Summary** with score, findings table, 
 - **Server admins** → [Lynis](https://cisofy.com/lynis/)
 - **Enterprise compliance (CIS/STIG)** → [OpenSCAP](https://www.open-scap.org/)
 - **Automated remediation** → [privacy.sexy](https://privacy.sexy)
-- **Windows** → [NoID Privacy](https://github.com/NexusOne23/noid-privacy) (our sister project)
+- **Windows** → [NoID Privacy PRO](https://noid-privacy.com) — 630+ settings, full hardening framework
 
 ---
 
@@ -275,7 +280,8 @@ Results appear as a rich **GitHub Actions Summary** with score, findings table, 
 
 | Platform | Link |
 |----------|------|
-| 🪟 **Windows** | [NoID Privacy](https://github.com/NexusOne23/noid-privacy) — 630+ settings, 7 modules, Backup → Apply → Verify → Restore |
+| 🌐 **Website** | [noid-privacy.com](https://noid-privacy.com) — All platforms, pricing, and documentation |
+| 🪟 **Windows** | [NoID Privacy PRO](https://noid-privacy.com) — 630+ settings, 7 modules, Backup → Apply → Verify → Restore |
 | 🐧 **Linux** | You're here! |
 | 📱 **Android** | [NoID Privacy on Google Play](https://play.google.com/store/apps/details?id=com.noid.privacy) — 81 checks, 10 categories, permission audit, Chrome hardening, anti-theft |
 
