@@ -280,7 +280,7 @@ Results appear as a rich **GitHub Actions Summary** with score, findings table, 
 
 | Platform | Link |
 |----------|------|
-| 🌐 **Website** | [noid-privacy.com](https://noid-privacy.com) — All platforms, pricing, and documentation |
+| 🌐 **Website** | [NoID-Privacy.com](https://noid-privacy.com) — All platforms, pricing, and documentation |
 | 🪟 **Windows** | [NoID Privacy PRO](https://noid-privacy.com) — 630+ settings, 7 modules, Backup → Apply → Verify → Restore |
 | 🐧 **Linux** | You're here! |
 | 📱 **Android** | [NoID Privacy on Google Play](https://play.google.com/store/apps/details?id=com.noid.privacy) — 81 checks, 10 categories, permission audit, Chrome hardening, anti-theft |
