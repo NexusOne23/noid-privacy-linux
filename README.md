@@ -12,7 +12,7 @@
 [![CI](https://github.com/NexusOne23/noid-privacy-linux/actions/workflows/ci.yml/badge.svg)](https://github.com/NexusOne23/noid-privacy-linux/actions)
 [![GitHub Stars](https://img.shields.io/github/stars/NexusOne23/noid-privacy-linux?style=flat&logo=github)](https://github.com/NexusOne23/noid-privacy-linux/stargazers)
 [![Last Commit](https://img.shields.io/github/last-commit/NexusOne23/noid-privacy-linux?style=flat)](https://github.com/NexusOne23/noid-privacy-linux/commits)
-[![Website](https://img.shields.io/badge/Website-noid--privacy.com-0078D4?style=flat&logo=globe)](https://noid-privacy.com)
+[![Website](https://img.shields.io/badge/Website-noid--privacy.com-0078D4?style=flat)](https://noid-privacy.com)
 
 **300+ checks · 42 sections · Zero dependencies · Pure Bash · AI-powered fixes**
 **Fedora · Ubuntu · Debian · Arch · openSUSE · RHEL · Mint · Pop!_OS**
