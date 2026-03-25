@@ -2,7 +2,7 @@
 
 All 42 sections with descriptions of what each checks and why it matters.
 
-> **Version:** 3.2.2 | **Total Checks:** 300+ | **Sections:** 42
+> **Version:** 3.2.3 | **Total Checks:** 300+ | **Sections:** 42
 
 ---
 

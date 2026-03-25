@@ -7,6 +7,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.2.3] - 2026-03-25
+
+### 🔴 High Fixes
+
+- **Unusual destination ports check was completely dead**: `ss -tnp state established | awk '{print $5}'` grabbed the Process column instead of Peer Address:Port (`$4`). The check always reported "All connections on standard ports" regardless of actual connections. Fixed to `awk '{print $4}'`.
+
+- **Firefox DoH Mode 2/3 descriptions swapped**: Mode 2 was labeled "strict" and Mode 3 was labeled "fallback". In reality, Mode 2 = "DoH first, fallback to native DNS" and Mode 3 = "DoH only, no fallback" (the strictest setting). Both labels and severity corrected (Mode 3 now PASS instead of INFO).
+
+### 🟡 Medium Fixes
+
+- **Flatpak dangerous permissions: triple pattern failure**: (1) `talk-name=org.freedesktop.Flatpak` never matched — actual format is `org.freedesktop.Flatpak=talk`. (2) `filesystems=host` only matched when `host` was the first element; `filesystems=xdg-run;host;` was missed. (3) `\bhost\b` false-positived on `host-etc` (Brave Browser). Rewritten with precise delimiter-aware pattern.
+
+- **Failed services: printed LOAD status instead of unit name**: `awk '{print $2}'` extracted the LOAD column, not the unit name (`$1`). Also added Unicode bullet (`●`/`×`) handling for newer systemd versions.
+
+- **Kernel Taint: exact match instead of bitmask**: Checked `== 4096` (out-of-tree module only). NVIDIA sets both Bit 0 (proprietary) and Bit 12 (out-of-tree), producing 4097. Fixed to `(TAINT & 4096) || (TAINT & 1)` with corrected label.
+
+- **AppArmor profile count wrong (Debian/Ubuntu)**: `grep -c "enforce"` counted all lines containing "enforce" including summary lines ("37 profiles are in enforce mode" + "15 processes are in enforce mode" = 2 instead of 37). Fixed with precise regex extracting the number from the summary line.
+
+- **Umask 4-digit values not recognized**: `0027` and `0077` (common in CIS benchmarks and login.defs) were flagged as insecure. Initial strip-one-zero fix was incomplete (`0027` → `027` ≠ `27`). Fixed with regex `^0*27$` / `^0*77$` matching any number of leading zeros.
+
+- **Hidden processes: inflated count from sort incompatibility**: `sort -n` (numeric) + `comm` (requires lexicographic sort) produced false positives. PIDs like `9, 10` sorted as `9, 10` numerically but `10, 9` lexicographically, causing `comm` to report phantom differences. Fixed to `sort -u` (lexicographic).
+
+- **Cron directory 777 reported as PASS**: A directory with permissions 777 fell through all check branches to the default PASS. Restructured into explicit file/directory branches with proper warnings.
+
+- **GNOME Tracker checked system scope instead of user scope**: `systemctl is-active tracker-miner-fs-3.service` (without `--user`) always returned inactive because Tracker runs as a user service. Now checks per-user via `sudo -u USER systemctl --user`. Added `localsearch-3.service` for Ubuntu 24.04+ (GNOME 46 rebranding).
+
+- **Filesystem module checks missed `blacklist` directive**: Only `install cramfs /bin/false` was detected. `blacklist cramfs` (the common method) was ignored, causing false "not explicitly disabled" messages. USB-storage check already had `blacklist` — now consistent.
+
+- **PipeWire TCP check: false negative then false positive**: Original pattern `module-protocol-pulse.*tcp` never matched real configs. Replaced with `tcp:[0-9]`, which then matched commented-out examples (`#"tcp:4713"`). Final fix: grep for pattern + filter comment lines.
+
+- **GRUB password check: false positive from comments**: `grep -q "password"` matched `# password_pbkdf2 is recommended`. Fixed to `grep -rqE '^\s*(password_pbkdf2|password)\s+'`. Also expanded from `40_custom` only to all files in `/etc/grub.d/`.
+
+- **DHCP hostname check: wrong INI section**: Searched for `[ipv4]` in `NetworkManager.conf`, but global config uses `[connection]` with `ipv4.dhcp-send-hostname`. Now checks both global config (`[connection]` section) and per-connection `.nmconnection` files (`[ipv4]` section). Also accepts `0` as disabled.
+
+- **SSH key type extraction broke on comments with spaces**: `awk '{print $4}'` assumed fixed field position. Comments like `user@host generated 2026` shifted the type field. Fixed to `awk '{print $NF}'` (always last field).
+
+- **auditctl status parsing not portable**: Newer auditd outputs `enabled 1` (multiline), older versions output `AUDIT_STATUS: enabled=1 flag=2` (single line). Fixed with dual-format regex matching both.
+
+- **fwupdmgr false positive from `||` short-circuit**: `[[ $fw_exit -eq 2 ]] || echo "$fw_output" | grep -qi 'no updates'` — the grep ran unconditionally. If exit code was 1 (error) and error text contained "no updates", it falsely reported "up to date". Split into separate `elif` branches.
+
+### 🟢 Low Fixes
+
+- **lock-enabled fallback mislabeled as "Lock on suspend"**: On non-Ubuntu GNOME (Fedora, Arch), the `ubuntu-lock-on-suspend` key doesn't exist. Fallback to `lock-enabled` used the same callback, displaying "Lock on suspend enabled" instead of "Screen locking enabled". Now uses separate callback with correct text.
+
+- **.netrc false positive as "Plaintext secret file"**: `.netrc` is a legitimate credentials file. Removed from secret_patterns list; separate permissions check (must be 600/400) retained.
+
+- **Firmware/Thunderbolt checks skipped by `--skip keyring`**: fwupdmgr and Thunderbolt DMA checks were inside `check_keyring_security()`. Moved to independent block after all function calls.
+
+- **link-local falsely classified as DHCP**: `ipv4.method=link-local` (RFC 3927 zeroconf) does not send DHCP requests. No longer triggers DHCP hostname warnings.
+
+- **NM Connectivity: missing `uri=` key treated as "disabled"**: A `[connectivity]` section without explicit `uri=` key uses NetworkManager's default URI (phones home). Only an explicitly empty `uri=` disables it. Now distinguishes both cases.
+
+- **Root excluded from empty-password check**: `$1 != "root"` filter removed. Root with empty password is the most critical finding and must be reported.
+
+- **Faillock: inconsistent terminology**: WARN said "failed login attempts" but PASS said "no locked accounts". Now consistently uses "failed login attempts" in both cases.
+
+- **modprobe.d pattern missed `/usr/bin/false`**: Only `/bin/false` was matched. Fedora and modern distros use `/usr/bin/false`. Pattern expanded to `/(usr/)?s?bin/(false|true)`.
+
+- **rescue/emergency always reported as "enabled"**: These are static systemd units — `is-enabled` always returns 0. Now checks `ExecStart` for `sulogin` (password-protected rescue shell) and only warns if sulogin is absent.
+
+- **dpkg -l exit 0 for removed packages (Debian/Ubuntu)**: `dpkg -l package` returns 0 even for status "rc" (removed, config remaining). Now checks for `^ii` (actually installed).
+
+- **xclip in clipboard manager daemon list**: xclip is a CLI tool, not a persistent daemon. Removed from detection list.
+
+- **`local` outside function (2 locations)**: `local` keyword in rescue/emergency check and AI prompt block caused Bash warnings. Removed.
+
+### 🔧 Calibration Fixes
+
+- **User list on login screen: WARN → INFO with LUKS**: On LUKS-encrypted systems, physical access requires the encryption passphrase before reaching the login screen. User enumeration is not a meaningful risk. Now INFO with explanation instead of WARN.
+
+- **DoH Mode 3 corrected**: v3.2.2 miscalibrated Mode 3 as INFO ("fallback"). Mode 3 is actually the strictest DoH setting (no fallback). Now correctly PASS.
+
+### ✨ Improvements
+
+- **AI Prompt redesigned**: Added tool URL (`github.com/NexusOne23/noid-privacy-linux`), score with counts, and auto-detected system context (LUKS, VPN, Flatpak, SELinux/AppArmor). Visual upgrade with colored box and clear copy markers.
+
+---
+
 ## [3.2.2] - 2026-03-02
 
 ### 🔴 High Fixes

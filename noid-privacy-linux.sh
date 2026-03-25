@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 ###############################################################################
-#  NoID Privacy for Linux v3.2.2 — Privacy & Security Audit
+#  NoID Privacy for Linux v3.2.3 — Privacy & Security Audit
 #  https://noid-privacy.com/linux.html | https://github.com/NexusOne23/noid-privacy-linux
 #  Fedora / RHEL / Debian / Ubuntu — Full-Spectrum Audit
 #  300+ checks across 42 sections
 #  Requires: root
 ###############################################################################
-NOID_PRIVACY_VERSION="3.2.2"
+NOID_PRIVACY_VERSION="3.2.3"
 set +e          # Don't exit on errors — we handle them ourselves
 
 # Bash 4+ required for associative arrays and other features
@@ -420,10 +420,10 @@ TAINT=$(cat /proc/sys/kernel/tainted)
 if [[ "$TAINT" -eq 0 ]]; then
   pass "Kernel Taint: 0 (clean)"
 else
-  if [[ "$TAINT" -eq 4096 ]]; then
-    info "Kernel Taint: $TAINT (NVIDIA proprietary — expected)"
+  if (( TAINT & 4096 )) || (( TAINT & 1 )); then
+    info "Kernel Taint: $TAINT (proprietary/out-of-tree module — expected with NVIDIA)"
   else
-    warn "Kernel Taint: $TAINT (proprietary modules?)"
+    warn "Kernel Taint: $TAINT (unexpected taint flags)"
   fi
 fi
 
@@ -485,7 +485,7 @@ fi
 
 # GRUB Password
 if [[ -f /boot/grub2/grub.cfg ]] || [[ -f /boot/grub/grub.cfg ]]; then
-  if [[ -f /boot/grub2/user.cfg ]] || grep -q "password" /etc/grub.d/40_custom 2>/dev/null; then
+  if [[ -f /boot/grub2/user.cfg ]] || grep -rqE '^\s*(password_pbkdf2|password)\s+' /etc/grub.d/ 2>/dev/null; then
     pass "GRUB password set"
   else
     if lsblk -o TYPE 2>/dev/null | grep -q crypt; then
@@ -565,9 +565,9 @@ fi
 elif $HAS_APPARMOR; then
   header "02" "APPARMOR & MAC"
 
-  AA_ENFORCED=$(aa-status 2>/dev/null | grep -c "enforce" || true)
+  AA_ENFORCED=$(aa-status 2>/dev/null | grep -oP '^\s*\K\d+(?=\s+profiles? are in enforce mode)' || echo "0")
   AA_ENFORCED=${AA_ENFORCED:-0}
-  AA_COMPLAIN=$(aa-status 2>/dev/null | grep -c "complain" || true)
+  AA_COMPLAIN=$(aa-status 2>/dev/null | grep -oP '^\s*\K\d+(?=\s+profiles? are in complain mode)' || echo "0")
   AA_COMPLAIN=${AA_COMPLAIN:-0}
   if [[ "$AA_ENFORCED" -gt 0 ]]; then
     pass "AppArmor: $AA_ENFORCED profiles enforcing, $AA_COMPLAIN complaining"
@@ -1141,7 +1141,7 @@ FAILED=$(echo "$FAILED_SVCS" | grep -c '\S' || true)
 if [[ "$FAILED" -eq 0 ]]; then
   pass "0 failed services"
 else
-  svc_names=$(echo "$FAILED_SVCS" | awk '{print $2}' | tr '\n' ', ' | sed 's/,$//')
+  svc_names=$(echo "$FAILED_SVCS" | awk '{print ($1 == "●" || $1 == "×") ? $2 : $1}' | tr '\n' ', ' | sed 's/,$//')
   fail "$FAILED failed services: $svc_names"
   if ! $JSON_MODE; then
     while read -r line; do
@@ -1204,7 +1204,7 @@ UNUSUAL_PORTS=$(while read -r port; do
     80|443|53|993|465|8443|22|587|143|995|5222|5223) ;;
     *) echo "$port" ;;
   esac
-done < <(ss -tnp state established 2>/dev/null | awk '{print $5}' | grep -oP ':\K\d+$' | sort -n | uniq))
+done < <(ss -tnp state established 2>/dev/null | awk '{print $4}' | grep -oP ':\K\d+$' | sort -n | uniq))
 if [[ -n "$UNUSUAL_PORTS" ]]; then
   info "Connections to non-standard ports: $(echo $UNUSUAL_PORTS | tr '\n' ' ')"
 else
@@ -1307,7 +1307,7 @@ else
         [[ -f "$KEY" ]] || continue
         _KEY_INFO=$(ssh-keygen -l -f "$KEY" 2>/dev/null) || continue
         BITS=$(echo "$_KEY_INFO" | awk '{print $1}')
-        TYPE=$(echo "$_KEY_INFO" | awk '{print $4}' | tr -d '()')
+        TYPE=$(echo "$_KEY_INFO" | awk '{print $NF}' | tr -d '()')
         # RSA thresholds: <2048 = insecure (NIST deprecated), <4096 = acceptable but 4096 recommended
         # Ed25519/ECDSA keys are always considered strong regardless of bit size
         if [[ "$TYPE" == "RSA" ]] && [[ "${BITS:-0}" -lt 2048 ]]; then
@@ -1347,7 +1347,7 @@ if require_cmd auditctl; then
     fail "Audit rules: 0"
   fi
 
-  AUDIT_ENABLED=$(auditctl -s 2>/dev/null | grep "enabled" | awk '{print $2}')
+  AUDIT_ENABLED=$(auditctl -s 2>/dev/null | grep -oP '(?:^enabled\s+|enabled=)\K[0-9]+' | head -1)
   if [[ "$AUDIT_ENABLED" == "2" ]]; then
     pass "Audit: immutable (enabled=2)"
   elif [[ "$AUDIT_ENABLED" == "1" ]]; then
@@ -1388,7 +1388,7 @@ else
 fi
 
 # Empty Passwords
-EMPTY_PW=$(awk -F: '$2 == "" && $1 != "root" {print $1}' /etc/shadow 2>/dev/null | wc -l)
+EMPTY_PW=$(awk -F: '$2 == "" {print $1}' /etc/shadow 2>/dev/null | wc -l)
 if [[ "$EMPTY_PW" -eq 0 ]]; then
   pass "No accounts with empty password"
 else
@@ -1443,10 +1443,10 @@ info "Password policy: MAX=$PASS_MAX, MIN=$PASS_MIN, WARN=$PASS_WARN"
 # Umask Check (new)
 UMASK_VAL=$(grep -hiE '^\s*umask\s+' /etc/login.defs /etc/profile /etc/bashrc 2>/dev/null | tail -1 | awk '{print $2}')
 if [[ -n "$UMASK_VAL" ]]; then
-  if [[ "$UMASK_VAL" -ge 27 ]] 2>/dev/null || [[ "$UMASK_VAL" == "027" ]] || [[ "$UMASK_VAL" == "077" ]]; then
+  if [[ "$UMASK_VAL" =~ ^0*27$ || "$UMASK_VAL" =~ ^0*77$ ]]; then
     pass "Default umask: $UMASK_VAL (restrictive)"
   else
-    warn "Default umask: $UMASK_VAL (recommended: >=027)"
+    warn "Default umask: $UMASK_VAL (recommended: 027 or 077)"
   fi
 else
   warn "Default umask not explicitly set"
@@ -1456,9 +1456,9 @@ fi
 if require_cmd faillock; then
   LOCKED=$(faillock --dir /var/run/faillock 2>/dev/null | grep -c "When" | ccount)
   if [[ "$LOCKED" -gt 0 ]]; then
-    warn "Faillock: $LOCKED locked accounts"
+    warn "Faillock: $LOCKED accounts with failed login attempts"
   else
-    pass "Faillock: no locked accounts"
+    pass "Faillock: no recorded failed login attempts"
   fi
 fi
 
@@ -1946,8 +1946,8 @@ ROOT_PROCS=$(ps aux | awk '$1=="root" {print $11}' | sort -u | wc -l)
 info "Root processes (unique): $ROOT_PROCS"
 
 # Hidden Processes
-PS_PIDS=$(ps -eo pid --no-headers | sed 's/ //g' | sort -n -u)
-PROC_PIDS=$(ls -d /proc/[0-9]* 2>/dev/null | sed 's|/proc/||' | sort -n -u)
+PS_PIDS=$(ps -eo pid --no-headers | sed 's/ //g' | sort -u)
+PROC_PIDS=$(ls -d /proc/[0-9]* 2>/dev/null | sed 's|/proc/||' | sort -u)
 HIDDEN=$(comm -23 <(echo "$PROC_PIDS") <(echo "$PS_PIDS") | wc -l)
 HIDDEN=${HIDDEN//[^0-9]/}
 HIDDEN=${HIDDEN:-0}
@@ -2683,7 +2683,7 @@ fi
 # Unnecessary filesystem modules (new)
 sub_header "Disabled Filesystem Modules"
 for FS_MOD in cramfs freevxfs jffs2 hfs hfsplus squashfs udf; do
-  if grep -rqs "install $FS_MOD /bin/false\|install $FS_MOD /bin/true" /etc/modprobe.d/ 2>/dev/null; then
+  if grep -rqsE "install\s+$FS_MOD\s+/(usr/)?s?bin/(false|true)|blacklist\s+$FS_MOD" /etc/modprobe.d/ 2>/dev/null; then
     pass "Module $FS_MOD: disabled"
   elif [[ "$FS_MOD" == "squashfs" ]] && command -v flatpak &>/dev/null; then
     info "Module squashfs: loaded (required by Flatpak)"
@@ -2697,7 +2697,7 @@ for FS_MOD in cramfs freevxfs jffs2 hfs hfsplus squashfs udf; do
 done
 
 # USB storage module
-if grep -rqs "install usb[-_]storage /bin/false\|install usb[-_]storage /bin/true\|blacklist usb[-_]storage" /etc/modprobe.d/ 2>/dev/null; then
+if grep -rqsE "install\s+usb[-_]storage\s+/(usr/)?s?bin/(false|true)|blacklist\s+usb[-_]storage" /etc/modprobe.d/ 2>/dev/null; then
   pass "USB storage module: disabled"
 else
   warn "USB storage module: not disabled"
@@ -2727,12 +2727,18 @@ for CRONDIR in /etc/crontab /etc/cron.hourly /etc/cron.daily /etc/cron.weekly /e
     PERMS=$(stat -c '%a' "$CRONDIR" 2>/dev/null)
     if [[ "$OWNER" != "root" ]]; then
       fail "$CRONDIR owner: $OWNER (should be root)"
-    elif [[ -d "$CRONDIR" ]] && (( (8#${PERMS:-777} & ~8#755) == 0 )); then
-      pass "$CRONDIR: owner=$OWNER, perms=$PERMS"
-    elif [[ -f "$CRONDIR" ]] && (( (8#${PERMS:-777} & 8#077) != 0 )); then
-      warn "$CRONDIR permissions: $PERMS (too open for file)"
-    else
-      pass "$CRONDIR: owner=$OWNER, perms=$PERMS"
+    elif [[ -d "$CRONDIR" ]]; then
+      if (( (8#${PERMS:-777} & ~8#755) == 0 )); then
+        pass "$CRONDIR: owner=$OWNER, perms=$PERMS"
+      else
+        warn "$CRONDIR permissions: $PERMS (too open for directory)"
+      fi
+    elif [[ -f "$CRONDIR" ]]; then
+      if (( (8#${PERMS:-777} & 8#077) != 0 )); then
+        warn "$CRONDIR permissions: $PERMS (too open for file)"
+      else
+        pass "$CRONDIR: owner=$OWNER, perms=$PERMS"
+      fi
     fi
   fi
 done
@@ -2780,13 +2786,13 @@ info "Installed kernels: $KERNEL_COUNT"
 # systemd-analyze blame top 5 (new)
 if require_cmd systemd-analyze; then
   sub_header "Boot Security Analysis"
-  # Check for rescue/emergency shell
-  if systemctl is-enabled rescue.service &>/dev/null 2>&1; then
-    info "Rescue shell: enabled (physical access risk)"
-  fi
-  if systemctl is-enabled emergency.service &>/dev/null 2>&1; then
-    info "Emergency shell: enabled (physical access risk)"
-  fi
+  # Check for rescue/emergency shell (only report if NOT using sulogin for password protection)
+  for _rescue_unit in rescue.service emergency.service; do
+    _rescue_exec=$(systemctl show -p ExecStart "$_rescue_unit" 2>/dev/null | grep -oP 'path=\K[^;]+' || true)
+    if [[ -n "$_rescue_exec" && "$_rescue_exec" != *sulogin* ]]; then
+      info "${_rescue_unit%.service} shell: no password required (physical access risk)"
+    fi
+  done
 fi
 
 fi # end boot
@@ -2924,9 +2930,9 @@ check_browser_privacy() {
 
       val="$(_ff_pref "$pf" "network.trr.mode")"
       if [[ "$val" == "2" ]]; then
-        pass "DNS-over-HTTPS strict (mode 2) [$label]"
+        pass "DNS-over-HTTPS enabled (mode 2 — DoH first, fallback to native DNS) [$label]"
       elif [[ "$val" == "3" ]]; then
-        info "DNS-over-HTTPS fallback mode (mode 3 — falls back to plain DNS on failure) [$label]"
+        pass "DNS-over-HTTPS strict (mode 3 — DoH only, no fallback) [$label]"
       elif [[ -z "$val" || "$val" == "0" ]]; then
         warn "DNS-over-HTTPS not configured [$label]"
       else
@@ -3061,8 +3067,21 @@ check_app_telemetry() {
 
   _for_each_user _at_check_user
 
-  if systemctl is-active --quiet tracker-miner-fs-3.service 2>/dev/null || \
-     systemctl is-active --quiet tracker-miner-fs.service 2>/dev/null; then
+  local _tracker_running=false
+  while IFS=: read -r _tu _ _tuid _ _ _ _tshell; do
+    [[ "$_tuid" -ge 1000 && "$_tuid" -lt 65534 ]] || continue
+    [[ "$_tshell" == */nologin || "$_tshell" == */false ]] && continue
+    if sudo -u "$_tu" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${_tuid}/bus" \
+       systemctl --user is-active --quiet tracker-miner-fs-3.service 2>/dev/null || \
+       sudo -u "$_tu" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${_tuid}/bus" \
+       systemctl --user is-active --quiet tracker-miner-fs.service 2>/dev/null || \
+       sudo -u "$_tu" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${_tuid}/bus" \
+       systemctl --user is-active --quiet localsearch-3.service 2>/dev/null; then
+      _tracker_running=true
+      break
+    fi
+  done < /etc/passwd
+  if $_tracker_running; then
     warn "GNOME Tracker file indexer active — indexes all files"
   else
     pass "GNOME Tracker file indexer not running"
@@ -3075,7 +3094,7 @@ check_app_telemetry() {
       [[ -z "$app" ]] && continue
       local perms
       perms="$(flatpak info --show-permissions "$app" 2>/dev/null)"
-      if echo "$perms" | grep -qE "filesystems=host([;,[:space:]]|$)|filesystems=host-os([;,[:space:]]|$)|talk-name=org\.freedesktop\.Flatpak"; then
+      if echo "$perms" | grep -qE "filesystems=(host([;,[:space:]]|$)|.*[;,]host([;,[:space:]]|$))|filesystems=(host-os([;,[:space:]]|$)|.*[;,]host-os([;,[:space:]]|$))|org\.freedesktop\.Flatpak=talk"; then
         warn "Flatpak '$app' has dangerous permissions (host filesystem or Flatpak portal)"
         ((dangerous++))
       fi
@@ -3115,7 +3134,7 @@ check_app_telemetry() {
   fi
 
   if [[ "$DISTRO_FAMILY" == "debian" ]]; then
-    if dpkg -l popularity-contest &>/dev/null 2>&1; then
+    if dpkg -l popularity-contest 2>/dev/null | grep -q "^ii"; then
       local popcon_conf="/etc/popularity-contest.conf"
       if [[ -f "$popcon_conf" ]] && grep -q 'PARTICIPATE="yes"' "$popcon_conf" 2>/dev/null; then
         warn "Ubuntu popularity-contest active — reports installed packages"
@@ -3130,12 +3149,16 @@ check_app_telemetry() {
   local nm_conf="/etc/NetworkManager/NetworkManager.conf"
   if [[ -f "$nm_conf" ]]; then
     if grep -qi "^\[connectivity\]" "$nm_conf" 2>/dev/null; then
-      local uri
-      uri="$(sed -n '/^\[connectivity\]/,/^\[/{ s/^uri[[:space:]]*=[[:space:]]*//p; }' "$nm_conf" 2>/dev/null)"
-      if [[ -z "$uri" || "$uri" == "" ]]; then
-        pass "NetworkManager connectivity check disabled"
+      if grep -qE '^\s*uri\s*=' <(sed -n '/^\[connectivity\]/,/^\[/p' "$nm_conf") 2>/dev/null; then
+        local uri
+        uri="$(sed -n '/^\[connectivity\]/,/^\[/{ s/^uri[[:space:]]*=[[:space:]]*//p; }' "$nm_conf" 2>/dev/null)"
+        if [[ -z "$uri" ]]; then
+          pass "NetworkManager connectivity check disabled (uri explicitly empty)"
+        else
+          info "NetworkManager connectivity check active (pings $uri)"
+        fi
       else
-        info "NetworkManager connectivity check active (pings $uri)"
+        info "NetworkManager connectivity check uses default (may phone home)"
       fi
     else
       info "NetworkManager connectivity check uses default (may phone home)"
@@ -3302,7 +3325,7 @@ check_network_privacy() {
       [[ -z "$_cname" ]] && continue
       local _method
       _method=$(nmcli -t -f ipv4.method connection show "$_cname" 2>/dev/null | grep -oP '(?<=ipv4\.method:).*' | head -1)
-      if [[ "$_method" == "auto" || "$_method" == "link-local" ]]; then
+      if [[ "$_method" == "auto" ]]; then
         _uses_dhcp=true
         break
       fi
@@ -3315,13 +3338,23 @@ check_network_privacy() {
     pass "DHCP hostname: N/A (all connections use static IP — no DHCP sent)"
   else
     local dhcp_hostname=""
+    # Check global NM config ([connection] section with dotted key)
     for conf_file in /etc/NetworkManager/NetworkManager.conf /etc/NetworkManager/conf.d/*.conf; do
       [[ -f "$conf_file" ]] || continue
       local val
-      val="$(sed -n '/^\[ipv4\]/,/^\[/{ s/^dhcp-send-hostname[[:space:]]*=[[:space:]]*//p; }' "$conf_file" 2>/dev/null)"
+      val="$(sed -n '/^\[connection\]/,/^\[/{ s/^ipv4\.dhcp-send-hostname[[:space:]]*=[[:space:]]*//p; }' "$conf_file" 2>/dev/null)"
       [[ -n "$val" ]] && dhcp_hostname="$val"
     done
-    if [[ "$dhcp_hostname" == "false" || "$dhcp_hostname" == "no" ]]; then
+    # Check per-connection files ([ipv4] section with plain key)
+    if [[ -z "$dhcp_hostname" ]]; then
+      for conn_file in /etc/NetworkManager/system-connections/*.nmconnection; do
+        [[ -f "$conn_file" ]] || continue
+        local val
+        val="$(sed -n '/^\[ipv4\]/,/^\[/{ s/^dhcp-send-hostname[[:space:]]*=[[:space:]]*//p; }' "$conn_file" 2>/dev/null)"
+        [[ -n "$val" ]] && dhcp_hostname="$val"
+      done
+    fi
+    if [[ "$dhcp_hostname" == "false" || "$dhcp_hostname" == "no" || "$dhcp_hostname" == "0" ]]; then
       pass "DHCP hostname sending disabled"
     else
       warn "DHCP sends hostname to network (dhcp-send-hostname=${dhcp_hostname:-true})"
@@ -3435,7 +3468,7 @@ check_data_privacy() {
 
   _for_each_user _dp_check_user
 
-  local clip_procs=("gpaste-daemon" "klipper" "clipman" "clipit" "parcellite" "copyq" "xclip" "greenclip")
+  local clip_procs=("gpaste-daemon" "klipper" "clipman" "clipit" "parcellite" "copyq" "greenclip")
   local clip_found=false
   local proc
   for proc in "${clip_procs[@]}"; do
@@ -3540,9 +3573,19 @@ check_desktop_session() {
       fail "Lock on suspend disabled for $1"
     fi
   }
+  _gs_lock_enabled_cb() {
+    found_lock_suspend=1
+    local val
+    val=$(echo "$3" | xargs)
+    if [[ "$val" == "true" ]]; then
+      pass "Screen locking enabled for $1"
+    else
+      fail "Screen locking disabled for $1"
+    fi
+  }
   _gsettings_for_users "org.gnome.desktop.screensaver" "ubuntu-lock-on-suspend" _gs_lock_suspend_cb
   if [[ "$found_lock_suspend" -eq 0 ]]; then
-    _gsettings_for_users "org.gnome.desktop.screensaver" "lock-enabled" _gs_lock_suspend_cb
+    _gsettings_for_users "org.gnome.desktop.screensaver" "lock-enabled" _gs_lock_enabled_cb
   fi
   [[ "$found_lock_suspend" -eq 0 ]] && info "No active GNOME sessions found for lock-on-suspend check"
 
@@ -3673,7 +3716,11 @@ check_desktop_session() {
     if [[ "$userlist_disabled" -eq 1 ]]; then
       pass "User list hidden on login screen"
     else
-      warn "User list visible on login screen (attackers can enumerate users)"
+      if lsblk -o TYPE 2>/dev/null | grep -q crypt; then
+        info "User list visible on login screen (LUKS encryption limits physical access risk)"
+      else
+        warn "User list visible on login screen (attackers can enumerate users)"
+      fi
     fi
   else
     info "GDM not found — skipping user-list check"
@@ -3760,7 +3807,7 @@ check_media_privacy() {
     done < /etc/passwd
   fi
   if pgrep -x pipewire &>/dev/null; then
-    if grep -rqs 'module-protocol-pulse.*tcp' /etc/pipewire/ /usr/share/pipewire/ 2>/dev/null; then
+    if grep -rhE 'tcp:[0-9]|module-native-protocol-tcp' /etc/pipewire/ /usr/share/pipewire/ 2>/dev/null | grep -qvE '^\s*#'; then
       fail "PipeWire network audio protocol enabled in config"
       net_audio=1
     fi
@@ -3945,7 +3992,7 @@ check_keyring_security() {
   [[ "$gpg_checked" -eq 0 ]] && info "No gpg-agent.conf found for any user"
 
   local secrets_found=0
-  local secret_patterns=(".password" ".secret" ".credentials" ".env" "passwords.txt" "secrets.txt" ".netrc")
+  local secret_patterns=(".password" ".secret" ".credentials" ".env" "passwords.txt" "secrets.txt")
   while IFS=: read -r user _ uid _ _ home shell; do
     [[ "$uid" -ge 1000 && "$uid" -lt 65534 ]] || continue
     [[ "$shell" == */nologin || "$shell" == */false ]] && continue
@@ -3966,61 +4013,6 @@ check_keyring_security() {
     fi
   done < /etc/passwd
   [[ "$secrets_found" -eq 0 ]] && pass "No obvious plaintext secret files found"
-
-  if command -v fwupdmgr &>/dev/null; then
-    local fw_output
-    fw_output=$(timeout 15 fwupdmgr get-updates --no-unreported-check 2>/dev/null)
-    local fw_exit=$?
-    if [[ $fw_exit -eq 0 && -n "$fw_output" ]]; then
-      local update_count
-      update_count=$(echo "$fw_output" | grep -c '│\|New version')
-      if [[ "$update_count" -gt 0 ]]; then
-        warn "Firmware updates available (run: fwupdmgr update)"
-      else
-        pass "Firmware is up to date"
-      fi
-    elif [[ $fw_exit -eq 2 ]] || echo "$fw_output" | grep -qi 'no upgrades\|no updates'; then
-      pass "Firmware is up to date"
-    else
-      info "Could not check firmware updates"
-    fi
-  else
-    info "fwupdmgr not installed — cannot check firmware updates"
-  fi
-
-  local tb_found=0
-  for dev in /sys/bus/thunderbolt/devices/*/security; do
-    [[ -f "$dev" ]] || continue
-    tb_found=1
-    local level
-    level=$(cat "$dev" 2>/dev/null)
-    local devname
-    devname=$(basename "$(dirname "$dev")")
-    case "$level" in
-      none)
-        fail "Thunderbolt device $devname: security level NONE (DMA attacks possible)"
-        ;;
-      user)
-        pass "Thunderbolt device $devname: user authorization required"
-        ;;
-      secure)
-        pass "Thunderbolt device $devname: secure connect (key verification)"
-        ;;
-      dponly)
-        pass "Thunderbolt device $devname: DisplayPort only (no PCIe tunneling)"
-        ;;
-      *)
-        info "Thunderbolt device $devname: security level '$level'"
-        ;;
-    esac
-  done
-  if [[ "$tb_found" -eq 0 ]]; then
-    if [[ -d /sys/bus/thunderbolt ]]; then
-      info "Thunderbolt bus present but no devices connected"
-    else
-      info "No Thunderbolt controller detected"
-    fi
-  fi
 }
 
 # --- Run Privacy & Desktop Sections ---
@@ -4032,6 +4024,50 @@ check_desktop_session
 check_media_privacy
 check_bluetooth_privacy
 check_keyring_security
+
+# --- Firmware & Thunderbolt (independent of --skip keyring) ---
+if command -v fwupdmgr &>/dev/null; then
+  fw_output=$(timeout 15 fwupdmgr get-updates --no-unreported-check 2>/dev/null)
+  fw_exit=$?
+  if [[ $fw_exit -eq 0 && -n "$fw_output" ]]; then
+    update_count=$(echo "$fw_output" | grep -c '│\|New version')
+    if [[ "$update_count" -gt 0 ]]; then
+      warn "Firmware updates available (run: fwupdmgr update)"
+    else
+      pass "Firmware is up to date"
+    fi
+  elif [[ $fw_exit -eq 2 ]]; then
+    pass "Firmware is up to date"
+  elif echo "$fw_output" | grep -qi 'no upgrades\|no updates'; then
+    pass "Firmware is up to date"
+  else
+    info "Could not check firmware updates"
+  fi
+else
+  info "fwupdmgr not installed — cannot check firmware updates"
+fi
+
+tb_found=0
+for dev in /sys/bus/thunderbolt/devices/*/security; do
+  [[ -f "$dev" ]] || continue
+  tb_found=1
+  level=$(cat "$dev" 2>/dev/null)
+  devname=$(basename "$(dirname "$dev")")
+  case "$level" in
+    none)  fail "Thunderbolt device $devname: security level NONE (DMA attacks possible)" ;;
+    user)  pass "Thunderbolt device $devname: user authorization required" ;;
+    secure) pass "Thunderbolt device $devname: secure connect (key verification)" ;;
+    dponly) pass "Thunderbolt device $devname: DisplayPort only (no PCIe tunneling)" ;;
+    *)     info "Thunderbolt device $devname: security level '$level'" ;;
+  esac
+done
+if [[ "$tb_found" -eq 0 ]]; then
+  if [[ -d /sys/bus/thunderbolt ]]; then
+    info "Thunderbolt bus present but no devices connected"
+  else
+    info "No Thunderbolt controller detected"
+  fi
+fi
 
 ###############################################################################
 if ! should_skip "summary"; then
@@ -4128,45 +4164,52 @@ else
 
   # --- AI Mode Output ---
   if $AI_MODE; then
+    _ai_ctx=""
+    lsblk -o TYPE 2>/dev/null | grep -q crypt && _ai_ctx="${_ai_ctx}, LUKS"
+    [[ -n "$VPN_IFACES" ]] && _ai_ctx="${_ai_ctx}, VPN active"
+    command -v flatpak &>/dev/null && _ai_ctx="${_ai_ctx}, Flatpak"
+    $HAS_SELINUX && _ai_ctx="${_ai_ctx}, SELinux"
+    $HAS_APPARMOR && _ai_ctx="${_ai_ctx}, AppArmor"
+
     echo ""
-    echo "═══════════════════════════════════════════════════"
-    echo "NoID Privacy for Linux AI ASSISTANT PROMPT"
-    echo "═══════════════════════════════════════════════════"
     echo ""
-    echo "Copy everything below and paste it to your AI assistant (ChatGPT, Claude, Gemini, etc.):"
+    echo -e "${BOLD}${CYN}╔══════════════════════════════════════════════════════════════════════╗${RST}"
+    echo -e "${BOLD}${CYN}║${RST}  🤖 ${BOLD}AI ASSISTANT PROMPT${RST}"
+    echo -e "${BOLD}${CYN}║${RST}  Copy everything below and paste it to your AI assistant"
+    echo -e "${BOLD}${CYN}║${RST}  ${YLW}ChatGPT${RST} · ${YLW}Claude${RST} · ${YLW}Gemini${RST} · ${YLW}any LLM${RST}"
+    echo -e "${BOLD}${CYN}╚══════════════════════════════════════════════════════════════════════╝${RST}"
     echo ""
-    echo "---START---"
-    echo "I ran NoID Privacy for Linux v${NOID_PRIVACY_VERSION} (Privacy & Security Audit) on my system."
-    echo "Here are the findings that need attention:"
+    echo -e "${GRN}▼▼▼ COPY FROM HERE ▼▼▼${RST}"
+    echo ""
+    echo "I ran NoID Privacy for Linux v${NOID_PRIVACY_VERSION} — a 300+ check privacy & security audit."
+    echo "Tool: https://github.com/NexusOne23/noid-privacy-linux"
     echo ""
     echo "System: ${DISTRO_PRETTY} ${KERNEL} ${DESKTOP_ENV}"
+    [[ -n "$_ai_ctx" ]] && echo "Context: ${_ai_ctx#, }"
+    echo "Score: ${SCORE}% ${RATING} (${PASS} pass, ${FAIL} fail, ${WARN} warn, ${INFO} info)"
     echo ""
-    echo "FAILED:"
-    if [[ ${#FAIL_MSGS[@]} -eq 0 ]]; then
-      echo "- (none)"
-    else
+    if [[ ${#FAIL_MSGS[@]} -gt 0 ]]; then
+      echo "FAILED (${#FAIL_MSGS[@]}):"
       for msg in "${FAIL_MSGS[@]}"; do
-        echo "- $msg"
+        echo "  - $msg"
       done
+      echo ""
     fi
-    echo ""
-    echo "WARNINGS:"
-    if [[ ${#WARN_MSGS[@]} -eq 0 ]]; then
-      echo "- (none)"
-    else
+    if [[ ${#WARN_MSGS[@]} -gt 0 ]]; then
+      echo "WARNINGS (${#WARN_MSGS[@]}):"
       for msg in "${WARN_MSGS[@]}"; do
-        echo "- $msg"
+        echo "  - $msg"
       done
+      echo ""
     fi
+    if [[ ${#FAIL_MSGS[@]} -eq 0 && ${#WARN_MSGS[@]} -eq 0 ]]; then
+      echo "No issues found. System is fully hardened."
+      echo ""
+    fi
+    echo "For each finding: explain the risk, show the exact fix command,"
+    echo "warn if it could break anything, and ask before applying."
     echo ""
-    echo "Please help me fix these issues. For each one:"
-    echo "1. Explain what the risk is (one sentence)"
-    echo "2. Show me the exact command to fix it"
-    echo "3. Tell me if the fix could break anything (Bluetooth, WiFi, GPU, etc.)"
-    echo "4. Ask me before applying anything destructive"
-    echo ""
-    echo "Focus on FAILs first, then WARNs. Skip INFO items."
-    echo "---END---"
+    echo -e "${GRN}▲▲▲ COPY TO HERE ▲▲▲${RST}"
   fi
 fi
 
