@@ -89,16 +89,16 @@ echo "info=${INFO}" >> "$GITHUB_OUTPUT"
 
 # --- Score rating ---
 if [[ "$SCORE" -ge 95 ]]; then
-  RATING="🏆 EXCELLENT"
+  RATING="🏰 FORTRESS"
   BADGE_COLOR="brightgreen"
 elif [[ "$SCORE" -ge 90 ]]; then
-  RATING="🟢 SOLID"
+  RATING="🛡️ EXCELLENT"
   BADGE_COLOR="green"
 elif [[ "$SCORE" -ge 80 ]]; then
-  RATING="🟡 FAIR"
-  BADGE_COLOR="yellow"
+  RATING="🛡️ SOLID"
+  BADGE_COLOR="yellowgreen"
 elif [[ "$SCORE" -ge 70 ]]; then
-  RATING="🟠 NEEDS WORK"
+  RATING="⚠️ NEEDS WORK"
   BADGE_COLOR="orange"
 else
   RATING="🔴 CRITICAL"
