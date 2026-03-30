@@ -7,6 +7,112 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.2.4] - 2026-03-30
+
+### 🔴 Critical Fixes
+
+- **RPM signature check was completely broken**: `grep -c "not signed"` never matched — RPM outputs `(none)` for unsigned packages, not "not signed". Every system falsely reported "All RPM packages signed". Fixed to check all three signature headers (RSAHEADER for modern Fedora, SIGPGP/SIGGPG for legacy RHEL). Also excludes `gpg-pubkey` meta-packages from the count.
+
+- **NetworkManager connectivity check ignored conf.d drop-ins**: Only parsed `/etc/NetworkManager/NetworkManager.conf`. Fedora configures connectivity in `/etc/NetworkManager/conf.d/` drop-in files. Systems with connectivity disabled via drop-in (standard Fedora hardening) were falsely flagged as "may phone home". Now iterates all config files.
+
+- **DNS resolution test leaked IP to Cloudflare**: `dig +short google.com @1.1.1.1` bypassed VPN/DoH setup and sent a query directly to Cloudflare in a privacy audit tool. Replaced with system-resolver query (`dig +short google.com`). Connectivity test now uses `curl detectportal.firefox.com` with ICMP fallback.
+
+### 🔴 High Fixes
+
+- **aes-cbc classified as "strong"**: LUKS with aes-cbc-essiv has known watermarking weaknesses. Now correctly warns and recommends migration to aes-xts.
+
+- **SSH PubkeyAuthentication false positive**: When PubkeyAuthentication was not explicitly set (OpenSSH default = yes), script warned "not explicitly yes". Now recognizes the default as correct and shows PASS.
+
+- **Kernel-UDP sockets all labeled "likely WireGuard"**: Any kernel-owned UDP socket (IPVS, conntrack, etc.) was assumed to be WireGuard. Now checks if WireGuard interfaces actually exist before labeling.
+
+- **LLMNR/MulticastDNS: `head -1` instead of `tail -1`**: systemd uses last-value-wins semantics for duplicate keys. Script took the first value, potentially returning the wrong setting. Fixed to `tail -1` in both main config and drop-in parsing.
+
+- **IPv6 manual/link-local falsely treated as "disabled"**: `ipv6.method=manual` with configured addresses means IPv6 IS active. Now checks if addresses are actually configured before classifying as disabled.
+
+- **IPv6 ULA misclassified as "link-local"**: `fdxx::` addresses (Unique Local) were counted as link-local in the summary message. Now correctly distinguished.
+
+- **Kernel Lockdown: empty value = PASS**: If `/sys/kernel/security/lockdown` existed but couldn't be parsed, the empty result fell through to PASS. Now explicitly warns on parse failure.
+
+- **AppArmor ignored when getenforce exists but SELinux=Disabled**: `HAS_SELINUX` was set based on `getenforce` binary existence, not actual SELinux status. On systems with SELinux disabled but AppArmor enforcing, AppArmor was silently skipped. MAC detection now checks actual enforcement status.
+
+### 🟡 Medium Fixes
+
+- **Faillock counted login attempts, reported "accounts"**: `grep -c "When"` counted individual failed attempts, but the message said "X accounts". Fixed to count unique usernames.
+
+- **Core dump check missed systemd-coredump Storage=none**: `ulimit -c` and `core_pattern` were checked, but `systemd-coredump` with `Storage=none` (the Fedora standard) was not recognized. Now checks all three mechanisms. Also fixed relative path bug in `_systemd_conf_val` call.
+
+- **net.ipv4.conf.default.rp_filter never checked**: Was in `SYSCTL_MIN_OK` but missing from `SYSCTL_CHECKS` — dead code. Now included in the check loop.
+
+- **cups-browsed: FAIL even when patched**: CVE-2024-47176 was fixed in cups-filters >= 2.0.1. Downgraded from FAIL to WARN with version note.
+
+- **Flatpak: `filesystems=home` not detected**: Only `host` and `host-os` were flagged. Apps with `home` access (full user data) were silently passed. Now detected.
+
+- **Snap telemetry: wrong config key**: `system.telemetry.enabled` doesn't exist. Changed to `experimental.telemetry`.
+
+- **DHCP hostname: last connection file won in global check**: If one connection had `dhcp-send-hostname=true` and a later one had `false`, only `false` was seen. Now flags any single connection with hostname leaking.
+
+- **Journal error count inflated by continuation lines**: Multi-line log entries (stack traces) were counted as separate errors. Now filters to timestamp-prefixed lines only (consistent with critical-level check).
+
+- **chkrootkit FP filter missing `linux_ldiscs` and `suckit`**: Known false positives on modern kernels not filtered. Added to pattern.
+
+- **Suspicious process regex issues**: `reverse.shell` unescaped dot, `nc -l` didn't match with flags (`-lvnp`), `socat`/`cobalt` too broad. Tightened all patterns.
+
+- **Cron file permissions too strict**: Any group/other bit triggered WARN — standard Fedora `/etc/crontab` (644) was always flagged. Now allows read-only for group/other, warns only on write/execute.
+
+- **Coredump check duplicated in two sections**: Section 12 (Filesystem) and Section 38 (Data Privacy) both produced pass/warn for the same coredump check, inflating the score. Section 38 now shows INFO only with reference to Section 12.
+
+- **AutomaticLogin grep matched AutomaticLoginEnable**: `grep AutomaticLogin` also matched `AutomaticLoginEnable=true`, extracting "true" as the username. Fixed with negative lookahead. Also fixed duplicate check in Section 26.
+
+- **`_for_each_user` processed UID 65534 (nobody)**: Missing upper bound caused unnecessary checks on system accounts. Now filters `uid < 65534` consistently.
+
+- **Firmware findings in wrong JSON section**: `CURRENT_SECTION` was still set to "PASSWORD & KEYRING" when firmware checks ran. Added explicit section assignment.
+
+- **bluetooth.socket not checked**: Only `bluetooth.service` was in the disabled-services list. Bluetooth could start via socket activation. Added `bluetooth.socket`.
+
+- **Fedora countme default text incorrect**: Warned about countme being "enabled per-repo" on unset systems. Since Fedora 36+, the default is disabled. Changed to INFO with correct text.
+
+- **IPv6 privacy extensions: false positive on VPN interfaces**: VPN killswitch interfaces (pvpnksintrf1) with internal ULA addresses triggered "IPv6 privacy extensions disabled" warning. VPN-internal interfaces are now skipped in the privacy check.
+
+### 🟢 Low Fixes
+
+- **Section comment numbers off-by-one**: Comments said "Section 36-43" but headers showed 35-42. All 8 comments corrected.
+
+- **`rpm -Va` no progress indicator**: Full package verification can take 5-15 minutes with no output. Added progress message.
+
+- **iptables rule count wrong**: Counted chain headers (`^[A-Z]`) instead of actual rules. Fixed to exclude headers and empty lines.
+
+- **`cat /proc/loadavg | awk`**: Useless use of cat. Changed to `awk ... /proc/loadavg`.
+
+- **`ip_forward` empty value error**: Missing default caused bash integer comparison error on stderr. Added `|| echo "0"` fallback.
+
+- **systemd-analyze dead else branch**: `if [[ "$SVC" == "sshd" || ... ]]` was always true because the for-loop only contained those 4 values. Removed dead code.
+
+- **`HAS_SELINUX`/`HAS_APPARMOR` undefined with `--skip selinux`**: MAC detection moved before the skip check so AI context always has correct values.
+
+- **`txtf` dead code removed**: Never called anywhere in the script.
+
+- **policies.json `"Value".*true` global match**: `EnableTrackingProtection` check matched any `"Value": true` in the entire file. Now scoped to the specific JSON block via `sed`.
+
+- **vmstat column 16 hardcoded**: I/O wait column position varies across distros. Now dynamically parsed from header.
+
+- **Score integer division truncation**: Always rounded down. Added `+ DENOM/2` for proper rounding.
+
+- **`_human_size` crash on empty input**: No validation for non-numeric or empty arguments. Added regex guard.
+
+- **PipeWire TCP check matched inline comments**: `grep -vE '^\s*#'` only filtered full-line comments. Strings like `value # tcp:4713` still matched. Added second grep to re-validate match after comment removal.
+
+- **ANSI escapes in AI copy markers**: `echo -e "${GRN}..."` in copy markers included terminal color codes when copied. Changed to plain `echo`.
+
+- **Suspicious module check label**: Added "(basic name-based heuristic)" caveat — real rootkits use innocuous names.
+
+- **os-release sourcing**: `. /etc/os-release` could execute arbitrary code on compromised systems. Changed to `eval "$(grep ...)"` with restricted key whitelist.
+
+- **`grep -qw "$GW"` regex wildcard**: Dots in IP addresses interpreted as regex "any character". Changed to `grep -qwF` (fixed string).
+
+- **`ip route show default` missing `2>/dev/null`**: Inconsistent with other `ip` commands. Added error suppression.
+
+---
+
 ## [3.2.3] - 2026-03-25
 
 ### 🔴 High Fixes

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 ###############################################################################
-#  NoID Privacy for Linux v3.2.3 — Privacy & Security Audit
+#  NoID Privacy for Linux v3.2.4 — Privacy & Security Audit
 #  https://noid-privacy.com/linux.html | https://github.com/NexusOne23/noid-privacy-linux
 #  Fedora / RHEL / Debian / Ubuntu — Full-Spectrum Audit
 #  300+ checks across 42 sections
 #  Requires: root
 ###############################################################################
-NOID_PRIVACY_VERSION="3.2.3"
+NOID_PRIVACY_VERSION="3.2.4"
 set +e          # Don't exit on errors — we handle them ourselves
 
 # Bash 4+ required for associative arrays and other features
@@ -152,7 +152,6 @@ header() {
 }
 sub_header() { $JSON_MODE || printf "  ${CYN}--- %s ---${RST}\n" "$1"; }
 txt() { $JSON_MODE || printf "%s\n" "$1"; }
-txtf() { $JSON_MODE || printf "$@"; }
 
 # --- Dependency Check Helper ---
 require_cmd() {
@@ -177,7 +176,7 @@ sshd_cfg_val() {
 _for_each_user() {
   local callback="$1"
   while IFS=: read -r user _ uid _ _ home shell; do
-    [[ "$uid" -ge 1000 ]] || continue
+    [[ "$uid" -ge 1000 && "$uid" -lt 65534 ]] || continue
     [[ "$shell" == */nologin || "$shell" == */false ]] && continue
     [[ -d "$home" ]] || continue
     "$callback" "$user" "$uid" "$home"
@@ -216,8 +215,11 @@ _ff_pref() {
             pol_val="true"
           fi ;;
         browser.contentblocking.category)
-          if echo "$pcontent" | grep -q '"EnableTrackingProtection"' 2>/dev/null; then
-            echo "$pcontent" | grep -q '"Value".*true' 2>/dev/null && pol_val="strict"
+          # Extract only the Value within the EnableTrackingProtection block
+          local _etp_block
+          _etp_block="$(echo "$pcontent" | sed -n '/"EnableTrackingProtection"/,/}/p' 2>/dev/null)"
+          if [[ -n "$_etp_block" ]] && echo "$_etp_block" | grep -q '"Value".*true' 2>/dev/null; then
+            pol_val="strict"
           fi ;;
         network.cookie.cookieBehavior)
           pol_val="$(echo "$pcontent" | grep -oP '"Behavior"\s*:\s*\K\d+' 2>/dev/null | head -1)" ;;
@@ -237,7 +239,8 @@ _gsettings_user() {
 }
 
 _human_size() {
-  local bytes="$1"
+  local bytes="${1:-0}"
+  [[ "$bytes" =~ ^[0-9]+$ ]] || { echo "0B"; return; }
   if [[ "$bytes" -ge 1073741824 ]]; then
     echo "$(( bytes / 1073741824 ))GB"
   elif [[ "$bytes" -ge 1048576 ]]; then
@@ -289,7 +292,8 @@ DISTRO="unknown"
 DISTRO_FAMILY="unknown"
 DISTRO_PRETTY="Unknown Linux"
 if [[ -f /etc/os-release ]]; then
-  . /etc/os-release
+  # Parse os-release safely (avoid sourcing arbitrary code)
+  eval "$(grep -E '^(ID|NAME|PRETTY_NAME|VERSION_ID)=' /etc/os-release 2>/dev/null)"
   DISTRO_PRETTY="${PRETTY_NAME:-$NAME}"
   # shellcheck disable=SC2034  # DISTRO reserved for future per-distro checks
   case "${ID,,}" in
@@ -405,8 +409,10 @@ fi
 
 # Kernel Lockdown
 if [[ -f /sys/kernel/security/lockdown ]]; then
-  LOCKDOWN=$(cat /sys/kernel/security/lockdown | grep -oP '\[\K[^\]]+')
-  if [[ "$LOCKDOWN" == "none" ]]; then
+  LOCKDOWN=$(grep -oP '\[\K[^\]]+' /sys/kernel/security/lockdown 2>/dev/null)
+  if [[ -z "$LOCKDOWN" ]]; then
+    warn "Kernel Lockdown: could not parse status"
+  elif [[ "$LOCKDOWN" == "none" ]]; then
     warn "Kernel Lockdown: none (despite Secure Boot)"
   else
     pass "Kernel Lockdown: $LOCKDOWN"
@@ -499,13 +505,16 @@ fi
 fi # end kernel
 
 ###############################################################################
-if ! should_skip "selinux"; then
-
-# Detect which MAC system is available (tool-based, not distro-based)
+# Initialize MAC detection variables (used in AI output even if section is skipped)
 HAS_SELINUX=false
 HAS_APPARMOR=false
-require_cmd getenforce && HAS_SELINUX=true
+if require_cmd getenforce; then
+  _se_mode=$(getenforce 2>/dev/null)
+  [[ "$_se_mode" == "Enforcing" || "$_se_mode" == "Permissive" ]] && HAS_SELINUX=true
+fi
 require_cmd aa-status && HAS_APPARMOR=true
+
+if ! should_skip "selinux"; then
 
 if $HAS_SELINUX; then
 header "02" "SELINUX & MAC"
@@ -577,7 +586,11 @@ elif $HAS_APPARMOR; then
 
 else
   header "02" "MANDATORY ACCESS CONTROL"
-  warn "No MAC system (SELinux/AppArmor) detected"
+  if require_cmd getenforce && [[ "$(getenforce 2>/dev/null)" == "Disabled" ]]; then
+    fail "SELinux: Disabled (getenforce present but SELinux is off)"
+  else
+    warn "No MAC system (SELinux/AppArmor) detected"
+  fi
 fi
 fi # end selinux
 
@@ -710,10 +723,11 @@ elif require_cmd ufw; then
   fi
   info "Firewall: ufw (firewalld not available)"
 elif require_cmd iptables; then
-  IPTABLES_RULES=$(iptables -L -n 2>/dev/null | grep -c "^[A-Z]" || true)
+  # Count actual rules (not chain headers) — subtract header lines and empty lines
+  IPTABLES_RULES=$(iptables -L -n 2>/dev/null | grep -cvE "^Chain |^target |^$" || true)
   IPTABLES_RULES=${IPTABLES_RULES:-0}
-  if [[ "$IPTABLES_RULES" -gt 3 ]]; then
-    pass "iptables: $IPTABLES_RULES chains with rules"
+  if [[ "$IPTABLES_RULES" -gt 0 ]]; then
+    pass "iptables: $IPTABLES_RULES rules"
   else
     warn "iptables: minimal rules"
   fi
@@ -816,11 +830,13 @@ header "05" "VPN & NETWORK"
 # NOTE: This section makes network requests (ping, dig).
 # Use --skip vpn to avoid network traffic from this section.
 
-# Internet Connectivity Test
-if ping -c1 -W5 1.1.1.1 &>/dev/null; then
+# Internet Connectivity Test (use curl to avoid ICMP-blocked false negatives)
+if curl -fsS --max-time 5 http://detectportal.firefox.com/success.txt &>/dev/null; then
+  pass "Internet connectivity: OK"
+elif ping -c1 -W5 1.1.1.1 &>/dev/null; then
   pass "Internet connectivity: OK"
 else
-  warn "Internet connectivity: FAIL (ping 1.1.1.1 timeout)"
+  warn "Internet connectivity: FAIL (HTTP + ICMP timeout)"
 fi
 
 # VPN Interface
@@ -834,7 +850,7 @@ done
 $VPN_UP || warn "No VPN interface active"
 
 # Default Route
-DEF_ROUTE=$(ip route show default | head -1)
+DEF_ROUTE=$(ip route show default 2>/dev/null | head -1)
 if echo "$DEF_ROUTE" | grep -qE "proton|tun|wg|pvpn"; then
   pass "Default route via VPN: $DEF_ROUTE"
 elif $VPN_UP; then
@@ -897,7 +913,14 @@ if [[ -f /proc/net/if_inet6 ]]; then
   if [[ "$IPV6_GLOBAL" -gt 0 ]]; then
     warn "IPv6 active ($IPV6_GLOBAL global addresses, $IPV6_TOTAL total) — leak risk"
   else
-    pass "IPv6: disabled/minimal ($IPV6_TOTAL link-local only)"
+    # Remaining addresses may be link-local (fe80), ULA (fd), or loopback (::1)
+    IPV6_ULA=$(grep -c '^fd' /proc/net/if_inet6 2>/dev/null || true)
+    IPV6_ULA=${IPV6_ULA:-0}
+    if [[ "$IPV6_ULA" -gt 0 ]]; then
+      pass "IPv6: disabled/minimal ($IPV6_TOTAL addresses: link-local + $IPV6_ULA ULA)"
+    else
+      pass "IPv6: disabled/minimal ($IPV6_TOTAL link-local only)"
+    fi
   fi
 else
   pass "IPv6: completely disabled"
@@ -910,7 +933,7 @@ if [[ -n "$ACTUAL_GW" ]]; then
 fi
 TESTED_GWS=""
 for GW in $LAN_GW_LIST; do
-  echo "$TESTED_GWS" | grep -qw "$GW" && continue
+  echo "$TESTED_GWS" | grep -qwF "$GW" && continue
   TESTED_GWS="$TESTED_GWS $GW"
   if ! ping -c1 -W1 "$GW" &>/dev/null; then
     pass "LAN blocked: $GW"
@@ -987,6 +1010,7 @@ declare -A SYSCTL_CHECKS=(
   ["net.ipv4.conf.all.log_martians"]=1
   ["net.ipv4.conf.default.log_martians"]=1
   ["net.ipv4.conf.all.rp_filter"]=1  # 2 (loose) also accepted — needed for WireGuard/VPN
+  ["net.ipv4.conf.default.rp_filter"]=1  # 2 (loose) also accepted
   ["net.ipv4.tcp_syncookies"]=1
   ["net.ipv4.icmp_echo_ignore_broadcasts"]=1
   ["net.ipv4.icmp_ignore_bogus_error_responses"]=1
@@ -1057,8 +1081,8 @@ if [[ "$SYSRQ_VAL" != "N/A" ]] && [[ "$SYSRQ_VAL" -ne 0 ]]; then
 fi
 
 # ip_forward (VPN exception)
-IP_FWD=$(sysctl -n net.ipv4.ip_forward 2>/dev/null)
-if [[ "$IP_FWD" -eq 1 ]]; then
+IP_FWD=$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo "0")
+if [[ "${IP_FWD:-0}" -eq 1 ]]; then
   if [[ -n "$VPN_IFACES" ]]; then
     pass "ip_forward=1 (VPN active — expected)"
   else
@@ -1075,7 +1099,7 @@ if ! should_skip "services"; then
 header "07" "SERVICES & DAEMONS"
 ###############################################################################
 
-SHOULD_BE_OFF="sshd ssh telnet.socket rsh.socket rlogin.socket rexec.socket vsftpd httpd nginx cups avahi-daemon bluetooth.service rpcbind nfs-server smb nmb"
+SHOULD_BE_OFF="sshd ssh telnet.socket rsh.socket rlogin.socket rexec.socket vsftpd httpd nginx cups avahi-daemon bluetooth.service bluetooth.socket rpcbind nfs-server smb nmb"
 for SVC in $SHOULD_BE_OFF; do
   if systemctl is-active "$SVC" &>/dev/null; then
     fail "Service running: $SVC"
@@ -1187,7 +1211,12 @@ while read -r line; do
   elif echo "$PROC" | grep -qiE "wireguard|wg|vpn"; then
     pass "UDP $ADDR (VPN/WireGuard)"
   elif [[ "$PROC" == "kernel" ]]; then
-    info "UDP $ADDR (kernel — likely WireGuard)"
+    # Kernel-owned UDP sockets can be WireGuard, IPVS, conntrack, etc.
+    if ip link show type wireguard 2>/dev/null | grep -q .; then
+      info "UDP $ADDR (kernel — likely WireGuard)"
+    else
+      info "UDP $ADDR (kernel — no WireGuard interfaces found)"
+    fi
   else
     if has_nft_drop_on_phys; then
       info "UDP $ADDR ($PROC) — externally bound, but firewall/kill-switch blocks"
@@ -1248,10 +1277,15 @@ else
       warn "SSH: PasswordAuthentication ${VAL:-not explicitly 'no'}"
     fi
 
-    # PubkeyAuthentication
+    # PubkeyAuthentication (default is 'yes' in OpenSSH — only warn if explicitly disabled)
     VAL=$(sshd_cfg_val PubkeyAuthentication)
     if [[ "$VAL" == "yes" ]]; then
       pass "SSH: PubkeyAuthentication yes"
+    elif [[ "$VAL" == "no" ]]; then
+      warn "SSH: PubkeyAuthentication no (should be 'yes')"
+    else
+      # Not explicitly set — OpenSSH default is 'yes', which is correct
+      pass "SSH: PubkeyAuthentication yes (default)"
     fi
 
     # X11Forwarding
@@ -1454,9 +1488,9 @@ fi
 
 # Faillock
 if require_cmd faillock; then
-  LOCKED=$(faillock --dir /var/run/faillock 2>/dev/null | grep -c "When" | ccount)
+  LOCKED=$(faillock --dir /var/run/faillock 2>/dev/null | grep -c "^[a-zA-Z]" | ccount)
   if [[ "$LOCKED" -gt 0 ]]; then
-    warn "Faillock: $LOCKED accounts with failed login attempts"
+    warn "Faillock: $LOCKED account(s) with failed login attempts"
   else
     pass "Faillock: no recorded failed login attempts"
   fi
@@ -1548,7 +1582,8 @@ fi
 # Core Dumps
 CORE_PATTERN=$(cat /proc/sys/kernel/core_pattern 2>/dev/null)
 CORE_ULIMIT=$(ulimit -c 2>/dev/null)
-if [[ "$CORE_ULIMIT" == "0" ]] || echo "$CORE_PATTERN" | grep -q "|/dev/null"; then
+CORE_STORAGE=$(_systemd_conf_val /etc/systemd/coredump.conf Storage 2>/dev/null)
+if [[ "$CORE_ULIMIT" == "0" ]] || echo "$CORE_PATTERN" | grep -q "|/dev/null" || [[ "$CORE_STORAGE" == "none" ]]; then
   pass "Core dumps: disabled"
 else
   warn "Core dumps: possible (pattern: $CORE_PATTERN)"
@@ -1601,8 +1636,10 @@ if require_cmd cryptsetup; then
     CIPHER=$(cryptsetup status "$DEV" 2>/dev/null | grep "cipher:" | awk '{print $2}')
     KEYSIZE=$(cryptsetup status "$DEV" 2>/dev/null | grep "keysize:" | awk '{print $2}')
     info "LUKS $DEV: cipher=$CIPHER keysize=$KEYSIZE"
-    if echo "$CIPHER" | grep -qE "aes-xts|aes-cbc"; then
+    if echo "$CIPHER" | grep -qE "aes-xts"; then
       pass "LUKS cipher: $CIPHER (strong)"
+    elif echo "$CIPHER" | grep -qE "aes-cbc"; then
+      warn "LUKS cipher: $CIPHER (aes-cbc has known weaknesses — consider migrating to aes-xts)"
     elif [[ -n "$CIPHER" ]]; then
       warn "LUKS cipher: $CIPHER (unusual)"
     fi
@@ -1772,7 +1809,14 @@ fi
 
 # RPM GPG Verification
 if require_cmd rpm; then
-  RPM_NOSIG=$(rpm -qa --qf '%{NAME}-%{VERSION}-%{RELEASE} %{SIGPGP:pgpsig}\n' 2>/dev/null | grep -c "not signed" | ccount)
+  # Modern RPM (Fedora 31+) uses RSAHEADER for signatures; legacy uses SIGPGP/SIGGPG.
+  # A package is unsigned only if ALL signature fields are (none).
+  RPM_NOSIG=$(rpm -qa --qf '%{NAME}-%{VERSION}-%{RELEASE} RSA:%{RSAHEADER:pgpsig} PGP:%{SIGPGP:pgpsig} GPG:%{SIGGPG:pgpsig}\n' 2>/dev/null \
+    | grep -c "RSA:(none) PGP:(none) GPG:(none)" | ccount)
+  # gpg-pubkey meta-packages are keyring entries, not real packages — exclude them
+  RPM_NOSIG_REAL=$(rpm -qa --qf '%{NAME}-%{VERSION}-%{RELEASE} RSA:%{RSAHEADER:pgpsig} PGP:%{SIGPGP:pgpsig} GPG:%{SIGGPG:pgpsig}\n' 2>/dev/null \
+    | grep "RSA:(none) PGP:(none) GPG:(none)" | grep -cv "^gpg-pubkey-" | ccount)
+  RPM_NOSIG=$RPM_NOSIG_REAL
   if [[ "$RPM_NOSIG" -eq 0 ]]; then
     pass "All RPM packages signed"
   else
@@ -1883,7 +1927,7 @@ if require_cmd chkrootkit; then
   $JSON_MODE || printf "  ${CYN}Running chkrootkit...${RST}\n"
   CHKRK_OUT=$(chkrootkit 2>/dev/null || true)
   # Filter known false positives
-  CHKRK_FP_PATTERN="bindshell|sniffer|chkutmp|w55808|slapper|scalper|wted|Xor\.DDoS"
+  CHKRK_FP_PATTERN="bindshell|sniffer|chkutmp|w55808|slapper|scalper|wted|Xor\.DDoS|linux_ldiscs|suckit"
   CHKRK_INFECTED=$(echo "$CHKRK_OUT" | grep "INFECTED" | grep -viE "$CHKRK_FP_PATTERN" | wc -l | ccount)
   CHKRK_FP=$(echo "$CHKRK_OUT" | grep "INFECTED" | grep -ciE "$CHKRK_FP_PATTERN" | ccount)
   if [[ "$CHKRK_INFECTED" -eq 0 ]]; then
@@ -1931,7 +1975,7 @@ header "16" "PROCESS SECURITY"
 ###############################################################################
 
 # Suspicious processes
-SUSPECT_PROCS=$(ps aux 2>/dev/null | grep -iE "\bnc -l\b|\bncat -l\b|\bsocat\b|\bmeterpreter\b|\breverse.shell\b|\bcobalt\b|\bmimikatz\b|\blazagne\b|\bkeylog\b" | grep -v grep || true)
+SUSPECT_PROCS=$(ps aux 2>/dev/null | grep -iE "\bnc\s+-[a-z]*l|\bncat\s+-[a-z]*l|\bsocat\s+.*EXEC|\bsocat\s+.*TCP-LISTEN|\bmeterpreter\b|\breverse[_.-]shell\b|\bcobalt\s*strike\b|\bmimikatz\b|\blazagne\b|\bkeylog\b" | grep -v grep || true)
 if [[ -z "$SUSPECT_PROCS" ]]; then
   pass "No suspicious processes"
 else
@@ -2058,7 +2102,7 @@ header "19" "LOGS & MONITORING"
 ###############################################################################
 
 JOURNAL_ERR=$(journalctl -p err --since "1 hour ago" --no-pager -q 2>/dev/null \
-  | grep -cv " sudo\[" || true)
+  | grep -E "^[A-Z][a-z]{2} " | grep -cvE "sudo|password is required|auth could not identify|systemd-coredump" || true)
 JOURNAL_ERR=${JOURNAL_ERR:-0}
 if [[ "$JOURNAL_ERR" -le 10 ]]; then
   pass "Journal errors (1h): $JOURNAL_ERR"
@@ -2131,7 +2175,7 @@ header "20" "PERFORMANCE & RESOURCES"
 ###############################################################################
 
 UPTIME=$(uptime -p)
-LOAD=$(cat /proc/loadavg | awk '{print $1, $2, $3}')
+LOAD=$(awk '{print $1, $2, $3}' /proc/loadavg)
 CPU_COUNT=$(nproc)
 LOAD_1=$(echo "$LOAD" | awk '{print $1}')
 info "Uptime: $UPTIME"
@@ -2193,7 +2237,10 @@ else
   pass "Inodes /: ${INODE_PCT}%"
 fi
 
-IOWAIT=$(vmstat 1 2 2>/dev/null | tail -1 | awk '{print $16}')
+# Parse I/O wait dynamically from header (column position varies across distros)
+_VMSTAT_OUT=$(vmstat -w 1 2 2>/dev/null || vmstat 1 2 2>/dev/null)
+_VMSTAT_COL=$(echo "$_VMSTAT_OUT" | head -2 | tail -1 | tr -s ' ' '\n' | grep -n '^wa$' | cut -d: -f1)
+IOWAIT=$(echo "$_VMSTAT_OUT" | tail -1 | awk -v col="${_VMSTAT_COL:-16}" '{print $col}')
 if [[ "${IOWAIT:-0}" -gt 20 ]]; then
   warn "I/O wait: ${IOWAIT}%"
 else
@@ -2305,7 +2352,7 @@ if ! $JSON_MODE; then
 fi
 
 if require_cmd dig; then
-  DNS_TEST=$(dig +short google.com @1.1.1.1 +time=3 2>/dev/null | head -1 || echo "FAIL")
+  DNS_TEST=$(dig +short google.com +time=3 2>/dev/null | head -1 || echo "FAIL")
   if [[ "$DNS_TEST" != "FAIL" ]] && [[ -n "$DNS_TEST" ]]; then
     pass "DNS resolution: working"
   else
@@ -2400,11 +2447,8 @@ if require_cmd systemd-analyze; then
       elif [[ "$SCORE_INT" -le 6 ]]; then
         info "systemd-security $SVC: $SCORE"
       else
-        if [[ "$SVC" == "sshd" || "$SVC" == "firewalld" || "$SVC" == "fail2ban" || "$SVC" == "auditd" ]]; then
-          info "systemd-security $SVC: $SCORE (security service, needs root)"
-        else
-          warn "systemd-security $SVC: $SCORE (poor)"
-        fi
+        # These are all security services that need root — high score is expected
+        info "systemd-security $SVC: $SCORE (security service, needs root)"
       fi
     fi
   done
@@ -2449,9 +2493,9 @@ if require_cmd gsettings; then
   _gsettings_for_users "org.gnome.desktop.screensaver" "lock-enabled" _gs_lock_check_cb
 fi
 
-# Auto-Login
-if [[ -f /etc/gdm/custom.conf ]]; then
-  if grep -q "AutomaticLoginEnable=True\|AutomaticLoginEnable=true" /etc/gdm/custom.conf 2>/dev/null; then
+# Auto-Login — detailed check in Section 39 (Desktop Session Security)
+if [[ -f /etc/gdm/custom.conf ]] || [[ -f /etc/gdm3/custom.conf ]]; then
+  if grep -qi '^\s*AutomaticLoginEnable[[:space:]]*=[[:space:]]*true' /etc/gdm*/custom.conf /etc/gdm*/daemon.conf 2>/dev/null; then
     fail "GDM auto-login enabled!"
   else
     pass "GDM: no auto-login"
@@ -2671,11 +2715,11 @@ if ! should_skip "modules"; then
 header "31" "KERNEL MODULES & INTEGRITY"
 ###############################################################################
 
-# Suspicious kernel modules (new)
+# Suspicious kernel modules (basic heuristic — real rootkits use innocuous names)
 sub_header "Suspicious Module Check"
 SUSPICIOUS_MODS=$(lsmod 2>/dev/null | awk '{print $1}' | grep -iE "backdoor|rootkit|hide|keylog|sniff|inject" || true)
 if [[ -z "$SUSPICIOUS_MODS" ]]; then
-  pass "No suspicious kernel modules loaded"
+  pass "No suspicious kernel modules loaded (basic name-based heuristic)"
 else
   fail "Suspicious kernel modules: $SUSPICIOUS_MODS"
 fi
@@ -2734,8 +2778,11 @@ for CRONDIR in /etc/crontab /etc/cron.hourly /etc/cron.daily /etc/cron.weekly /e
         warn "$CRONDIR permissions: $PERMS (too open for directory)"
       fi
     elif [[ -f "$CRONDIR" ]]; then
-      if (( (8#${PERMS:-777} & 8#077) != 0 )); then
-        warn "$CRONDIR permissions: $PERMS (too open for file)"
+      # Allow read for group/other (644), warn on write/execute for group/other
+      if (( (8#${PERMS:-777} & 8#033) != 0 )); then
+        warn "$CRONDIR permissions: $PERMS (write/execute for group/other)"
+      elif (( (8#${PERMS:-777} & ~8#644) != 0 )); then
+        warn "$CRONDIR permissions: $PERMS (expected: <=644)"
       else
         pass "$CRONDIR: owner=$OWNER, perms=$PERMS"
       fi
@@ -2805,6 +2852,7 @@ header "34" "SYSTEM INTEGRITY CHECKS"
 # File Integrity — key system binaries
 sub_header "Critical Binary Integrity"
 if require_cmd rpm; then
+  $JSON_MODE || printf "  ${CYN}Running rpm -Va (full package verify, may take several minutes)...${RST}\n"
   RPM_VA_OUTPUT=$(rpm -Va 2>/dev/null || true)
   RPM_VERIFY_ALL=$(echo "$RPM_VA_OUTPUT" | grep -cE "^..5" || true)
   RPM_VERIFY_ALL=${RPM_VERIFY_ALL:-0}
@@ -2861,7 +2909,7 @@ fi
 fi # end integrity
 
 ###############################################################################
-# Section 36: Browser Privacy
+# Section 35: Browser Privacy
 ###############################################################################
 check_browser_privacy() {
   should_skip "browser" && return
@@ -3012,7 +3060,7 @@ check_browser_privacy() {
 }
 
 ###############################################################################
-# Section 37: Application Telemetry & Privacy
+# Section 36: Application Telemetry & Privacy
 ###############################################################################
 check_app_telemetry() {
   should_skip "telemetry" && return
@@ -3094,8 +3142,8 @@ check_app_telemetry() {
       [[ -z "$app" ]] && continue
       local perms
       perms="$(flatpak info --show-permissions "$app" 2>/dev/null)"
-      if echo "$perms" | grep -qE "filesystems=(host([;,[:space:]]|$)|.*[;,]host([;,[:space:]]|$))|filesystems=(host-os([;,[:space:]]|$)|.*[;,]host-os([;,[:space:]]|$))|org\.freedesktop\.Flatpak=talk"; then
-        warn "Flatpak '$app' has dangerous permissions (host filesystem or Flatpak portal)"
+      if echo "$perms" | grep -qE "filesystems=(host([;,[:space:]]|$)|.*[;,]host([;,[:space:]]|$))|filesystems=(host-os([;,[:space:]]|$)|.*[;,]host-os([;,[:space:]]|$))|filesystems=(home([;,[:space:]]|$)|.*[;,]home([;,[:space:]]|$))|org\.freedesktop\.Flatpak=talk"; then
+        warn "Flatpak '$app' has dangerous permissions (host/home filesystem or Flatpak portal)"
         ((dangerous++))
       fi
     done < <(flatpak list --app --columns=application 2>/dev/null)
@@ -3107,7 +3155,7 @@ check_app_telemetry() {
   fi
 
   if command -v snap &>/dev/null; then
-    if snap get system system.telemetry.enabled 2>/dev/null | grep -qi "true"; then
+    if snap get system experimental.telemetry 2>/dev/null | grep -qi "true"; then
       warn "Snap telemetry enabled"
     else
       pass "Snap telemetry not enabled"
@@ -3129,7 +3177,7 @@ check_app_telemetry() {
     elif [[ -f "$dnf_conf" ]] && grep -qi "^countme[[:space:]]*=[[:space:]]*false" "$dnf_conf" 2>/dev/null; then
       pass "Fedora countme disabled in dnf.conf"
     else
-      info "Fedora countme not set (default: enabled per-repo)"
+      info "Fedora countme not explicitly set in dnf.conf (default: disabled since Fedora 36)"
     fi
   fi
 
@@ -3146,32 +3194,47 @@ check_app_telemetry() {
     fi
   fi
 
-  local nm_conf="/etc/NetworkManager/NetworkManager.conf"
-  if [[ -f "$nm_conf" ]]; then
-    if grep -qi "^\[connectivity\]" "$nm_conf" 2>/dev/null; then
-      if grep -qE '^\s*uri\s*=' <(sed -n '/^\[connectivity\]/,/^\[/p' "$nm_conf") 2>/dev/null; then
-        local uri
-        uri="$(sed -n '/^\[connectivity\]/,/^\[/{ s/^uri[[:space:]]*=[[:space:]]*//p; }' "$nm_conf" 2>/dev/null)"
-        if [[ -z "$uri" ]]; then
-          pass "NetworkManager connectivity check disabled (uri explicitly empty)"
-        else
-          info "NetworkManager connectivity check active (pings $uri)"
-        fi
-      else
-        info "NetworkManager connectivity check uses default (may phone home)"
-      fi
-    else
-      info "NetworkManager connectivity check uses default (may phone home)"
-    fi
-  fi
+  # Check all NM config files for connectivity settings (main + conf.d drop-ins)
+  local _nm_connectivity_found=false
+  local _nm_connectivity_disabled=false
+  local _nm_files=()
+  [[ -f "/etc/NetworkManager/NetworkManager.conf" ]] && _nm_files+=("/etc/NetworkManager/NetworkManager.conf")
+  for _nmf in /etc/NetworkManager/conf.d/*.conf; do
+    [[ -f "$_nmf" ]] && _nm_files+=("$_nmf")
+  done
 
-  if [[ -f "/etc/NetworkManager/conf.d/20-connectivity-fedora.conf" ]]; then
-    info "Fedora connectivity check config present"
+  for _nmf in "${_nm_files[@]}"; do
+    if grep -qi "^\[connectivity\]" "$_nmf" 2>/dev/null; then
+      _nm_connectivity_found=true
+      # Check if enabled=false is set
+      local _nm_enabled
+      _nm_enabled="$(sed -n '/^\[connectivity\]/,/^\[/{ s/^enabled[[:space:]]*=[[:space:]]*//p; }' "$_nmf" 2>/dev/null | tail -1)"
+      if [[ "$_nm_enabled" == "false" ]]; then
+        _nm_connectivity_disabled=true
+        pass "NetworkManager connectivity check disabled (in $(basename "$_nmf"))"
+        break
+      fi
+      # Check uri setting
+      local _nm_uri
+      _nm_uri="$(sed -n '/^\[connectivity\]/,/^\[/{ s/^uri[[:space:]]*=[[:space:]]*//p; }' "$_nmf" 2>/dev/null | tail -1)"
+      if [[ -n "$_nm_uri" ]]; then
+        info "NetworkManager connectivity check active (pings $_nm_uri, in $(basename "$_nmf"))"
+        break
+      fi
+    fi
+  done
+
+  if $_nm_connectivity_disabled; then
+    : # already reported pass above
+  elif $_nm_connectivity_found; then
+    info "NetworkManager [connectivity] section found but no explicit disable — connectivity check likely active"
+  else
+    info "NetworkManager connectivity check uses default (may phone home)"
   fi
 }
 
 ###############################################################################
-# Section 38: Network Privacy
+# Section 37: Network Privacy
 ###############################################################################
 check_network_privacy() {
   should_skip "netprivacy" && return
@@ -3242,13 +3305,13 @@ check_network_privacy() {
   local resolved_conf="/etc/systemd/resolved.conf"
   local llmnr_val=""
   if [[ -f "$resolved_conf" ]]; then
-    llmnr_val="$(grep -i "^LLMNR\s*=" "$resolved_conf" 2>/dev/null | head -1 | cut -d= -f2 | tr -d ' ')"
+    llmnr_val="$(grep -i "^LLMNR\s*=" "$resolved_conf" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d ' ')"
   fi
-  # Also check drop-in files
+  # Also check drop-in files (last value wins in systemd)
   for dropin in /etc/systemd/resolved.conf.d/*.conf; do
     [[ -f "$dropin" ]] || continue
     local dval
-    dval="$(grep -i "^LLMNR\s*=" "$dropin" 2>/dev/null | head -1 | cut -d= -f2 | tr -d ' ')"
+    dval="$(grep -i "^LLMNR\s*=" "$dropin" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d ' ')"
     [[ -n "$dval" ]] && llmnr_val="$dval"
   done
   if [[ "$llmnr_val" == "no" || "$llmnr_val" == "false" ]]; then
@@ -3291,14 +3354,26 @@ check_network_privacy() {
     local _has_active=false
     while IFS= read -r _cname; do
       [[ -z "$_cname" ]] && continue
+      # Skip VPN/killswitch interfaces — their IPv6 is internal, not internet-facing
+      local _conn_iface
+      _conn_iface=$(nmcli -t -f GENERAL.DEVICES connection show "$_cname" 2>/dev/null | grep -oP '(?<=GENERAL\.DEVICES:).*' | head -1)
+      if echo "$_conn_iface" | grep -qE "^(tun|wg|proton|pvpn)"; then
+        continue
+      fi
       _has_active=true
       local _ipv6method
       _ipv6method=$(nmcli -t -f ipv6.method connection show "$_cname" 2>/dev/null | grep -oP '(?<=ipv6\.method:).*' | head -1)
-      # disabled = off, manual/link-local without addresses = functionally off
-      if [[ "$_ipv6method" != "disabled" && "$_ipv6method" != "manual" && "$_ipv6method" != "link-local" ]]; then
-        _ipv6_nm_disabled=false
-        break
+      # disabled = off; manual only counts as off if no IPv6 addresses configured
+      if [[ "$_ipv6method" == "disabled" ]]; then
+        continue
+      elif [[ "$_ipv6method" == "manual" || "$_ipv6method" == "link-local" ]]; then
+        # Check if actual IPv6 addresses (non-link-local) are configured
+        local _v6addrs
+        _v6addrs=$(nmcli -t -f ipv6.addresses connection show "$_cname" 2>/dev/null | grep -oP '(?<=ipv6\.addresses:).*' | head -1)
+        [[ -z "$_v6addrs" ]] && continue
       fi
+      _ipv6_nm_disabled=false
+      break
     done < <(nmcli -t -f NAME connection show --active 2>/dev/null | grep -v '^lo$')
     $_has_active || _ipv6_nm_disabled=false
   else
@@ -3346,13 +3421,21 @@ check_network_privacy() {
       [[ -n "$val" ]] && dhcp_hostname="$val"
     done
     # Check per-connection files ([ipv4] section with plain key)
+    # Any single connection with dhcp-send-hostname=true is a leak
     if [[ -z "$dhcp_hostname" ]]; then
+      local _dhcp_any_leak=false
       for conn_file in /etc/NetworkManager/system-connections/*.nmconnection; do
         [[ -f "$conn_file" ]] || continue
         local val
         val="$(sed -n '/^\[ipv4\]/,/^\[/{ s/^dhcp-send-hostname[[:space:]]*=[[:space:]]*//p; }' "$conn_file" 2>/dev/null)"
+        if [[ -n "$val" ]] && [[ "$val" != "false" && "$val" != "no" && "$val" != "0" ]]; then
+          _dhcp_any_leak=true
+          dhcp_hostname="$val"
+          break
+        fi
         [[ -n "$val" ]] && dhcp_hostname="$val"
       done
+      $_dhcp_any_leak && dhcp_hostname="true"
     fi
     if [[ "$dhcp_hostname" == "false" || "$dhcp_hostname" == "no" || "$dhcp_hostname" == "0" ]]; then
       pass "DHCP hostname sending disabled"
@@ -3363,12 +3446,12 @@ check_network_privacy() {
 
   local mdns_val=""
   if [[ -f "$resolved_conf" ]]; then
-    mdns_val="$(grep -i "^MulticastDNS\s*=" "$resolved_conf" 2>/dev/null | head -1 | cut -d= -f2 | tr -d ' ')"
+    mdns_val="$(grep -i "^MulticastDNS\s*=" "$resolved_conf" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d ' ')"
   fi
   for dropin in /etc/systemd/resolved.conf.d/*.conf; do
     [[ -f "$dropin" ]] || continue
     local dval
-    dval="$(grep -i "^MulticastDNS\s*=" "$dropin" 2>/dev/null | head -1 | cut -d= -f2 | tr -d ' ')"
+    dval="$(grep -i "^MulticastDNS\s*=" "$dropin" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d ' ')"
     [[ -n "$dval" ]] && mdns_val="$dval"
   done
   if [[ "$mdns_val" == "no" || "$mdns_val" == "false" ]]; then
@@ -3386,7 +3469,7 @@ check_network_privacy() {
   # Conservative: flags any active cups-browsed regardless of patch level.
   # Patched builds (cups-filters >= 2.0.1) are not vulnerable to CVE-2024-47176.
   if systemctl is-active --quiet cups-browsed.service 2>/dev/null; then
-    fail "cups-browsed active — CVE-2024-47176 Remote Code Execution risk!"
+    warn "cups-browsed active — check if patched for CVE-2024-47176 (cups-filters >= 2.0.1)"
   elif systemctl is-enabled --quiet cups-browsed.service 2>/dev/null; then
     warn "cups-browsed enabled but not running — consider disabling"
   else
@@ -3395,7 +3478,7 @@ check_network_privacy() {
 }
 
 ###############################################################################
-# Section 39: Data & Disk Privacy
+# Section 38: Data & Disk Privacy
 ###############################################################################
 check_data_privacy() {
   should_skip "dataprivacy" && return
@@ -3490,16 +3573,16 @@ check_data_privacy() {
     # Read effective setting — drop-ins override main config
     core_storage="$(_systemd_conf_val /etc/systemd/coredump.conf Storage)"
     if [[ "${core_storage,,}" == "none" ]]; then
-      pass "Core dumps disabled (systemd-coredump storage=none)"
+      info "Core dumps: systemd-coredump storage=none (checked in filesystem section)"
     else
-      warn "Core dumps via systemd-coredump (storage=${core_storage:-external}) — may contain secrets"
+      info "Core dumps: systemd-coredump storage=${core_storage:-external} (checked in filesystem section)"
     fi
   elif [[ "$core_pattern" == "|"* ]]; then
     info "Core dumps piped to: ${core_pattern:0:60}"
   elif [[ "$core_soft" == "0" ]]; then
-    pass "Core dumps disabled (soft ulimit = 0)"
+    info "Core dumps: ulimit=0 (checked in filesystem section)"
   else
-    warn "Core dumps enabled (pattern: ${core_pattern:-core}) — crash dumps may contain secrets"
+    info "Core dumps: enabled (checked in filesystem section)"
   fi
 
   local journal_dir="/var/log/journal"
@@ -3526,7 +3609,7 @@ check_data_privacy() {
 }
 
 ###############################################################################
-# Section 40: Desktop Session Security
+# Section 39: Desktop Session Security
 ###############################################################################
 check_desktop_session() {
   should_skip "session" && return
@@ -3608,7 +3691,7 @@ check_desktop_session() {
     [[ -f "$conf" ]] || continue
     if grep -qi '^\s*AutomaticLoginEnable[[:space:]]*=[[:space:]]*true' "$conf" 2>/dev/null; then
       local autouser
-      autouser=$(grep -i '^\s*AutomaticLogin\s*=' "$conf" | head -1 | cut -d= -f2 | xargs)
+      autouser=$(grep -iP '^\s*AutomaticLogin\s*=(?!Enable)' "$conf" | head -1 | cut -d= -f2 | xargs)
       fail "Auto-login enabled in $conf${autouser:+ (user: $autouser)}"
       autologin_found=1
     fi
@@ -3728,7 +3811,7 @@ check_desktop_session() {
 }
 
 ###############################################################################
-# Section 41: Webcam & Audio Privacy
+# Section 40: Webcam & Audio Privacy
 ###############################################################################
 check_media_privacy() {
   should_skip "media" && return
@@ -3807,7 +3890,7 @@ check_media_privacy() {
     done < /etc/passwd
   fi
   if pgrep -x pipewire &>/dev/null; then
-    if grep -rhE 'tcp:[0-9]|module-native-protocol-tcp' /etc/pipewire/ /usr/share/pipewire/ 2>/dev/null | grep -qvE '^\s*#'; then
+    if grep -rhE 'tcp:[0-9]|module-native-protocol-tcp' /etc/pipewire/ /usr/share/pipewire/ 2>/dev/null | grep -vE '^\s*#' | grep -qE 'tcp:[0-9]|module-native-protocol-tcp'; then
       fail "PipeWire network audio protocol enabled in config"
       net_audio=1
     fi
@@ -3839,7 +3922,7 @@ check_media_privacy() {
 }
 
 ###############################################################################
-# Section 42: Bluetooth Privacy
+# Section 41: Bluetooth Privacy
 ###############################################################################
 check_bluetooth_privacy() {
   should_skip "btprivacy" && return
@@ -3906,7 +3989,7 @@ check_bluetooth_privacy() {
 }
 
 ###############################################################################
-# Section 43: Password & Keyring Security
+# Section 42: Password & Keyring Security
 ###############################################################################
 check_keyring_security() {
   should_skip "keyring" && return
@@ -4026,6 +4109,7 @@ check_bluetooth_privacy
 check_keyring_security
 
 # --- Firmware & Thunderbolt (independent of --skip keyring) ---
+CURRENT_SECTION="FIRMWARE & THUNDERBOLT"
 if command -v fwupdmgr &>/dev/null; then
   fw_output=$(timeout 15 fwupdmgr get-updates --no-unreported-check 2>/dev/null)
   fw_exit=$?
@@ -4086,7 +4170,7 @@ DURATION=$((TOTAL_END - TOTAL_START))
 # Example: 200 PASS, 5 FAIL, 10 WARN → 200*100 / (200 + 10 + 10) = 90%
 SCORE_DENOM=$((PASS + FAIL * 2 + WARN))
 if [[ "$SCORE_DENOM" -gt 0 ]]; then
-  SCORE=$(( (PASS * 100) / SCORE_DENOM ))
+  SCORE=$(( (PASS * 100 + SCORE_DENOM / 2) / SCORE_DENOM ))
 else
   SCORE=0
 fi
@@ -4179,7 +4263,7 @@ else
     echo -e "${BOLD}${CYN}║${RST}  ${YLW}ChatGPT${RST} · ${YLW}Claude${RST} · ${YLW}Gemini${RST} · ${YLW}any LLM${RST}"
     echo -e "${BOLD}${CYN}╚══════════════════════════════════════════════════════════════════════╝${RST}"
     echo ""
-    echo -e "${GRN}▼▼▼ COPY FROM HERE ▼▼▼${RST}"
+    echo "▼▼▼ COPY FROM HERE ▼▼▼"
     echo ""
     echo "I ran NoID Privacy for Linux v${NOID_PRIVACY_VERSION} — a 300+ check privacy & security audit."
     echo "Tool: https://github.com/NexusOne23/noid-privacy-linux"
@@ -4209,7 +4293,7 @@ else
     echo "For each finding: explain the risk, show the exact fix command,"
     echo "warn if it could break anything, and ask before applying."
     echo ""
-    echo -e "${GRN}▲▲▲ COPY TO HERE ▲▲▲${RST}"
+    echo "▲▲▲ COPY TO HERE ▲▲▲"
   fi
 fi
 
