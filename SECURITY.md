@@ -71,8 +71,8 @@ NoID Privacy for Linux is designed with security in mind:
 
 | Version | Supported          | Notes |
 | ------- | ------------------ | ----- |
-| 3.2.x   | ✅ Fully Supported | Current release, 300+ checks, 42 sections |
-| 3.1.x   | ⚠️ Limited Support  | Upgrade to 3.2.x recommended |
+| 3.3.x   | ✅ Fully Supported | Current release, 390+ checks, 42 sections |
+| 3.1.x   | ⚠️ Limited Support  | Upgrade to 3.3.x recommended |
 | 2.0.x   | ⚠️ Limited Support  | Upgrade to 3.0.x recommended |
 | 1.x     | ❌ Not Supported   | Legacy version |
 

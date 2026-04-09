@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 ###############################################################################
-#  NoID Privacy for Linux v3.2.5 — Privacy & Security Audit
+#  NoID Privacy for Linux v3.3.0 — Privacy & Security Audit
 #  Copyright (C) 2026 Fabio Mantegna (NexusOne23)
 #
 #  This program is free software: you can redistribute it and/or modify
@@ -18,10 +18,10 @@
 #
 #  https://noid-privacy.com/linux.html | https://github.com/NexusOne23/noid-privacy-linux
 #  Fedora / RHEL / Debian / Ubuntu — Full-Spectrum Audit
-#  300+ checks across 42 sections
+#  390+ checks across 42 sections
 #  Requires: root
 ###############################################################################
-NOID_PRIVACY_VERSION="3.2.5"
+NOID_PRIVACY_VERSION="3.3.0"
 set +e          # Don't exit on errors — we handle them ourselves
 
 # Bash 4+ required for associative arrays and other features
@@ -67,7 +67,7 @@ Examples:
   sudo bash noid-privacy-linux.sh --ai
   sudo bash noid-privacy-linux.sh --json | jq .
 
-300+ checks. Requires root. Tested on Fedora 43, RHEL 9, Debian 12, Ubuntu 24.04.
+390+ checks. Requires root. Tested on Fedora 43, RHEL 9, Debian 12, Ubuntu 24.04.
 EOF
   exit 0
 }
@@ -399,7 +399,7 @@ echo "╔═══════════════════════�
 echo "║  🛡️ NoID Privacy for Linux v${NOID_PRIVACY_VERSION} — Privacy & Security Audit"
 echo "║  $NOW | $HOSTNAME | $KERNEL"
 echo "║  Arch: $ARCH | Distro: $DISTRO_PRETTY"
-echo "║  Checks: 300+ across $TOTAL_SECTIONS sections"
+echo "║  Checks: 390+ across $TOTAL_SECTIONS sections"
 echo "╚══════════════════════════════════════════════════════════════════════╝"
 printf "${RST}\n"
 fi
@@ -446,7 +446,7 @@ else
 fi
 
 # Kernel Taint
-TAINT=$(cat /proc/sys/kernel/tainted)
+TAINT=$(< /proc/sys/kernel/tainted)
 if [[ "$TAINT" -eq 0 ]]; then
   pass "Kernel Taint: 0 (clean)"
 else
@@ -458,7 +458,7 @@ else
 fi
 
 # Insecure boot parameters check
-CMDLINE=$(cat /proc/cmdline)
+CMDLINE=$(< /proc/cmdline)
 for PARAM in "nomodeset" "noapic" "acpi=off" "selinux=0" "enforcing=0" "audit=0"; do
   if echo "$CMDLINE" | grep -qw "$PARAM"; then
     fail "Insecure boot parameter: $PARAM"
@@ -523,6 +523,16 @@ if [[ -f /boot/grub2/grub.cfg ]] || [[ -f /boot/grub/grub.cfg ]]; then
     else
       warn "GRUB no password (physical access = root)"
     fi
+  fi
+fi
+
+# Running latest installed kernel?
+LATEST_KERNEL=$(ls -v /boot/vmlinuz-* 2>/dev/null | tail -1 | sed 's|.*/vmlinuz-||')
+if [[ -n "$LATEST_KERNEL" ]]; then
+  if [[ "$KERNEL" == "$LATEST_KERNEL" ]]; then
+    pass "Running latest installed kernel ($KERNEL)"
+  else
+    warn "Running kernel $KERNEL but $LATEST_KERNEL is installed — reboot recommended"
   fi
 fi
 
@@ -760,6 +770,31 @@ else
   fail "No firewall detected (firewalld/ufw/iptables)"
 fi
 
+# Firewall Logging
+sub_header "Firewall Logging"
+if require_cmd firewall-cmd && systemctl is-active firewalld &>/dev/null; then
+  _FW_LOG_DENIED=$(firewall-cmd --get-log-denied 2>/dev/null || echo "off")
+  if [[ "$_FW_LOG_DENIED" == "off" ]]; then
+    warn "Firewall logging: denied packets NOT logged (firewall-cmd --get-log-denied=off)"
+  else
+    pass "Firewall logging: denied packets logged (mode: $_FW_LOG_DENIED)"
+  fi
+elif require_cmd ufw; then
+  _UFW_LOG=$(ufw status verbose 2>/dev/null | grep -i "^Logging:" | awk '{print $2}')
+  if [[ "${_UFW_LOG,,}" == "off" || -z "$_UFW_LOG" ]]; then
+    warn "UFW logging disabled"
+  else
+    pass "UFW logging: $_UFW_LOG"
+  fi
+elif require_cmd iptables; then
+  _IPT_LOG=$(iptables -L -n 2>/dev/null | grep -c "LOG" || true)
+  if [[ "${_IPT_LOG:-0}" -gt 0 ]]; then
+    pass "iptables: $_IPT_LOG LOG rules"
+  else
+    info "iptables: no LOG rules detected"
+  fi
+fi
+
 fi # end firewall
 
 ###############################################################################
@@ -908,6 +943,18 @@ else
     warn "DNS servers not on VPN network (potential DNS leak)"
   else
     info "DNS not via VPN (no VPN active)"
+  fi
+fi
+
+# DNSSEC validation status (systemd-resolved)
+if require_cmd resolvectl; then
+  _DNSSEC_STATUS=$(resolvectl status 2>/dev/null | grep -oP 'DNSSEC\s*[=:]\s*\K\S+' | head -1)
+  if [[ "$_DNSSEC_STATUS" == "yes" ]]; then
+    pass "DNSSEC validation: enabled"
+  elif [[ -n "$_DNSSEC_STATUS" ]]; then
+    info "DNSSEC validation: $_DNSSEC_STATUS"
+  else
+    info "DNSSEC validation: could not determine"
   fi
 fi
 
@@ -1108,7 +1155,7 @@ if [[ "$SYSRQ_VAL" != "N/A" ]] && [[ "$SYSRQ_VAL" -ne 0 ]]; then
   [[ $((SYSRQ_VAL & 128)) -ne 0 ]] && SYSRQ_BITS+="reboot "
   [[ $((SYSRQ_VAL & 256)) -ne 0 ]] && SYSRQ_BITS+="nice-all-RT "
   if [[ "$SYSRQ_VAL" -eq 1 ]]; then
-    warn "Magic SysRq: ALL functions enabled (value=1)"
+    info "Magic SysRq: ALL functions enabled (value=1)"
   else
     info "Magic SysRq: value=$SYSRQ_VAL bits: $SYSRQ_BITS"
   fi
@@ -1139,7 +1186,7 @@ for SVC in $SHOULD_BE_OFF; do
     fail "Service running: $SVC"
   elif systemctl is-masked "$SVC" &>/dev/null; then
     pass "Service masked: $SVC"
-  elif systemctl is-enabled "$SVC" &>/dev/null 2>&1; then
+  elif systemctl is-enabled "$SVC" &>/dev/null; then
     warn "Service enabled but inactive: $SVC"
   else
     pass "Service off: $SVC"
@@ -1194,7 +1241,7 @@ for SVC in $SHOULD_BE_ON; do
 done
 
 # Failed Services
-FAILED_SVCS=$(systemctl --failed --no-legend 2>/dev/null)
+FAILED_SVCS=$(systemctl --failed --no-legend 2>/dev/null | grep -v 'proc-sys-fs-binfmt_misc.mount')
 FAILED=$(echo "$FAILED_SVCS" | grep -c '\S' || true)
 if [[ "$FAILED" -eq 0 ]]; then
   pass "0 failed services"
@@ -1406,7 +1453,7 @@ else
 fi
 
 if require_cmd auditctl; then
-  AUDIT_RULES=$(auditctl -l 2>/dev/null | wc -l)
+  AUDIT_RULES=$(auditctl -l 2>/dev/null | grep -cv "^No rules" || true)
   if [[ "$AUDIT_RULES" -ge 20 ]]; then
     pass "Audit rules: $AUDIT_RULES"
   elif [[ "$AUDIT_RULES" -gt 0 ]]; then
@@ -1505,6 +1552,153 @@ if ! $JSON_MODE; then
   done < <(grep -v '/nologin\|/false\|/sync\|/shutdown\|/halt' /etc/passwd)
 fi
 
+# Password Hashing Method
+sub_header "Password Hashing"
+_PW_HASH_METHOD=""
+if [[ -f /etc/login.defs ]]; then
+  _PW_HASH_METHOD=$(grep -i "^ENCRYPT_METHOD" /etc/login.defs 2>/dev/null | awk '{print $2}')
+fi
+# Also check PAM (pam_unix.so) for the actual hashing algorithm
+_PAM_HASH=$(grep -hE "pam_unix\.so.*\b(yescrypt|sha512|sha256|md5|bigcrypt|blowfish)\b" /etc/pam.d/system-auth /etc/pam.d/common-password 2>/dev/null | grep -oE "(yescrypt|sha512|sha256|md5|bigcrypt|blowfish)" | head -1)
+_EFFECTIVE_HASH="${_PAM_HASH:-$_PW_HASH_METHOD}"
+if [[ "${_EFFECTIVE_HASH^^}" == "YESCRYPT" ]]; then
+  pass "Password hashing: YESCRYPT (strongest)"
+elif [[ "${_EFFECTIVE_HASH^^}" == "SHA512" ]]; then
+  pass "Password hashing: SHA512 (strong)"
+elif [[ "${_EFFECTIVE_HASH^^}" == "SHA256" ]]; then
+  warn "Password hashing: SHA256 (consider SHA512 or YESCRYPT)"
+elif [[ -n "$_EFFECTIVE_HASH" ]]; then
+  fail "Password hashing: $_EFFECTIVE_HASH (weak — migrate to SHA512 or YESCRYPT)"
+else
+  info "Password hashing method: could not determine"
+fi
+
+# Password Hashing Rounds
+_PW_ROUNDS=$(grep -i "^SHA_CRYPT_MAX_ROUNDS\|^YESCRYPT_COST_FACTOR" /etc/login.defs 2>/dev/null | tail -1 | awk '{print $2}')
+if [[ -n "$_PW_ROUNDS" ]]; then
+  info "Password hashing rounds/cost: $_PW_ROUNDS"
+fi
+
+# PAM password quality (pwquality/cracklib)
+_PW_QUALITY=false
+if grep -rqs "pam_pwquality\|pam_cracklib" /etc/pam.d/ 2>/dev/null; then
+  _PW_QUALITY=true
+  pass "Password quality enforcement: pam_pwquality/pam_cracklib active"
+else
+  warn "No password quality enforcement (pam_pwquality/pam_cracklib not in PAM stack)"
+fi
+
+# Accounts without password expiry
+sub_header "Password Expiry"
+_NO_EXPIRE=0
+while IFS=: read -r _user _ _uid _ _ _ _; do
+  [[ "$_uid" -ge 1000 && "$_uid" -lt 65534 ]] || continue
+  _max_days=$(chage -l "$_user" 2>/dev/null | grep "Maximum" | grep -oP '\d+$' || true)
+  if [[ "${_max_days:-0}" -eq 99999 || "${_max_days:-0}" -eq -1 ]]; then
+    ((_NO_EXPIRE++))
+  fi
+  # Check for expired passwords
+  _pw_expired=$(chage -l "$_user" 2>/dev/null | grep "Password expires" | grep -ci "password must be changed\|expired" || true)
+  if [[ "${_pw_expired:-0}" -gt 0 ]]; then
+    warn "Password expired for user: $_user"
+  fi
+done < /etc/passwd
+if [[ "$_NO_EXPIRE" -gt 0 ]]; then
+  info "$_NO_EXPIRE user account(s) with no password expiry (perpetual passwords)"
+else
+  pass "All user accounts have password expiry configured"
+fi
+
+# Duplicate accounts
+_DUP_UIDS=$(awk -F: '{print $3}' /etc/passwd | sort | uniq -d)
+if [[ -n "$_DUP_UIDS" ]]; then
+  fail "Duplicate UIDs found: $_DUP_UIDS"
+else
+  pass "No duplicate UIDs"
+fi
+
+# Duplicate group IDs
+_DUP_GIDS=$(awk -F: '{print $3}' /etc/group | sort | uniq -d)
+if [[ -n "$_DUP_GIDS" ]]; then
+  warn "Duplicate GIDs found: $_DUP_GIDS"
+else
+  pass "No duplicate GIDs"
+fi
+
+# Password file consistency (pwck)
+if require_cmd pwck; then
+  _PWCK_OUT=$(pwck -rq 2>&1 || true)
+  _PWCK_ERRORS=$(echo "$_PWCK_OUT" | grep -cvE "^$|^pwck:" || true)
+  _PWCK_ERRORS=${_PWCK_ERRORS:-0}
+  if [[ "$_PWCK_ERRORS" -eq 0 ]]; then
+    pass "Password file consistency: OK (pwck)"
+  else
+    warn "Password file inconsistencies: $_PWCK_ERRORS (run 'pwck' to review)"
+  fi
+fi
+
+# Locked user accounts
+sub_header "Account Status"
+_LOCKED_ACCOUNTS=0
+while IFS=: read -r _lu_user _ _lu_uid _ _ _ _; do
+  [[ "$_lu_uid" -ge 1000 && "$_lu_uid" -lt 65534 ]] || continue
+  _lu_status=$(passwd -S "$_lu_user" 2>/dev/null | awk '{print $2}')
+  if [[ "$_lu_status" == "L" || "$_lu_status" == "LK" ]]; then
+    info "Account locked: $_lu_user"
+    ((_LOCKED_ACCOUNTS++))
+  fi
+done < /etc/passwd
+if [[ "$_LOCKED_ACCOUNTS" -gt 0 ]]; then
+  info "$_LOCKED_ACCOUNTS user account(s) locked"
+else
+  pass "No locked user accounts"
+fi
+
+# Sudoers security
+sub_header "Sudoers Security"
+if [[ -f /etc/sudoers ]]; then
+  # Check sudoers file permissions (should be 440)
+  _SUDOERS_PERMS=$(stat -c %a /etc/sudoers 2>/dev/null)
+  if [[ "$_SUDOERS_PERMS" == "440" ]]; then
+    pass "sudoers permissions: $_SUDOERS_PERMS"
+  else
+    warn "sudoers permissions: $_SUDOERS_PERMS (should be 440)"
+  fi
+  # Check sudoers.d drop-in permissions
+  if [[ -d /etc/sudoers.d ]]; then
+    _SUDOERSD_BAD=0
+    for _sf in /etc/sudoers.d/*; do
+      [[ -f "$_sf" ]] || continue
+      _sf_perms=$(stat -c %a "$_sf" 2>/dev/null)
+      if [[ "$_sf_perms" != "440" && "$_sf_perms" != "400" ]]; then
+        warn "sudoers.d/$(basename "$_sf"): permissions $_sf_perms (should be 440)"
+        ((_SUDOERSD_BAD++))
+      fi
+    done
+    [[ "$_SUDOERSD_BAD" -eq 0 ]] && pass "sudoers.d drop-ins: all permissions correct"
+  fi
+  # Check for NOPASSWD
+  _NOPASSWD=$(grep -rn "NOPASSWD" /etc/sudoers /etc/sudoers.d/ 2>/dev/null | grep -v "^#" | grep -v ":#" || true)
+  if [[ -n "$_NOPASSWD" ]]; then
+    warn "NOPASSWD found in sudoers (passwordless sudo enabled)"
+    if ! $JSON_MODE; then
+      echo "$_NOPASSWD" | while read -r _np_line; do
+        printf "       %s\n" "$_np_line"
+      done
+    fi
+  else
+    pass "No NOPASSWD in sudoers (all sudo requires password)"
+  fi
+  # Syntax check
+  if require_cmd visudo; then
+    if visudo -c &>/dev/null; then
+      pass "sudoers syntax: valid (visudo -c)"
+    else
+      fail "sudoers syntax errors detected (run 'visudo -c')"
+    fi
+  fi
+fi
+
 # Password Aging
 PASS_MAX=$(grep "^PASS_MAX_DAYS" /etc/login.defs | awk '{print $2}')
 PASS_MIN=$(grep "^PASS_MIN_DAYS" /etc/login.defs | awk '{print $2}')
@@ -1512,7 +1706,7 @@ PASS_WARN=$(grep "^PASS_WARN_AGE" /etc/login.defs | awk '{print $2}')
 info "Password policy: MAX=$PASS_MAX, MIN=$PASS_MIN, WARN=$PASS_WARN"
 
 # Umask Check (new)
-UMASK_VAL=$(grep -hiE '^\s*umask\s+' /etc/login.defs /etc/profile /etc/bashrc 2>/dev/null | tail -1 | awk '{print $2}')
+UMASK_VAL=$(grep -hiE '^\s*umask\s+' /etc/login.defs /etc/profile /etc/bashrc /etc/bash.bashrc /etc/profile.d/*.sh 2>/dev/null | tail -1 | awk '{print $2}')
 if [[ -n "$UMASK_VAL" ]]; then
   if [[ "$UMASK_VAL" =~ ^0*27$ || "$UMASK_VAL" =~ ^0*77$ ]]; then
     pass "Default umask: $UMASK_VAL (restrictive)"
@@ -1604,6 +1798,33 @@ elif [[ "$UNOWNED" -le 5 ]]; then
   warn "Unowned files: $UNOWNED (investigate)"
 else
   fail "Unowned files: $UNOWNED (>5)"
+fi
+
+# Swappiness
+_SWAPPINESS=$(sysctl -n vm.swappiness 2>/dev/null || echo "N/A")
+if [[ "$_SWAPPINESS" != "N/A" ]]; then
+  if [[ "$_SWAPPINESS" -le 10 ]]; then
+    pass "Swappiness: $_SWAPPINESS (low — minimal swap usage)"
+  elif [[ "$_SWAPPINESS" -le 60 ]]; then
+    info "Swappiness: $_SWAPPINESS (default range)"
+  else
+    warn "Swappiness: $_SWAPPINESS (high — more data written to disk, recovery risk)"
+  fi
+fi
+
+# ACL support on root filesystem
+if require_cmd getfacl; then
+  if mount | grep " / " | grep -qE "acl|posixacl"; then
+    pass "ACL support: enabled on root filesystem"
+  else
+    # Most modern filesystems (ext4, xfs, btrfs) have ACL enabled by default
+    _ROOT_FS_TYPE=$(df -T / 2>/dev/null | awk 'NR==2{print $2}')
+    if [[ "$_ROOT_FS_TYPE" =~ ^(ext4|xfs|btrfs)$ ]]; then
+      pass "ACL support: $_ROOT_FS_TYPE has ACL enabled by default"
+    else
+      info "ACL support: could not verify on $_ROOT_FS_TYPE"
+    fi
+  fi
 fi
 
 # /tmp Permissions
@@ -1706,12 +1927,23 @@ fi
 
 # Entropy Check (new)
 if [[ -f /proc/sys/kernel/random/entropy_avail ]]; then
-  ENTROPY=$(cat /proc/sys/kernel/random/entropy_avail)
+  ENTROPY=$(< /proc/sys/kernel/random/entropy_avail)
   if [[ "$ENTROPY" -ge 256 ]]; then
     pass "Entropy: $ENTROPY (sufficient)"
   else
     warn "Entropy: $ENTROPY (low — minimum 256)"
   fi
+fi
+
+# Hardware Random Number Generator
+if [[ -c /dev/hwrng ]]; then
+  pass "Hardware RNG: /dev/hwrng present"
+elif [[ -d /sys/class/misc/hw_random ]]; then
+  pass "Hardware RNG: hw_random device available"
+elif grep -q "rdrand\|rdseed" /proc/cpuinfo 2>/dev/null; then
+  pass "Hardware RNG: CPU supports RDRAND/RDSEED"
+else
+  info "No hardware RNG detected (software entropy only)"
 fi
 
 # Swap Encryption (new)
@@ -1855,12 +2087,9 @@ fi
 if require_cmd rpm; then
   # Modern RPM (Fedora 31+) uses RSAHEADER for signatures; legacy uses SIGPGP/SIGGPG.
   # A package is unsigned only if ALL signature fields are (none).
-  RPM_NOSIG=$(rpm -qa --qf '%{NAME}-%{VERSION}-%{RELEASE} RSA:%{RSAHEADER:pgpsig} PGP:%{SIGPGP:pgpsig} GPG:%{SIGGPG:pgpsig}\n' 2>/dev/null \
-    | grep -c "RSA:(none) PGP:(none) GPG:(none)" | ccount)
   # gpg-pubkey meta-packages are keyring entries, not real packages — exclude them
-  RPM_NOSIG_REAL=$(rpm -qa --qf '%{NAME}-%{VERSION}-%{RELEASE} RSA:%{RSAHEADER:pgpsig} PGP:%{SIGPGP:pgpsig} GPG:%{SIGGPG:pgpsig}\n' 2>/dev/null \
+  RPM_NOSIG=$(rpm -qa --qf '%{NAME}-%{VERSION}-%{RELEASE} RSA:%{RSAHEADER:pgpsig} PGP:%{SIGPGP:pgpsig} GPG:%{SIGGPG:pgpsig}\n' 2>/dev/null \
     | grep "RSA:(none) PGP:(none) GPG:(none)" | grep -cv "^gpg-pubkey-" | ccount)
-  RPM_NOSIG=$RPM_NOSIG_REAL
   # Separate locally-built kernel modules (akmods/dkms) — these are built on the
   # user's machine and inherently cannot carry an RPM GPG signature. They are
   # typically MOK-signed for Secure Boot, which is a separate trust chain.
@@ -1914,7 +2143,7 @@ fi
 
 # Automated Security Updates
 # dnf5-automatic (Fedora 41+) and legacy dnf-automatic (Fedora ≤40, RHEL)
-if systemctl is-active dnf5-automatic.timer &>/dev/null || systemctl is-enabled dnf5-automatic.timer &>/dev/null 2>&1; then
+if systemctl is-active dnf5-automatic.timer &>/dev/null || systemctl is-enabled dnf5-automatic.timer &>/dev/null; then
   # Check if configured for security-only updates
   _DNF5_AUTO_CONF="/etc/dnf/dnf5-plugins/automatic.conf"
   _DNF5_UPGRADE_TYPE=$(grep -i "^upgrade_type" "$_DNF5_AUTO_CONF" 2>/dev/null | cut -d= -f2 | tr -d ' ')
@@ -1923,7 +2152,7 @@ if systemctl is-active dnf5-automatic.timer &>/dev/null || systemctl is-enabled 
   else
     pass "Automated updates: dnf5-automatic enabled (upgrade_type=${_DNF5_UPGRADE_TYPE:-default})"
   fi
-elif systemctl is-active dnf-automatic.timer &>/dev/null || systemctl is-enabled dnf-automatic.timer &>/dev/null 2>&1; then
+elif systemctl is-active dnf-automatic.timer &>/dev/null || systemctl is-enabled dnf-automatic.timer &>/dev/null; then
   pass "Automated updates: dnf-automatic enabled"
 elif systemctl is-active unattended-upgrades &>/dev/null || [[ -f /etc/apt/apt.conf.d/20auto-upgrades ]]; then
   pass "Automated updates: unattended-upgrades active"
@@ -2055,6 +2284,16 @@ else
   warn "Hidden processes: $HIDDEN"
 fi
 
+# Zombie / Dead Processes
+_ZOMBIE_COUNT=$(ps aux 2>/dev/null | awk '$8 ~ /^Z/ {count++} END {print count+0}')
+if [[ "$_ZOMBIE_COUNT" -eq 0 ]]; then
+  pass "Zombie processes: 0"
+elif [[ "$_ZOMBIE_COUNT" -le 5 ]]; then
+  warn "Zombie processes: $_ZOMBIE_COUNT (investigate with: ps aux | grep ' Z ')"
+else
+  fail "Zombie processes: $_ZOMBIE_COUNT (resource leak or crashed processes)"
+fi
+
 # Deleted Binaries still running
 # shellcheck disable=SC2010  # /proc/*/exe requires ls -l to show symlink targets
 DELETED_BINS=$(ls -l /proc/*/exe 2>/dev/null | grep "(deleted)" | wc -l)
@@ -2106,12 +2345,38 @@ if [[ -f /etc/hosts.allow ]]; then
   DENY_RULES=$(grep -v "^#" /etc/hosts.deny 2>/dev/null | grep -v "^$" | wc -l)
   info "TCP wrappers: $ALLOW_RULES allow, $DENY_RULES deny rules"
   if [[ "$DENY_RULES" -eq 0 ]]; then
-    warn "hosts.deny: no deny rules (consider ALL: ALL)"
+    info "hosts.deny: no deny rules (TCP wrappers deprecated on modern systems)"
   else
     pass "hosts.deny: $DENY_RULES deny rules"
   fi
 else
   info "TCP wrappers: not configured (hosts.allow missing)"
+fi
+
+# Connections in WAIT state
+sub_header "Connection States"
+_WAIT_COUNT=$(ss -tn state time-wait 2>/dev/null | tail -n+2 | wc -l)
+_WAIT_COUNT=${_WAIT_COUNT:-0}
+if [[ "$_WAIT_COUNT" -gt 100 ]]; then
+  warn "TCP TIME_WAIT connections: $_WAIT_COUNT (possible resource exhaustion)"
+elif [[ "$_WAIT_COUNT" -gt 50 ]]; then
+  info "TCP TIME_WAIT connections: $_WAIT_COUNT"
+else
+  pass "TCP TIME_WAIT connections: $_WAIT_COUNT"
+fi
+
+# ARP monitoring
+sub_header "ARP Monitoring"
+_ARP_MON_FOUND=false
+for _arp_tool in arpwatch arpon addrwatch; do
+  if require_cmd "$_arp_tool" || systemctl is-active "${_arp_tool}" &>/dev/null; then
+    pass "ARP monitoring: $_arp_tool available"
+    _ARP_MON_FOUND=true
+    break
+  fi
+done
+if ! $_ARP_MON_FOUND; then
+  info "No ARP monitoring software detected (consider arpwatch)"
 fi
 
 fi # end network
@@ -2158,7 +2423,7 @@ header "19" "LOGS & MONITORING"
 JOURNAL_ERR=$(journalctl -p err --since "1 hour ago" --no-pager -q 2>/dev/null \
   | grep -E "^[A-Z][a-z]{2} " | grep -cvE "sudo|password is required|auth could not identify|systemd-coredump" || true)
 JOURNAL_ERR=${JOURNAL_ERR:-0}
-if [[ "$JOURNAL_ERR" -le 10 ]]; then
+if [[ "$JOURNAL_ERR" -le 15 ]]; then
   pass "Journal errors (1h): $JOURNAL_ERR"
 elif [[ "$JOURNAL_ERR" -le 50 ]]; then
   warn "Journal errors (1h): $JOURNAL_ERR"
@@ -2224,6 +2489,27 @@ if [[ -n "$JOURNAL_FWD" ]]; then
 else
   info "Journal forwarding: default (not explicitly configured)"
 fi
+
+# Deleted log files still in use (file handle open but file deleted — logs lost on restart)
+_DELETED_LOGS=$(find /proc/*/fd -lname '*/log/*' -exec ls -la {} \; 2>/dev/null | grep "(deleted)" | wc -l || true)
+_DELETED_LOGS=${_DELETED_LOGS:-0}
+if [[ "$_DELETED_LOGS" -eq 0 ]]; then
+  pass "No deleted log files in use"
+elif [[ "$_DELETED_LOGS" -le 3 ]]; then
+  info "Deleted log files still open: $_DELETED_LOGS (logrotate pending restart)"
+else
+  warn "Deleted log files still open: $_DELETED_LOGS (services holding stale file handles)"
+fi
+
+# Empty log files that should have content
+_EMPTY_LOGS=0
+for _logf in /var/log/messages /var/log/syslog /var/log/auth.log /var/log/secure /var/log/kern.log; do
+  if [[ -f "$_logf" && ! -s "$_logf" ]]; then
+    ((_EMPTY_LOGS++))
+    warn "Empty log file: $_logf (logging may be broken)"
+  fi
+done
+[[ "$_EMPTY_LOGS" -eq 0 ]] && pass "No empty log files detected"
 
 fi # end logs
 
@@ -2309,14 +2595,14 @@ sub_header "Top 5 CPU"
 if ! $JSON_MODE; then
   while read -r USER CPU MEM CMD; do
     printf "       %s %s%% %s\n" "$USER" "$CPU" "$(echo "$CMD" | cut -c1-60)"
-  done < <(ps -eo user,pcpu,pmem,args --sort=-pcpu 2>/dev/null | head -6 | tail -5)
+  done < <(ps -eo user,pcpu,pmem,args --sort=-pcpu 2>/dev/null | grep -v 'sort=-pcpu' | head -6 | tail -5)
 fi
 
 sub_header "Top 5 Memory"
 if ! $JSON_MODE; then
   while read -r USER CPU MEM CMD; do
     printf "       %s %s%% %s\n" "$USER" "$MEM" "$(echo "$CMD" | cut -c1-60)"
-  done < <(ps -eo user,pcpu,pmem,args --sort=-pmem 2>/dev/null | head -6 | tail -5)
+  done < <(ps -eo user,pcpu,pmem,args --sort=-pmem 2>/dev/null | grep -v 'sort=-pmem' | head -6 | tail -5)
 fi
 
 fi # end performance
@@ -2337,8 +2623,10 @@ if [[ -d "$VULN_DIR" ]]; then
       fail "CPU vuln $NAME: $STATUS"
     elif echo "$STATUS" | grep -qi "mitigation"; then
       pass "CPU vuln $NAME: mitigated"
+    elif echo "$STATUS" | grep -qi "not affected"; then
+      pass "CPU vuln $NAME: Not affected"
     else
-      pass "CPU vuln $NAME: $STATUS"
+      warn "CPU vuln $NAME: $STATUS"
     fi
   done
 fi
@@ -2495,21 +2783,42 @@ header "25" "SYSTEMD SECURITY"
 ###############################################################################
 
 if require_cmd systemd-analyze; then
-  sub_header "systemd-analyze security (excerpt)"
-  for SVC in sshd firewalld fail2ban auditd; do
+  sub_header "systemd-analyze security"
+  # Security services (need root — high score expected and acceptable)
+  _SECURITY_SVCS="sshd firewalld fail2ban auditd usbguard chronyd"
+  # Hardware/display services (inherently need broad access — high score expected)
+  _HARDWARE_SVCS="gdm gdm3 thermald"
+  # User-facing services (should be sandboxed — high score = problem)
+  _USER_SVCS="NetworkManager ModemManager colord fwupd power-profiles-daemon switcheroo-control"
+  for SVC in $_SECURITY_SVCS; do
     SCORE=$(systemd-analyze security "$SVC" 2>/dev/null | tail -1 | grep -oP '\d+\.\d+' || echo "N/A")
     if [[ "$SCORE" != "N/A" ]]; then
-      SCORE_INT=$(echo "$SCORE" | cut -d. -f1)
-      if [[ "$SCORE_INT" -le 3 ]]; then
-        pass "systemd-security $SVC: $SCORE"
-      elif [[ "$SCORE_INT" -le 6 ]]; then
-        info "systemd-security $SVC: $SCORE"
-      else
-        # These are all security services that need root — high score is expected
-        info "systemd-security $SVC: $SCORE (security service, needs root)"
-      fi
+      info "systemd-security $SVC: $SCORE (security service, needs root)"
     fi
   done
+  for SVC in $_HARDWARE_SVCS; do
+    SCORE=$(systemd-analyze security "$SVC" 2>/dev/null | tail -1 | grep -oP '\d+\.\d+' || echo "N/A")
+    if [[ "$SCORE" != "N/A" ]]; then
+      info "systemd-security $SVC: $SCORE (system service, needs hardware access)"
+    fi
+  done
+  _HIGH_EXPOSURE=0
+  for SVC in $_USER_SVCS; do
+    SCORE=$(systemd-analyze security "$SVC" 2>/dev/null | tail -1 | grep -oP '\d+\.\d+' || echo "N/A")
+    [[ "$SCORE" == "N/A" ]] && continue
+    SCORE_INT=$(echo "$SCORE" | cut -d. -f1)
+    if [[ "$SCORE_INT" -le 4 ]]; then
+      pass "systemd-security $SVC: $SCORE (well-sandboxed)"
+    elif [[ "$SCORE_INT" -le 7 ]]; then
+      info "systemd-security $SVC: $SCORE"
+    else
+      warn "systemd-security $SVC: $SCORE (high exposure — poor sandboxing)"
+      ((_HIGH_EXPOSURE++))
+    fi
+  done
+  if [[ "$_HIGH_EXPOSURE" -eq 0 ]]; then
+    pass "No user-facing services with critical exposure scores"
+  fi
 fi
 
 fi # end systemd
@@ -2605,6 +2914,21 @@ if systemctl is-active chronyd &>/dev/null || systemctl is-active chrony &>/dev/
       else
         info "NTS (Network Time Security) not configured — consider adding 'nts' to chrony server lines"
       fi
+    fi
+  fi
+  # NTP source quality (stratum 16 = unreachable, falsetickers)
+  if require_cmd chronyc; then
+    _BAD_SOURCES=0
+    while read -r _cs_line; do
+      # chronyc sources: field 3 is stratum, lines starting with ? or x are problematic
+      if echo "$_cs_line" | grep -qE "^\?|^x"; then
+        ((_BAD_SOURCES++))
+      fi
+    done < <(chronyc sources 2>/dev/null | tail -n+3)
+    if [[ "$_BAD_SOURCES" -gt 0 ]]; then
+      warn "NTP: $_BAD_SOURCES unreachable/falseticker source(s) (check 'chronyc sources')"
+    else
+      pass "NTP: all sources reachable and valid"
     fi
   fi
 elif systemctl is-active systemd-timesyncd &>/dev/null; then
@@ -2766,6 +3090,151 @@ if require_cmd at; then
   fi
 fi
 
+# IMA/EVM (Integrity Measurement Architecture / Extended Verification Module)
+sub_header "Kernel Integrity (IMA/EVM)"
+_IMA_ACTIVE=false
+if [[ -d /sys/kernel/security/ima ]]; then
+  _IMA_ACTIVE=true
+  _IMA_POLICY=$(cat /sys/kernel/security/ima/policy_name 2>/dev/null || echo "custom")
+  pass "IMA: active (policy: $_IMA_POLICY)"
+  _IMA_VIOLATIONS=$(cat /sys/kernel/security/ima/violations 2>/dev/null || echo "0")
+  if [[ "${_IMA_VIOLATIONS:-0}" -gt 0 ]]; then
+    warn "IMA violations: $_IMA_VIOLATIONS"
+  else
+    pass "IMA violations: 0"
+  fi
+else
+  if grep -q "ima" /proc/cmdline 2>/dev/null; then
+    info "IMA: configured in cmdline but /sys/kernel/security/ima not found"
+  else
+    info "IMA: not active (consider adding ima_policy=appraise_tcb to kernel cmdline)"
+  fi
+fi
+# EVM
+if [[ -f /sys/kernel/security/evm ]]; then
+  _EVM_STATUS=$(cat /sys/kernel/security/evm 2>/dev/null)
+  if [[ "$_EVM_STATUS" -ge 1 ]]; then
+    pass "EVM: active (status=$_EVM_STATUS)"
+  else
+    info "EVM: present but not initialized (status=$_EVM_STATUS)"
+  fi
+else
+  info "EVM: not available"
+fi
+
+# binfmt_misc (non-native binary execution)
+sub_header "Binary Format Registration"
+if [[ -d /proc/sys/fs/binfmt_misc ]]; then
+  _BINFMT_COUNT=$(ls -1 /proc/sys/fs/binfmt_misc/ 2>/dev/null | grep -cv "^register$\|^status$" || true)
+  _BINFMT_COUNT=${_BINFMT_COUNT:-0}
+  if [[ "$_BINFMT_COUNT" -eq 0 ]]; then
+    pass "binfmt_misc: no non-native binary formats registered"
+  else
+    info "binfmt_misc: $_BINFMT_COUNT registered format(s)"
+    if ! $JSON_MODE; then
+      for _bf in /proc/sys/fs/binfmt_misc/*; do
+        [[ "$(basename "$_bf")" =~ ^(register|status)$ ]] && continue
+        [[ -f "$_bf" ]] || continue
+        printf "       %s\n" "$(basename "$_bf")"
+      done
+    fi
+  fi
+else
+  pass "binfmt_misc: not mounted"
+fi
+
+# FireWire (IEEE 1394) DMA attack surface
+sub_header "FireWire / IEEE 1394"
+if lsmod 2>/dev/null | grep -qE "^firewire_core|^ohci1394|^sbp2"; then
+  fail "FireWire module loaded — DMA attack risk"
+elif grep -rqsE "install\s+(firewire[-_]core|ohci1394|sbp2)\s+/(usr/)?s?bin/(false|true)|blacklist\s+(firewire[-_]core|ohci1394|sbp2)" /etc/modprobe.d/ 2>/dev/null; then
+  pass "FireWire modules: blacklisted"
+else
+  pass "FireWire modules: not loaded"
+fi
+
+# Home directory permissions
+sub_header "Home Directory Security"
+while IFS=: read -r _huser _ _huid _ _ _hhome _; do
+  [[ "$_huid" -ge 1000 && "$_huid" -lt 65534 ]] || continue
+  [[ -d "$_hhome" ]] || continue
+  _HPERMS=$(stat -c %a "$_hhome" 2>/dev/null)
+  [[ -z "$_HPERMS" ]] && continue
+  if (( (8#${_HPERMS} & 8#027) != 0 )); then
+    warn "Home directory $_hhome permissions: $_HPERMS (should be 750 or stricter)"
+  else
+    pass "Home directory $_hhome: $_HPERMS"
+  fi
+  # Check ownership
+  _HOWNER=$(stat -c %U "$_hhome" 2>/dev/null)
+  if [[ "$_HOWNER" != "$_huser" ]]; then
+    fail "Home directory $_hhome owned by $_HOWNER (should be $_huser)"
+  fi
+done < /etc/passwd
+
+# Shell idle timeout (TMOUT)
+sub_header "Shell Idle Timeout"
+_TMOUT_SET=false
+for _tmout_file in /etc/profile /etc/profile.d/*.sh /etc/bashrc /etc/bash.bashrc; do
+  [[ -f "$_tmout_file" ]] || continue
+  if grep -qE "^(export\s+)?TMOUT=" "$_tmout_file" 2>/dev/null; then
+    _TMOUT_VAL=$(grep -oP '^(export\s+)?TMOUT=\K\d+' "$_tmout_file" 2>/dev/null | tail -1)
+    if [[ -n "$_TMOUT_VAL" && "$_TMOUT_VAL" -gt 0 ]]; then
+      _TMOUT_SET=true
+      if [[ "$_TMOUT_VAL" -le 900 ]]; then
+        pass "Shell TMOUT=${_TMOUT_VAL}s (in $(basename "$_tmout_file"))"
+      else
+        warn "Shell TMOUT=${_TMOUT_VAL}s (recommended: ≤900s)"
+      fi
+      break
+    fi
+  fi
+done
+if ! $_TMOUT_SET; then
+  info "Shell TMOUT not set (idle sessions never timeout)"
+fi
+
+# AIDE database existence
+sub_header "AIDE Database"
+if require_cmd aide; then
+  _AIDE_DB=""
+  for _db_path in /var/lib/aide/aide.db.gz /var/lib/aide/aide.db /var/lib/aide/aide.db.new.gz; do
+    if [[ -f "$_db_path" ]]; then
+      _AIDE_DB="$_db_path"
+      break
+    fi
+  done
+  if [[ -n "$_AIDE_DB" ]]; then
+    _AIDE_DB_SIZE=$(stat -c%s "$_AIDE_DB" 2>/dev/null || echo "0")
+    if [[ "${_AIDE_DB_SIZE:-0}" -gt 0 ]]; then
+      pass "AIDE database: $_AIDE_DB ($(_human_size "$_AIDE_DB_SIZE"))"
+    else
+      warn "AIDE database exists but is empty: $_AIDE_DB"
+    fi
+  else
+    warn "AIDE installed but no database found (run: sudo aide --init)"
+  fi
+fi
+
+# Suspicious shell history entries
+sub_header "Shell History Analysis"
+_SUSPICIOUS_HIST=0
+while IFS=: read -r _huser _ _huid _ _ _hhome _; do
+  [[ "$_huid" -ge 1000 && "$_huid" -lt 65534 ]] || continue
+  for _histf in "$_hhome/.bash_history" "$_hhome/.zsh_history"; do
+    [[ -f "$_histf" ]] || continue
+    _SH_SUSP=$(grep -ciE "curl.*\|.*bash|wget.*\|.*sh|curl.*-o.*/tmp|wget.*/tmp|chmod\s+\+x.*/tmp|/dev/tcp|nc\s+-e|ncat\s+-e" "$_histf" 2>/dev/null || true)
+    _SH_SUSP=${_SH_SUSP:-0}
+    if [[ "$_SH_SUSP" -gt 0 ]]; then
+      warn "$_SH_SUSP suspicious entries in $_histf (curl|bash, wget, /dev/tcp patterns)"
+      ((_SUSPICIOUS_HIST += _SH_SUSP))
+    fi
+  done
+done < /etc/passwd
+if [[ "$_SUSPICIOUS_HIST" -eq 0 ]]; then
+  pass "No suspicious shell history entries found"
+fi
+
 fi # end hardening
 
 ###############################################################################
@@ -2788,7 +3257,11 @@ for FS_MOD in cramfs freevxfs jffs2 hfs hfsplus squashfs udf; do
   if grep -rqsE "install\s+$FS_MOD\s+/(usr/)?s?bin/(false|true)|blacklist\s+$FS_MOD" /etc/modprobe.d/ 2>/dev/null; then
     pass "Module $FS_MOD: disabled"
   elif [[ "$FS_MOD" == "squashfs" ]] && command -v flatpak &>/dev/null; then
-    info "Module squashfs: loaded (required by Flatpak)"
+    if lsmod 2>/dev/null | grep -q "^squashfs\s"; then
+      info "Module squashfs: loaded (required by Flatpak)"
+    else
+      info "Module squashfs: not disabled but not loaded (Flatpak installed)"
+    fi
   else
     if lsmod 2>/dev/null | grep -q "^${FS_MOD}\s"; then
       warn "Module $FS_MOD: loaded (should be disabled)"
@@ -2807,7 +3280,7 @@ fi
 
 # Module loading status
 if [[ -f /proc/sys/kernel/modules_disabled ]]; then
-  MOD_DISABLED=$(cat /proc/sys/kernel/modules_disabled)
+  MOD_DISABLED=$(< /proc/sys/kernel/modules_disabled)
   if [[ "$MOD_DISABLED" -eq 1 ]]; then
     pass "Kernel module loading: disabled (locked down)"
   else
@@ -2962,6 +3435,55 @@ for DIR in "${PATH_DIRS[@]}"; do
 done
 if [[ "$WW_PATH" -eq 0 ]]; then
   pass "No world-writable directories in PATH"
+fi
+
+# Duplicate lines in /etc/hosts
+sub_header "/etc/hosts Integrity"
+if [[ -f /etc/hosts ]]; then
+  _HOSTS_DUPS=$(grep -v "^#" /etc/hosts 2>/dev/null | grep -v "^$" | sort | uniq -d | wc -l)
+  _HOSTS_DUPS=${_HOSTS_DUPS:-0}
+  if [[ "$_HOSTS_DUPS" -eq 0 ]]; then
+    pass "/etc/hosts: no duplicate entries"
+  else
+    warn "/etc/hosts: $_HOSTS_DUPS duplicate entries"
+  fi
+  # Verify localhost entry
+  if grep -qE "^127\.0\.0\.1\s+localhost" /etc/hosts 2>/dev/null; then
+    pass "/etc/hosts: localhost entry present"
+  else
+    warn "/etc/hosts: missing 127.0.0.1 localhost entry"
+  fi
+fi
+
+# AIDE checksum algorithm
+if require_cmd aide; then
+  _AIDE_CONF=""
+  for _ac in /etc/aide.conf /etc/aide/aide.conf; do
+    [[ -f "$_ac" ]] && _AIDE_CONF="$_ac" && break
+  done
+  if [[ -n "$_AIDE_CONF" ]]; then
+    if grep -qE "sha512|sha256" "$_AIDE_CONF" 2>/dev/null; then
+      _AIDE_HASH=$(grep -oE "sha512|sha256" "$_AIDE_CONF" 2>/dev/null | head -1)
+      pass "AIDE checksum: $_AIDE_HASH (strong)"
+    elif grep -qE "md5" "$_AIDE_CONF" 2>/dev/null; then
+      fail "AIDE checksum: MD5 (weak — switch to sha512)"
+    else
+      info "AIDE checksum algorithm: could not determine from $_AIDE_CONF"
+    fi
+  fi
+fi
+
+# Available valid shells
+sub_header "Valid Shells"
+if [[ -f /etc/shells ]]; then
+  _SHELL_COUNT=$(grep -cv "^#\|^$" /etc/shells 2>/dev/null || true)
+  info "Valid shells in /etc/shells: ${_SHELL_COUNT:-0}"
+  # Check for insecure shells
+  for _ishell in /bin/csh /bin/tcsh; do
+    if grep -q "^${_ishell}$" /etc/shells 2>/dev/null; then
+      info "Legacy shell available: $_ishell"
+    fi
+  done
 fi
 
 fi # end integrity
@@ -3389,10 +3911,12 @@ check_network_privacy() {
   local real_names=false
   while IFS=: read -r user _ uid _ gecos _ _; do
     [[ "$uid" -ge 1000 ]] || continue
-    local first_name="${gecos%%,*}"
-    first_name="${first_name%% *}"
+    local full_name="${gecos%%,*}"
+    local first_name="${full_name%% *}"
+    local last_name="${full_name##* }"
     [[ -z "$first_name" ]] && first_name="$user"
-    if [[ "${hostname,,}" == *"${first_name,,}"* && ${#first_name} -ge 3 ]]; then
+    if [[ "${hostname,,}" == *"${first_name,,}"* && ${#first_name} -ge 3 ]] || \
+       [[ -n "$last_name" && "$last_name" != "$first_name" && "${hostname,,}" == *"${last_name,,}"* && ${#last_name} -ge 3 ]]; then
       real_names=true
       break
     fi
@@ -3595,12 +4119,12 @@ check_data_privacy() {
     fi
     if [[ -f "$bashrc" ]]; then
       local histsize
-      histsize="$(grep -oP '^HISTSIZE=\K\d+' "$bashrc" 2>/dev/null | tail -1)"
+      histsize="$(grep -oP '^(export\s+)?HISTSIZE=\K\d+' "$bashrc" 2>/dev/null | tail -1)"
       if [[ -n "$histsize" && "$histsize" -gt 10000 ]]; then
         warn "HISTSIZE=$histsize (very large) [$user]"
       fi
       local histfilesize
-      histfilesize="$(grep -oP '^HISTFILESIZE=\K\d+' "$bashrc" 2>/dev/null | tail -1)"
+      histfilesize="$(grep -oP '^(export\s+)?HISTFILESIZE=\K\d+' "$bashrc" 2>/dev/null | tail -1)"
       if [[ -n "$histfilesize" && "$histfilesize" -gt 10000 ]]; then
         warn "HISTFILESIZE=$histfilesize (very large) [$user]"
       fi
@@ -3678,6 +4202,7 @@ check_desktop_session() {
     found_lock_delay=1
     local delay
     delay=$(echo "$3" | sed "s/uint32 //;s/'//g" | tr -d ' ')
+    [[ "$delay" =~ ^[0-9]+$ ]] || return
     if [[ "$delay" == "0" ]]; then
       pass "Screen lock delay is 0 (instant) for $1"
     else
@@ -3692,6 +4217,7 @@ check_desktop_session() {
     found_idle=1
     local delay
     delay=$(echo "$3" | sed "s/uint32 //;s/'//g" | tr -d ' ')
+    [[ "$delay" =~ ^[0-9]+$ ]] || return
     if [[ "$delay" == "0" ]]; then
       warn "Idle timeout disabled for $1 (screen never blanks)"
     elif [[ "$delay" -le 300 ]]; then
@@ -3986,7 +4512,7 @@ check_bluetooth_privacy() {
   should_skip "btprivacy" && return
   header "41" "BLUETOOTH PRIVACY"
 
-  if ! command -v bluetoothctl &>/dev/null && ! systemctl list-unit-files bluetooth.service &>/dev/null 2>&1; then
+  if ! command -v bluetoothctl &>/dev/null || ! systemctl list-unit-files bluetooth.service &>/dev/null; then
     info "Bluetooth not available on this system"
     return
   fi
@@ -4041,7 +4567,7 @@ check_bluetooth_privacy() {
     pass "Bluetooth pairing disabled"
   fi
 
-  if [[ "$paired_count" -eq 0 ]]; then
+  if [[ "$paired_count" -eq 0 && "$pairable" != "yes" ]]; then
     warn "Bluetooth active with no paired devices — consider disabling"
   fi
 }
@@ -4225,7 +4751,7 @@ DURATION=$((TOTAL_END - TOTAL_START))
 # Weighted Score: PASS*100 / (PASS + FAIL*2 + WARN)
 # FAIL is weighted 2x because failures are more critical than warnings.
 # INFO is excluded from the score — it's purely informational.
-# Example: 200 PASS, 5 FAIL, 10 WARN → 200*100 / (200 + 10 + 10) = 90%
+# Example: 200 PASS, 5 FAIL, 10 WARN → 200*100 / (200 + 10 + 10) = 91%
 SCORE_DENOM=$((PASS + FAIL * 2 + WARN))
 if [[ "$SCORE_DENOM" -gt 0 ]]; then
   SCORE=$(( (PASS * 100 + SCORE_DENOM / 2) / SCORE_DENOM ))
@@ -4286,7 +4812,7 @@ else
   # --- Normal Summary Output ---
   echo ""
   printf "${BOLD}${WHT}╔══════════════════════════════════════════════════════════════════════╗${RST}\n"
-  printf "${BOLD}${WHT}║                          FINAL RESULTS${RST}\n"
+  printf "${BOLD}${WHT}║                          FINAL RESULTS                               ║${RST}\n"
   printf "${BOLD}${WHT}╠══════════════════════════════════════════════════════════════════════╣${RST}\n"
   printf "${BOLD}${WHT}║${RST}  Total checks:      ${BOLD}$((PASS + FAIL + WARN + INFO))${RST} ($PASS pass, $FAIL fail, $WARN warn, $INFO info)\n"
   printf "${BOLD}${WHT}║${RST}  ${GRN}✅ Passed:${RST}           ${BOLD}$PASS${RST}\n"
@@ -4296,9 +4822,9 @@ else
   printf "${BOLD}${WHT}╠══════════════════════════════════════════════════════════════════════╣${RST}\n"
   printf "${BOLD}${WHT}║${RST}  Score formula:     PASS×100 / (PASS + FAIL×2 + WARN)\n"
   printf "${BOLD}${WHT}║${RST}  ${BOLD}SECURITY & PRIVACY SCORE:${RST}    ${RATING_COLOR}${BOLD}${SCORE}%% ${RATING}${RST}\n"
-  printf "${BOLD}${WHT}║${RST}  Kernel:            $KERNEL\n"
-  printf "${BOLD}${WHT}║${RST}  Uptime:            $(uptime -p 2>/dev/null || echo 'N/A')\n"
-  printf "${BOLD}${WHT}║${RST}  Scan duration:     ${DURATION} seconds\n"
+  printf "${BOLD}${WHT}║${RST}  Kernel:            %s\n" "$KERNEL"
+  printf "${BOLD}${WHT}║${RST}  Uptime:            %s\n" "$(uptime -p 2>/dev/null || echo 'N/A')"
+  printf "${BOLD}${WHT}║${RST}  Scan duration:     %s seconds\n" "$DURATION"
   printf "${BOLD}${WHT}╚══════════════════════════════════════════════════════════════════════╝${RST}\n"
   echo ""
   printf "${CYN}Report generated: $NOW${RST}\n"
@@ -4323,7 +4849,7 @@ else
     echo ""
     echo "▼▼▼ COPY FROM HERE ▼▼▼"
     echo ""
-    echo "I ran NoID Privacy for Linux v${NOID_PRIVACY_VERSION} — a 300+ check privacy & security audit."
+    echo "I ran NoID Privacy for Linux v${NOID_PRIVACY_VERSION} — a 390+ check privacy & security audit."
     echo "Tool: https://github.com/NexusOne23/noid-privacy-linux"
     echo ""
     echo "System: ${DISTRO_PRETTY} ${KERNEL} ${DESKTOP_ENV}"

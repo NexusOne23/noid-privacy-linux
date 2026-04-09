@@ -5,16 +5,16 @@
 ### Privacy & Security Audit for Linux Desktops
 
 [![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](https://github.com/NexusOne23/noid-privacy-linux/blob/main/LICENSE)
-[![Version](https://img.shields.io/badge/version-3.2.5-green.svg)](https://github.com/NexusOne23/noid-privacy-linux/releases)
+[![Version](https://img.shields.io/badge/version-3.3.0-green.svg)](https://github.com/NexusOne23/noid-privacy-linux/releases)
 [![Pure Bash](https://img.shields.io/badge/pure-bash-4EAA25.svg?logo=gnu-bash&logoColor=white)](https://github.com/NexusOne23/noid-privacy-linux)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen.svg)](https://github.com/NexusOne23/noid-privacy-linux)
-[![Checks](https://img.shields.io/badge/checks-300%2B-orange.svg)](https://github.com/NexusOne23/noid-privacy-linux)
+[![Checks](https://img.shields.io/badge/checks-390%2B-orange.svg)](https://github.com/NexusOne23/noid-privacy-linux)
 [![CI](https://github.com/NexusOne23/noid-privacy-linux/actions/workflows/ci.yml/badge.svg)](https://github.com/NexusOne23/noid-privacy-linux/actions)
 [![GitHub Stars](https://img.shields.io/github/stars/NexusOne23/noid-privacy-linux?style=flat&logo=github)](https://github.com/NexusOne23/noid-privacy-linux/stargazers)
 [![Last Commit](https://img.shields.io/github/last-commit/NexusOne23/noid-privacy-linux?style=flat)](https://github.com/NexusOne23/noid-privacy-linux/commits)
 [![Website](https://img.shields.io/badge/Website-noid--privacy.com-0078D4?style=flat)](https://noid-privacy.com)
 
-**300+ checks · 42 sections · Zero dependencies · Pure Bash · AI-powered fixes**
+**390+ checks · 42 sections · Zero dependencies · Pure Bash · AI-powered fixes**
 **Fedora · Ubuntu · Debian · Arch · openSUSE · RHEL · Mint · Pop!_OS**
 
 [Quick Start](#-quick-start) · [What it Checks](#-what-it-checks) · [AI Fixes](#-fix-with-ai) · [Comparison](#-comparison) · [Discussions](https://github.com/NexusOne23/noid-privacy-linux/discussions)
@@ -30,7 +30,7 @@ curl -fsSL https://github.com/NexusOne23/noid-privacy-linux/raw/main/noid-privac
 sudo bash noid-privacy-linux.sh --ai
 ```
 
-300+ privacy & security checks. Zero dependencies. The `--ai` flag generates a ready-to-paste prompt — hand it to ChatGPT, Claude, or Gemini to **fix every finding automatically**.
+390+ privacy & security checks. Zero dependencies. The `--ai` flag generates a ready-to-paste prompt — hand it to ChatGPT, Claude, or Gemini to **fix every finding automatically**.
 
 > **This tool is read-only.** It does not modify your system. No files changed, no configs touched, no services restarted.
 
@@ -120,10 +120,10 @@ sudo bash noid-privacy-linux.sh --json
 ```
 $ sudo bash noid-privacy-linux.sh --ai
 
-  NoID Privacy for Linux v3.2.5 — Privacy & Security Audit for Linux Desktops
+  NoID Privacy for Linux v3.3.0 — Privacy & Security Audit for Linux Desktops
   2026-02-13 15:03:15 | mydesktop | 6.18.9-200.fc43.x86_64
   Arch: x86_64 | Distro: Fedora Linux 43 (Workstation Edition)
-  Checks: 300+ across 42 sections
+  Checks: 390+ across 42 sections
 
 ━━━ [01/42] KERNEL & BOOT INTEGRITY ━━━
   ✅ PASS  Secure Boot: ENABLED
@@ -159,7 +159,7 @@ Score formula: PASS×100 / (PASS + FAIL×2 + WARN)
 | `--skip SECTION` | Skip specific sections (repeatable) |
 | `--help` | Show all available options and skip keywords |
 
-43 skip keywords available — run `--help` for the full list.
+44 skip keywords available — run `--help` for the full list.
 
 ---
 
@@ -168,7 +168,7 @@ Score formula: PASS×100 / (PASS + FAIL×2 + WARN)
 | Feature | **NoID Privacy for Linux** | **Lynis** | **privacy.sexy** | **CIS Benchmark** |
 |---|:---:|:---:|:---:|:---:|
 | **Focus** | Privacy + Security for desktops | Server compliance | Script generator | Server compliance |
-| **Tests** | 300+ | 480+ | N/A | varies |
+| **Tests** | 390+ | 480+ | N/A | varies |
 | **Browser privacy** | ✅ | ❌ | ⚠️ Partial | ❌ |
 | **App telemetry** | ✅ | ❌ | ✅ | ❌ |
 | **DNS / VPN / MAC** | ✅ | ❌ | ❌ | ❌ |

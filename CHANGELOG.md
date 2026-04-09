@@ -7,6 +7,103 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.3.0] - 2026-04-09
+
+### ✨ New Checks (32 additions from Lynis comparison)
+
+**Kernel & Boot (Section 01)**
+- Running latest installed kernel vs. installed kernel packages
+
+**Firewall (Section 03)**
+- Firewall logging status (firewalld/ufw/iptables — denied packet logging)
+
+**VPN & Network (Section 05)**
+- DNSSEC validation status via systemd-resolved
+
+**Users & Authentication (Section 11)**
+- Password hashing method detection (YESCRYPT > SHA512 > SHA256 > MD5)
+- Password hashing rounds/cost factor from login.defs
+- PAM password quality enforcement (pam_pwquality/pam_cracklib)
+- Password expiry check for all human accounts
+- Duplicate UID detection
+- Duplicate GID detection
+
+**Filesystem Security (Section 12)**
+- Swappiness level (vm.swappiness)
+- ACL support verification on root filesystem
+
+**Encryption & Crypto (Section 13)**
+- Hardware RNG detection (/dev/hwrng, hw_random, RDRAND/RDSEED)
+
+**Process Security (Section 16)**
+- Zombie/dead process count
+
+**Network Security (Section 17)**
+- TCP TIME_WAIT connection monitoring
+- ARP monitoring software detection (arpwatch/arpon/addrwatch)
+
+**Logs & Monitoring (Section 19)**
+- Deleted log files still held open by processes
+
+**Systemd Security (Section 25)**
+- Expanded to 13 services across 3 tiers: security (sshd, firewalld, auditd, usbguard, chronyd), hardware (gdm, thermald), user-facing (NetworkManager, colord, fwupd, etc.)
+
+**Advanced Hardening (Section 30)**
+- IMA (Integrity Measurement Architecture) status, policy, and violation count
+- EVM (Extended Verification Module) status
+- binfmt_misc non-native binary format registration check
+- FireWire/IEEE 1394 DMA attack surface (module blacklist check)
+- Home directory permissions and ownership for all human users
+- Shell idle timeout (TMOUT) across profile configs
+- AIDE database existence and size
+- Shell history analysis for suspicious commands (curl|bash, /dev/tcp, nc -e)
+
+**System Integrity (Section 34)**
+- /etc/hosts duplicate entry detection
+- /etc/hosts localhost entry verification
+- AIDE checksum algorithm strength
+- Valid shells in /etc/shells count
+
+### 🐛 Bug Fixes
+
+- **Bluetooth "not available" logic**: `&&` changed to `||` — now correctly detects BT absence when either bluetoothctl OR bluetooth.service is missing (was requiring BOTH)
+- **Double sysrq reporting**: Magic SysRq standalone check downgraded from `warn` to `info` (the sysctl loop already issues `fail` for non-zero values)
+- **squashfs false message**: "loaded (required by Flatpak)" now only shows when the module is actually loaded; otherwise shows "not disabled but not loaded"
+- **gsettings integer guard**: Screen lock delay and idle timeout callbacks now validate numeric input before integer comparison (prevents bash errors on malformed gsettings output)
+- **FINAL RESULTS box**: Added missing right `║` border on title line
+- **Score formula comment**: Fixed example result from 90% to correct 91%
+- **printf format-string safety**: Kernel, uptime, and duration values in summary now use `%s` format specifier instead of embedded variables (prevents `%` characters from corrupting output)
+- **Home directory stat fallback**: Empty `stat` result now skips the check instead of falling back to `777` (which caused spurious warnings)
+- **TCP Wrappers false positive**: Downgraded "no deny rules" from `warn` to `info` (TCP wrappers are deprecated on modern systemd-based systems)
+- **CPU vulnerability "Unknown"**: Changed from `pass` to `warn` for unrecognized vulnerability status (only "Not affected" and "Mitigation" now get `pass`)
+- **auditctl "No rules" counted as 1**: Now filters the "No rules" message before counting
+- **Double Bluetooth warning**: "active with no paired devices" now only fires when `pairable != yes` (avoids duplicate with "pairable but no devices" warning)
+- **HISTSIZE regex**: Now also matches `export HISTSIZE=` form (was only matching bare `HISTSIZE=`)
+- **Dead RPM_NOSIG code**: Removed redundant first `rpm -qa` query that was immediately overwritten
+- **Hostname privacy check**: Now checks both first AND last name from GECOS field against hostname
+- **Umask check**: Added `/etc/profile.d/*.sh` to search paths (Fedora sets umask there)
+- **Skip keywords count**: Corrected from 43 back to 44 (42 sections + `netleaks` + `summary` sub-skip targets — the v3.2.5 "correction" was itself wrong)
+
+### ✨ Additional Checks (5 — closing final Lynis gaps)
+
+- **Password file consistency** (`pwck -rq`) — detects corrupted /etc/passwd entries (Section 11)
+- **Locked user accounts** (`passwd -S`) — reports locked accounts, handles Fedora `LK` and Debian `L` status (Section 11)
+- **Sudoers security audit** — permissions check (440), sudoers.d drop-in permissions, NOPASSWD scan, `visudo -c` syntax validation (Section 11)
+- **Empty log files** — checks /var/log/messages, syslog, auth.log, secure, kern.log for zero-byte files indicating broken logging (Section 19)
+- **NTP source quality** — chronyc sources analysis for unreachable/falseticker peers (Section 27)
+
+### 🔧 Improvements
+
+- **binfmt_misc.mount filtered** from failed services (expected failure on hardened systems)
+- **Journal error threshold** raised from 10 to 15 (reduces false warnings on desktop with NVIDIA/SELinux)
+- **ps self-reference filtered** from Top 5 CPU/Memory output
+- **4× useless `cat`** replaced with `$(< /proc/...)` on procfs/sysfs reads
+- **4× redundant `2>&1`** removed after `&>/dev/null`
+- **Debian/Ubuntu compatibility**: Added `/etc/bash.bashrc` to umask and TMOUT checks, `gdm3` to systemd-analyze hardware services
+- Check count updated: 300+ → 390+
+
+---
+
 ## [3.2.5] - 2026-04-09
 
 ### 🔴 High Fixes

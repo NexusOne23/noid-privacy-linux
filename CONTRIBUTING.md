@@ -62,7 +62,7 @@ sudo bash noid-privacy-linux.sh
 sudo bash noid-privacy-linux.sh --ai
 sudo bash noid-privacy-linux.sh --json > /dev/null
 sudo bash noid-privacy-linux.sh --no-color
-sudo bash noid-privacy-linux.sh --skip browser --skip bluetooth
+sudo bash noid-privacy-linux.sh --skip browser --skip btprivacy
 ```
 
 ---
@@ -140,7 +140,7 @@ Look at the existing 42 sections and find where your check fits. For example:
 
 ```bash
 # Check if something is configured securely
-if [ -f /etc/some-config ]; then
+if [[ -f /etc/some-config ]]; then
     if grep -q "^secure_setting=yes" /etc/some-config; then
         pass "Some feature is securely configured"
     else
@@ -153,7 +153,7 @@ fi
 
 ### 3. Follow These Rules
 
-- **Handle missing files/commands gracefully** — use `[ -f file ]` or `command -v`
+- **Handle missing files/commands gracefully** — use `[[ -f file ]]` or `command -v`
 - **Quote all variables** — `"$var"`, not `$var`
 - **Support both distro families** — Fedora/RHEL and Debian/Ubuntu
 - **Use clear, actionable messages** — tell the user what's wrong AND why it matters
