@@ -3125,7 +3125,12 @@ fi
 # binfmt_misc (non-native binary execution)
 sub_header "Binary Format Registration"
 if [[ -d /proc/sys/fs/binfmt_misc ]]; then
-  _BINFMT_COUNT=$(ls -1 /proc/sys/fs/binfmt_misc/ 2>/dev/null | grep -cv "^register$\|^status$" || true)
+  _BINFMT_COUNT=0
+  for _bf_entry in /proc/sys/fs/binfmt_misc/*; do
+    [[ -e "$_bf_entry" ]] || continue
+    case "$(basename "$_bf_entry")" in register|status) continue ;; esac
+    ((_BINFMT_COUNT++))
+  done
   _BINFMT_COUNT=${_BINFMT_COUNT:-0}
   if [[ "$_BINFMT_COUNT" -eq 0 ]]; then
     pass "binfmt_misc: no non-native binary formats registered"
