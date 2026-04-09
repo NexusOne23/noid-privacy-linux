@@ -314,6 +314,7 @@ if [[ -f /etc/os-release ]]; then
       ID)          ID="$_osr_val" ;;
       NAME)        NAME="$_osr_val" ;;
       PRETTY_NAME) PRETTY_NAME="$_osr_val" ;;
+      # shellcheck disable=SC2034  # VERSION_ID reserved for future per-distro version checks
       VERSION_ID)  VERSION_ID="$_osr_val" ;;
     esac
   done < <(grep -E '^(ID|NAME|PRETTY_NAME|VERSION_ID)=' /etc/os-release 2>/dev/null)
