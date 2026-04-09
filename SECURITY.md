@@ -169,5 +169,5 @@ For licensing questions, see [LICENSE](LICENSE) or open a [Discussion](https://g
 
 ---
 
-**Last Updated**: March 2, 2026
-**Policy Version**: 1.3
+**Last Updated**: April 9, 2026
+**Policy Version**: 1.4

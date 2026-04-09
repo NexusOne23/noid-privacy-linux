@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.2.5] - 2026-04-09
+
+### 🔴 High Fixes
+
+- **IPv6 false positive on VPN interfaces**: Global unicast addresses on VPN tunnel interfaces (e.g. `2a07:b944::2:2` on `proton0`) were counted as "IPv6 active — leak risk". These addresses are internal to the WireGuard tunnel and not internet-facing. Script now skips addresses on VPN interfaces (`tun*`, `wg*`, `proton*`, `pvpn*`) when counting global IPv6.
+
+- **Audit watch detection missed `-F path=` syntax**: Script only matched short-form watches (`-w /etc/passwd`) but not the equivalent long-form (`-a always,exit -F path=/etc/passwd`). Systems using syscall-based audit rules (standard on modern Fedora/RHEL) showed 5 false "Audit watch missing" warnings. Now matches `-w`, `-F path=`, and `-F dir=` syntax, including sub-path matches.
+
+- **Faillock counted header lines as failed attempts**: `grep -c "^[a-zA-Z]"` matched username headers (`nexus:`) and table headers (`When  Type  Source`) — not actual failures. Systems with zero failed attempts showed "4 account(s) with failed login attempts". Now counts only actual failure entries (lines starting with `YYYY-MM-DD`).
+
+### 🟡 Medium Fixes
+
+- **RPM unsigned: kmod packages indistinguishable from real issues**: Locally-built kernel modules (akmods/dkms) inherently cannot carry RPM GPG signatures — they are compiled on the user's machine. Previously lumped together with genuinely unsigned third-party packages. Now reported separately: `1 unsigned RPM packages (+ 2 locally-built kmod)`.
+
+- **Journal critical: Intel watchdog false positive**: `watchdog: watchdog0: watchdog did not stop!` is logged at every shutdown on virtually all Intel systems with iTCO watchdog. Not a security or stability event. Added to benign-process filter alongside sudo, systemd-coredump, and auth messages.
+
+- **os-release parsing used `eval`**: `eval "$(grep ... /etc/os-release)"` could theoretically execute injected code from a compromised os-release file. Replaced with explicit `while IFS='=' read` loop with key whitelist. Zero practical risk (root-owned file), but cleaner for a security audit tool.
+
+### 🟢 Low Fixes
+
+- **HTTP connectivity check undocumented**: `curl http://detectportal.firefox.com` uses unencrypted HTTP in a privacy tool. This is intentional (captive portal detection requires HTTP to detect redirects). Added explanatory comment.
+
+- **CI: Fedora 39 (EOL) in test matrix**: Replaced with Fedora 42. Matrix now tests Ubuntu 22.04/24.04, Fedora 42/43, Debian 12.
+
+- **CI: Docs/CHECKS.md not validated**: `validate-structure` job checked 7 required files but missed `Docs/CHECKS.md`. Added to the check list.
+
+- **README: "44 skip keywords" incorrect**: Actual count is 43. Corrected.
+
+- **Footer branding**: Removed co-author credit from scan output footer. Now shows `by NexusOne23` only.
+
+### ✨ Improvements
+
+- **GPL v3 copyright header**: Added full copyright notice with license text to the main script header, as recommended by GPL v3 for source files.
+
+---
+
 ## [3.2.4] - 2026-03-30
 
 ### 🔴 Critical Fixes

@@ -1,12 +1,27 @@
 #!/usr/bin/env bash
 ###############################################################################
-#  NoID Privacy for Linux v3.2.4 — Privacy & Security Audit
+#  NoID Privacy for Linux v3.2.5 — Privacy & Security Audit
+#  Copyright (C) 2026 Fabio Mantegna (NexusOne23)
+#
+#  This program is free software: you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation, either version 3 of the License, or
+#  (at your option) any later version.
+#
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#
 #  https://noid-privacy.com/linux.html | https://github.com/NexusOne23/noid-privacy-linux
 #  Fedora / RHEL / Debian / Ubuntu — Full-Spectrum Audit
 #  300+ checks across 42 sections
 #  Requires: root
 ###############################################################################
-NOID_PRIVACY_VERSION="3.2.4"
+NOID_PRIVACY_VERSION="3.2.5"
 set +e          # Don't exit on errors — we handle them ourselves
 
 # Bash 4+ required for associative arrays and other features
@@ -292,8 +307,16 @@ DISTRO="unknown"
 DISTRO_FAMILY="unknown"
 DISTRO_PRETTY="Unknown Linux"
 if [[ -f /etc/os-release ]]; then
-  # Parse os-release safely (avoid sourcing arbitrary code)
-  eval "$(grep -E '^(ID|NAME|PRETTY_NAME|VERSION_ID)=' /etc/os-release 2>/dev/null)"
+  # Parse os-release safely — no eval, no source, explicit key whitelist only
+  while IFS='=' read -r _osr_key _osr_val; do
+    _osr_val="${_osr_val%\"}"; _osr_val="${_osr_val#\"}"
+    case "$_osr_key" in
+      ID)          ID="$_osr_val" ;;
+      NAME)        NAME="$_osr_val" ;;
+      PRETTY_NAME) PRETTY_NAME="$_osr_val" ;;
+      VERSION_ID)  VERSION_ID="$_osr_val" ;;
+    esac
+  done < <(grep -E '^(ID|NAME|PRETTY_NAME|VERSION_ID)=' /etc/os-release 2>/dev/null)
   DISTRO_PRETTY="${PRETTY_NAME:-$NAME}"
   # shellcheck disable=SC2034  # DISTRO reserved for future per-distro checks
   case "${ID,,}" in
@@ -831,6 +854,8 @@ header "05" "VPN & NETWORK"
 # Use --skip vpn to avoid network traffic from this section.
 
 # Internet Connectivity Test (use curl to avoid ICMP-blocked false negatives)
+# NOTE: HTTP (not HTTPS) is intentional — captive portal detection requires unencrypted
+# HTTP to detect redirects. This single request goes through the VPN tunnel if active.
 if curl -fsS --max-time 5 http://detectportal.firefox.com/success.txt &>/dev/null; then
   pass "Internet connectivity: OK"
 elif ping -c1 -W5 1.1.1.1 &>/dev/null; then
@@ -905,13 +930,21 @@ if ! should_skip "netleaks"; then
   fi
 fi
 
-# IPv6 (filter link-local fe80 and multicast ff to avoid false positives)
+# IPv6 (filter link-local fe80, multicast ff, and VPN-internal addresses to avoid false positives)
 if [[ -f /proc/net/if_inet6 ]]; then
-  IPV6_GLOBAL=$(grep -cvE '^fe80|^ff|^fd|^0000000000000000' /proc/net/if_inet6 2>/dev/null || true)
-  IPV6_GLOBAL=${IPV6_GLOBAL:-0}
+  # Count global IPv6 addresses, excluding VPN tunnel interfaces (proton/pvpn/tun/wg).
+  # IPv6 on VPN interfaces is internal to the tunnel and not an internet-facing leak.
+  IPV6_GLOBAL=0
+  while read -r _v6addr _ _ _ _ _v6iface; do
+    # Skip link-local (fe80), multicast (ff), ULA (fd), loopback (::1)
+    [[ "$_v6addr" =~ ^(fe80|ff|fd|0000000000000000) ]] && continue
+    # Skip VPN interfaces — their IPv6 is tunnel-internal, not a leak
+    echo "$_v6iface" | grep -qE "^(tun|wg|proton|pvpn)" && continue
+    ((IPV6_GLOBAL++))
+  done < /proc/net/if_inet6
   IPV6_TOTAL=$(wc -l < /proc/net/if_inet6)
   if [[ "$IPV6_GLOBAL" -gt 0 ]]; then
-    warn "IPv6 active ($IPV6_GLOBAL global addresses, $IPV6_TOTAL total) — leak risk"
+    warn "IPv6 active ($IPV6_GLOBAL global addresses on physical interfaces, $IPV6_TOTAL total) — leak risk"
   else
     # Remaining addresses may be link-local (fe80), ULA (fd), or loopback (::1)
     IPV6_ULA=$(grep -c '^fd' /proc/net/if_inet6 2>/dev/null || true)
@@ -1391,8 +1424,11 @@ if require_cmd auditctl; then
   fi
 
   CRITICAL_WATCHES="/etc/passwd /etc/shadow /etc/sudoers /etc/ssh /etc/pam.d"
+  _AUDIT_RULES_CACHE=$(auditctl -l 2>/dev/null)
   for WATCH in $CRITICAL_WATCHES; do
-    if auditctl -l 2>/dev/null | grep -q -- "-w ${WATCH}"; then
+    # Match both short form (-w /path) and long form (-F path=/path, -F dir=/path),
+    # including sub-path matches (e.g. -F path=/etc/ssh/sshd_config covers /etc/ssh)
+    if echo "$_AUDIT_RULES_CACHE" | grep -qE -- "(-w ${WATCH}( |$)|-F (path|dir)=${WATCH}(/|\s|$))"; then
       pass "Audit watch: $WATCH"
     else
       warn "Audit watch missing: $WATCH"
@@ -1487,10 +1523,17 @@ else
 fi
 
 # Faillock
+# faillock output format per user: "username:\nWhen  Type  Source  Valid\n2026-04-09 ... RHOST  V\n"
+# Count only actual failure entries (lines starting with a date YYYY-MM-DD), not headers.
 if require_cmd faillock; then
-  LOCKED=$(faillock --dir /var/run/faillock 2>/dev/null | grep -c "^[a-zA-Z]" | ccount)
+  _FAILLOCK_OUT=$(faillock --dir /var/run/faillock 2>/dev/null)
+  LOCKED=$(echo "$_FAILLOCK_OUT" | grep -cE "^[0-9]{4}-[0-9]{2}-[0-9]{2}" || true)
+  LOCKED=${LOCKED:-0}
   if [[ "$LOCKED" -gt 0 ]]; then
-    warn "Faillock: $LOCKED account(s) with failed login attempts"
+    # Count unique usernames with failures
+    _LOCKED_USERS=$(echo "$_FAILLOCK_OUT" | grep -B50 "^[0-9]\{4\}-" | grep -c "^[a-zA-Z].*:" || true)
+    _LOCKED_USERS=${_LOCKED_USERS:-0}
+    warn "Faillock: $LOCKED failed attempt(s) across $_LOCKED_USERS account(s)"
   else
     pass "Faillock: no recorded failed login attempts"
   fi
@@ -1817,8 +1860,18 @@ if require_cmd rpm; then
   RPM_NOSIG_REAL=$(rpm -qa --qf '%{NAME}-%{VERSION}-%{RELEASE} RSA:%{RSAHEADER:pgpsig} PGP:%{SIGPGP:pgpsig} GPG:%{SIGGPG:pgpsig}\n' 2>/dev/null \
     | grep "RSA:(none) PGP:(none) GPG:(none)" | grep -cv "^gpg-pubkey-" | ccount)
   RPM_NOSIG=$RPM_NOSIG_REAL
+  # Separate locally-built kernel modules (akmods/dkms) — these are built on the
+  # user's machine and inherently cannot carry an RPM GPG signature. They are
+  # typically MOK-signed for Secure Boot, which is a separate trust chain.
+  RPM_NOSIG_KMOD=$(rpm -qa --qf '%{NAME}-%{VERSION}-%{RELEASE} RSA:%{RSAHEADER:pgpsig} PGP:%{SIGPGP:pgpsig} GPG:%{SIGGPG:pgpsig}\n' 2>/dev/null \
+    | grep "RSA:(none) PGP:(none) GPG:(none)" | grep -cv "^gpg-pubkey-\|^kmod-" | ccount)
+  RPM_NOSIG_KMOD_ONLY=$(( RPM_NOSIG - RPM_NOSIG_KMOD ))
   if [[ "$RPM_NOSIG" -eq 0 ]]; then
     pass "All RPM packages signed"
+  elif [[ "$RPM_NOSIG_KMOD" -eq 0 && "$RPM_NOSIG_KMOD_ONLY" -gt 0 ]]; then
+    info "$RPM_NOSIG unsigned RPM packages (all kmod — locally built, expected)"
+  elif [[ "$RPM_NOSIG_KMOD" -gt 0 && "$RPM_NOSIG_KMOD_ONLY" -gt 0 ]]; then
+    warn "$RPM_NOSIG_KMOD unsigned RPM packages (+ $RPM_NOSIG_KMOD_ONLY locally-built kmod)"
   else
     warn "$RPM_NOSIG unsigned RPM packages"
   fi
@@ -2117,9 +2170,13 @@ fi
 # that are indented with spaces — these are NOT separate events and must not be counted.
 # Filter to timestamp-prefixed lines only, then exclude known-benign sources.
 _JCRIT_LINES=$(journalctl -p crit --since "24 hours ago" --no-pager -q 2>/dev/null)
+# Filter known-benign critical messages:
+#   sudo/auth         — normal sudo operations without TTY
+#   systemd-coredump  — stack traces inflate count (filtered since v3.2.1)
+#   watchdog.*did not stop — Intel iTCO watchdog always logs this at shutdown (harmless hardware quirk)
 JOURNAL_CRIT=$(echo "$_JCRIT_LINES" \
   | grep -E "^[A-Z][a-z]{2} " \
-  | grep -cvE "sudo|password is required|auth could not identify|systemd-coredump" || true)
+  | grep -cvE "sudo|password is required|auth could not identify|systemd-coredump|watchdog.*did not stop" || true)
 JOURNAL_CRIT=${JOURNAL_CRIT:-0}
 if [[ "$JOURNAL_CRIT" -eq 0 ]]; then
   pass "Journal critical (24h): 0"
@@ -4244,7 +4301,7 @@ else
   printf "${BOLD}${WHT}╚══════════════════════════════════════════════════════════════════════╝${RST}\n"
   echo ""
   printf "${CYN}Report generated: $NOW${RST}\n"
-  printf "${CYN}by NexusOne23 & Claude 🤖 — NoID Privacy for Linux v${NOID_PRIVACY_VERSION} | https://noid-privacy.com/linux.html${RST}\n"
+  printf "${CYN}by NexusOne23 — NoID Privacy for Linux v${NOID_PRIVACY_VERSION} | https://noid-privacy.com/linux.html${RST}\n"
 
   # --- AI Mode Output ---
   if $AI_MODE; then

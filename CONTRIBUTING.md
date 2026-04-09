@@ -206,7 +206,7 @@ If your checks don't fit any existing section, you can propose a new one:
 - **Use `command -v`** instead of `which` for command detection
 - **Use `&>/dev/null`** for suppressing output
 - **Use `printf` instead of `echo -e`** for portable colored output
-- **4-space indentation** (no tabs)
+- **2-space indentation** (no tabs)
 - **Max line length:** 120 characters (soft limit)
 - **ShellCheck must pass.** Run `shellcheck --severity=warning noid-privacy-linux.sh` before submitting. CI enforces this.
 
@@ -223,9 +223,9 @@ If your checks don't fit any existing section, you can propose a new one:
 
 ```bash
 # ✅ DO: Quote variables
-if [ -f "$config_file" ]; then
+if [[ -f "$config_file" ]]; then
 
-# ❌ DON'T: Unquoted variables
+# ❌ DON'T: Unquoted variables or single brackets
 if [ -f $config_file ]; then
 
 # ✅ DO: Handle missing commands
