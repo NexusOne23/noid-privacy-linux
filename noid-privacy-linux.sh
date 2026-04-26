@@ -302,6 +302,197 @@ _gsettings_for_users() {
   done < /etc/passwd
 }
 
+# KDE Plasma per-user config reader.
+# Tries kreadconfig6 → kreadconfig5 → direct INI parse fallback so it works
+# on Plasma 5, Plasma 6, and even systems where the kreadconfig binaries
+# are not installed (sandboxed/minimal). $home is required for the fallback.
+_kreadconfig_for_users() {
+  local file="$1" group="$2" key="$3" callback="$4"
+  while IFS=: read -r user _ uid _ _ home shell; do
+    [[ "$uid" -ge 1000 && "$uid" -lt 65534 ]] || continue
+    [[ "$shell" == */nologin || "$shell" == */false ]] && continue
+    [[ -S "/run/user/$uid/bus" ]] || continue
+    [[ -d "$home/.config" ]] || continue
+    local val=""
+    if command -v kreadconfig6 &>/dev/null; then
+      val=$(sudo -u "$user" XDG_RUNTIME_DIR="/run/user/$uid" \
+        kreadconfig6 --file "$file" --group "$group" --key "$key" 2>/dev/null)
+    fi
+    if [[ -z "$val" ]] && command -v kreadconfig5 &>/dev/null; then
+      val=$(sudo -u "$user" XDG_RUNTIME_DIR="/run/user/$uid" \
+        kreadconfig5 --file "$file" --group "$group" --key "$key" 2>/dev/null)
+    fi
+    # Fallback: direct INI parse — works without KDE tooling installed
+    if [[ -z "$val" && -f "$home/.config/$file" ]]; then
+      val=$(awk -F= -v g="[$group]" -v k="$key" '
+        $0==g {in_group=1; next}
+        /^\[/ {in_group=0}
+        in_group && $1==k {sub(/^[^=]*=/,""); print; exit}
+      ' "$home/.config/$file" 2>/dev/null)
+    fi
+    [[ -n "$val" ]] || continue
+    $callback "$user" "$uid" "$val"
+  done < /etc/passwd
+}
+
+# XFCE per-user config reader using xfconf-query.
+# XFCE has no INI fallback — without xfconf-query the check skips silently.
+_xfconf_for_users() {
+  local channel="$1" property="$2" callback="$3"
+  command -v xfconf-query &>/dev/null || return 0
+  while IFS=: read -r user _ uid _ _ home shell; do
+    [[ "$uid" -ge 1000 && "$uid" -lt 65534 ]] || continue
+    [[ "$shell" == */nologin || "$shell" == */false ]] && continue
+    [[ -S "/run/user/$uid/bus" ]] || continue
+    local val
+    val=$(sudo -u "$user" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
+      xfconf-query -c "$channel" -p "$property" 2>/dev/null) || continue
+    [[ -n "$val" ]] && $callback "$user" "$uid" "$val"
+  done < /etc/passwd
+}
+
+# DE-aware screen lock enabled check. Dispatches to GNOME/KDE/XFCE/MATE/Cinnamon.
+# Returns "found" via global _DE_LOCK_FOUND for fallthrough INFO messages.
+_de_check_screen_lock() {
+  local cb="$1"
+  _DE_LOCK_FOUND=0
+  case "$_DE_FAMILY" in
+    gnome)
+      _gsettings_for_users "org.gnome.desktop.screensaver" "lock-enabled" "$cb"
+      ;;
+    kde)
+      _kreadconfig_for_users "kscreenlockerrc" "Daemon" "Autolock" "$cb"
+      ;;
+    xfce)
+      _xfconf_for_users "xfce4-screensaver" "/lock/enabled" "$cb"
+      ;;
+    mate)
+      _gsettings_for_users "org.mate.screensaver" "lock-enabled" "$cb"
+      ;;
+    cinnamon)
+      _gsettings_for_users "org.cinnamon.desktop.screensaver" "lock-enabled" "$cb"
+      ;;
+  esac
+}
+
+# DE-aware idle delay check. GNOME/MATE return seconds; KDE/XFCE return minutes
+# — callbacks are responsible for normalizing units.
+_de_check_idle_delay() {
+  local cb="$1"
+  case "$_DE_FAMILY" in
+    gnome)
+      _gsettings_for_users "org.gnome.desktop.session" "idle-delay" "$cb"
+      ;;
+    kde)
+      # Plasma uses minutes via kscreenlockerrc Daemon Timeout
+      _kreadconfig_for_users "kscreenlockerrc" "Daemon" "Timeout" "$cb"
+      ;;
+    xfce)
+      # XFCE uses minutes via xfce4-screensaver /idle-activation/delay
+      _xfconf_for_users "xfce4-screensaver" "/idle-activation/delay" "$cb"
+      ;;
+    mate)
+      _gsettings_for_users "org.mate.session" "idle-delay" "$cb"
+      ;;
+    cinnamon)
+      _gsettings_for_users "org.cinnamon.desktop.session" "idle-delay" "$cb"
+      ;;
+  esac
+}
+
+# DE-aware lock-on-suspend check. Boolean.
+_de_check_lock_on_suspend() {
+  local cb="$1"
+  case "$_DE_FAMILY" in
+    gnome)
+      # ubuntu-lock-on-suspend (Ubuntu) → fallback lock-enabled (upstream)
+      _gsettings_for_users "org.gnome.desktop.screensaver" "ubuntu-lock-on-suspend" "$cb"
+      ;;
+    kde)
+      _kreadconfig_for_users "kscreenlockerrc" "Daemon" "LockOnResume" "$cb"
+      ;;
+    xfce)
+      _xfconf_for_users "xfce4-screensaver" "/lock/enabled" "$cb"
+      ;;
+    mate)
+      _gsettings_for_users "org.mate.screensaver" "lock-enabled" "$cb"
+      ;;
+    cinnamon)
+      _gsettings_for_users "org.cinnamon.desktop.screensaver" "lock-enabled" "$cb"
+      ;;
+  esac
+}
+
+# DE-aware notifications-on-lockscreen check.
+_de_check_notifications_on_lock() {
+  local cb="$1"
+  case "$_DE_FAMILY" in
+    gnome)
+      _gsettings_for_users "org.gnome.desktop.notifications" "show-in-lock-screen" "$cb"
+      ;;
+    kde)
+      # Plasma 5/6: ~/.config/plasmanotifyrc [DoNotDisturb] WhenScreenLocked
+      _kreadconfig_for_users "plasmanotifyrc" "DoNotDisturb" "WhenScreenLocked" "$cb"
+      ;;
+    cinnamon)
+      _gsettings_for_users "org.cinnamon.desktop.notifications" "display-notifications-on-lock-screen" "$cb"
+      ;;
+  esac
+}
+
+# DE-aware user-switching lockdown check.
+_de_check_user_switching() {
+  local cb="$1"
+  case "$_DE_FAMILY" in
+    gnome)
+      _gsettings_for_users "org.gnome.desktop.lockdown" "disable-user-switching" "$cb"
+      ;;
+    kde)
+      # Plasma: ~/.config/kdeglobals [KDE Action Restrictions] action/start_new_session
+      _kreadconfig_for_users "kdeglobals" "KDE Action Restrictions" "action/start_new_session" "$cb"
+      ;;
+    cinnamon)
+      _gsettings_for_users "org.cinnamon.desktop.lockdown" "disable-user-switching" "$cb"
+      ;;
+  esac
+}
+
+# DE-aware file indexer detection (GNOME Tracker / KDE Baloo / Recoll / etc.).
+# Returns description text via stdout, severity via exit code: 0=running,1=not.
+_de_check_file_indexer() {
+  case "$_DE_FAMILY" in
+    gnome)
+      local _u _uid _shell
+      while IFS=: read -r _u _ _uid _ _ _ _shell; do
+        [[ "$_uid" -ge 1000 && "$_uid" -lt 65534 ]] || continue
+        [[ "$_shell" == */nologin || "$_shell" == */false ]] && continue
+        if sudo -u "$_u" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${_uid}/bus" \
+             systemctl --user is-active --quiet tracker-miner-fs-3.service 2>/dev/null \
+           || sudo -u "$_u" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${_uid}/bus" \
+             systemctl --user is-active --quiet tracker-miner-fs.service 2>/dev/null \
+           || sudo -u "$_u" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${_uid}/bus" \
+             systemctl --user is-active --quiet localsearch-3.service 2>/dev/null; then
+          echo "GNOME Tracker"; return 0
+        fi
+      done < /etc/passwd
+      echo "GNOME Tracker"; return 1
+      ;;
+    kde)
+      if pgrep -x baloo_file &>/dev/null || pgrep -x baloo_file_extractor &>/dev/null; then
+        echo "KDE Baloo"; return 0
+      fi
+      echo "KDE Baloo"; return 1
+      ;;
+    *)
+      # Recoll/Strigi/etc — generic process check
+      if pgrep -x recoll &>/dev/null || pgrep -x recollindex &>/dev/null; then
+        echo "Recoll"; return 0
+      fi
+      echo "any"; return 1
+      ;;
+  esac
+}
+
 # Snapshot/backup/container-aware find for system-wide scans.
 # Excludes:
 # - Snapper (/.snapshots, /home/.snapshots, /var/.snapshots) — btrfs subvolumes
@@ -3127,21 +3318,27 @@ if require_cmd loginctl; then
   fi
 fi
 
-# Screen Lock (per-user via DBUS)
-if require_cmd gsettings; then
-  _gs_lock_check_cb() {
-    local user="$1" uid="$2" val
-    val=$(echo "$3" | xargs)
-    if [[ "$val" == "true" ]]; then
-      local delay
-      delay=$(_gsettings_user "$user" "$uid" "org.gnome.desktop.screensaver" "lock-delay" 2>/dev/null)
-      pass "Screen lock: enabled (delay: ${delay:-?}) [$user]"
-    elif [[ "$val" == "false" ]]; then
-      warn "Screen lock: disabled [$user]"
-    fi
-  }
-  _gsettings_for_users "org.gnome.desktop.screensaver" "lock-enabled" _gs_lock_check_cb
-fi
+# Screen Lock (per-user, DE-aware: GNOME / KDE Plasma / XFCE / MATE / Cinnamon)
+_de_lock_check_cb() {
+  local user="$1" val
+  val=$(echo "$3" | xargs | tr '[:upper:]' '[:lower:]')
+  _DE_LOCK_FOUND=1
+  case "$val" in
+    true|1) pass "Screen lock: enabled [$user, $_DE_FAMILY]" ;;
+    false|0) warn "Screen lock: disabled [$user, $_DE_FAMILY]" ;;
+  esac
+}
+_DE_LOCK_FOUND=0
+case "$_DE_FAMILY" in
+  gnome|cinnamon|mate)
+    require_cmd gsettings && _de_check_screen_lock _de_lock_check_cb
+    ;;
+  kde|xfce)
+    _de_check_screen_lock _de_lock_check_cb
+    ;;
+esac
+[[ "$_DE_LOCK_FOUND" -eq 0 && "$_DE_FAMILY" != "unknown" ]] && \
+  info "Screen lock: no active $_DE_FAMILY session found for check"
 
 # Auto-Login — detailed check in Section 39 (Desktop Session Security)
 if [[ -f /etc/gdm/custom.conf ]] || [[ -f /etc/gdm3/custom.conf ]]; then
@@ -4048,24 +4245,14 @@ check_app_telemetry() {
 
   _for_each_user _at_check_user
 
-  local _tracker_running=false
-  while IFS=: read -r _tu _ _tuid _ _ _ _tshell; do
-    [[ "$_tuid" -ge 1000 && "$_tuid" -lt 65534 ]] || continue
-    [[ "$_tshell" == */nologin || "$_tshell" == */false ]] && continue
-    if sudo -u "$_tu" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${_tuid}/bus" \
-       systemctl --user is-active --quiet tracker-miner-fs-3.service 2>/dev/null || \
-       sudo -u "$_tu" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${_tuid}/bus" \
-       systemctl --user is-active --quiet tracker-miner-fs.service 2>/dev/null || \
-       sudo -u "$_tu" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${_tuid}/bus" \
-       systemctl --user is-active --quiet localsearch-3.service 2>/dev/null; then
-      _tracker_running=true
-      break
-    fi
-  done < /etc/passwd
-  if $_tracker_running; then
-    warn "GNOME Tracker file indexer active — indexes all files"
+  # File indexer detection — DE-aware (GNOME Tracker, KDE Baloo, Recoll, ...)
+  local _idx_name _idx_rc
+  _idx_name=$(_de_check_file_indexer)
+  _idx_rc=$?
+  if [[ "$_idx_rc" -eq 0 ]]; then
+    warn "$_idx_name file indexer active — indexes file contents (privacy: stores in user DB)"
   else
-    pass "GNOME Tracker file indexer not running"
+    pass "$_idx_name file indexer not running"
   fi
 
   if command -v flatpak &>/dev/null; then
@@ -4515,10 +4702,19 @@ check_data_privacy() {
       clip_found=true
     fi
   done
-  # KDE klipper: special-cased — it's the DE default
+  # KDE klipper: read klipperrc to determine if history is actually disabled
   if pgrep -x klipper &>/dev/null; then
     if [[ "$_DE_FAMILY" == "kde" ]]; then
-      info "Klipper running (KDE default) — disable clipboard history in System Settings for max privacy"
+      _kde_klipper_history_check() {
+        local val
+        val=$(echo "$3" | xargs | tr '[:upper:]' '[:lower:]')
+        # KeepClipboardContents=false → history disabled (good for privacy)
+        case "$val" in
+          false|0) pass "Klipper running with history disabled [$1, KDE]" ;;
+          true|1)  info "Klipper running with history (KDE default — disable in System Settings → Clipboard) [$1]" ;;
+        esac
+      }
+      _kreadconfig_for_users "klipperrc" "General" "KeepClipboardContents" _kde_klipper_history_check
     else
       warn "Klipper running outside KDE — may store passwords in memory"
     fi
@@ -4579,78 +4775,119 @@ check_desktop_session() {
   should_skip "session" && return
   header "39" "DESKTOP SESSION SECURITY"
 
+  # Section 39 lock-related checks — DE-aware via dispatchers (F-246/247/248/254).
+  # KDE LockGrace, Timeout, LockOnResume; XFCE /lock/delay-from-activation,
+  # /idle-activation/delay; MATE/Cinnamon use their own gsettings schemas.
+
   local found_lock_delay=0
-  _gs_lock_delay_cb() {
+  _de_lock_delay_cb() {
     found_lock_delay=1
     local delay
     delay=$(echo "$3" | sed "s/uint32 //;s/'//g" | tr -d ' ')
     [[ "$delay" =~ ^[0-9]+$ ]] || return
     if [[ "$delay" == "0" ]]; then
-      pass "Screen lock delay is 0 (instant) for $1"
+      pass "Screen lock delay is 0 (instant) for $1 [$_DE_FAMILY]"
     else
-      fail "Screen lock delay is ${delay}s for $1 (should be 0)"
+      fail "Screen lock delay is ${delay}s for $1 (should be 0) [$_DE_FAMILY]"
     fi
   }
-  _gsettings_for_users "org.gnome.desktop.screensaver" "lock-delay" _gs_lock_delay_cb
-  [[ "$found_lock_delay" -eq 0 ]] && info "No active GNOME sessions found for lock-delay check"
+  case "$_DE_FAMILY" in
+    gnome)    _gsettings_for_users  "org.gnome.desktop.screensaver" "lock-delay"            _de_lock_delay_cb ;;
+    kde)      _kreadconfig_for_users "kscreenlockerrc" "Daemon"      "LockGrace"             _de_lock_delay_cb ;;
+    xfce)     _xfconf_for_users     "xfce4-screensaver" "/lock/delay-from-activation"        _de_lock_delay_cb ;;
+    mate)     _gsettings_for_users  "org.mate.screensaver" "lock-delay"                      _de_lock_delay_cb ;;
+    cinnamon) _gsettings_for_users  "org.cinnamon.desktop.screensaver" "lock-delay"          _de_lock_delay_cb ;;
+  esac
+  [[ "$found_lock_delay" -eq 0 && "$_DE_FAMILY" != "unknown" ]] && \
+    info "No active $_DE_FAMILY sessions found for lock-delay check"
 
   local found_idle=0
-  _gs_idle_cb() {
+  _de_idle_cb() {
     found_idle=1
-    local delay
-    delay=$(echo "$3" | sed "s/uint32 //;s/'//g" | tr -d ' ')
-    [[ "$delay" =~ ^[0-9]+$ ]] || return
+    local raw
+    raw=$(echo "$3" | sed "s/uint32 //;s/'//g" | tr -d ' ')
+    [[ "$raw" =~ ^[0-9]+$ ]] || return
+    # KDE Timeout and XFCE /idle-activation/delay are in MINUTES, normalize to seconds
+    local delay="$raw"
+    case "$_DE_FAMILY" in
+      kde|xfce) delay=$((raw * 60)) ;;
+    esac
     if [[ "$delay" == "0" ]]; then
-      warn "Idle timeout disabled for $1 (screen never blanks)"
+      warn "Idle timeout disabled for $1 (screen never blanks) [$_DE_FAMILY]"
     elif [[ "$delay" -le 300 ]]; then
-      pass "Idle timeout is ${delay}s for $1"
+      pass "Idle timeout is ${delay}s for $1 [$_DE_FAMILY]"
     else
-      fail "Idle timeout is ${delay}s for $1 (should be ≤ 300)"
+      fail "Idle timeout is ${delay}s for $1 (should be ≤ 300) [$_DE_FAMILY]"
     fi
   }
-  _gsettings_for_users "org.gnome.desktop.session" "idle-delay" _gs_idle_cb
-  [[ "$found_idle" -eq 0 ]] && info "No active GNOME sessions found for idle-delay check"
+  case "$_DE_FAMILY" in
+    gnome)    _gsettings_for_users  "org.gnome.desktop.session"      "idle-delay"     _de_idle_cb ;;
+    kde)      _kreadconfig_for_users "kscreenlockerrc" "Daemon"        "Timeout"        _de_idle_cb ;;
+    xfce)     _xfconf_for_users     "xfce4-screensaver" "/idle-activation/delay"      _de_idle_cb ;;
+    mate)     _gsettings_for_users  "org.mate.session"               "idle-delay"      _de_idle_cb ;;
+    cinnamon) _gsettings_for_users  "org.cinnamon.desktop.session"   "idle-delay"      _de_idle_cb ;;
+  esac
+  [[ "$found_idle" -eq 0 && "$_DE_FAMILY" != "unknown" ]] && \
+    info "No active $_DE_FAMILY sessions found for idle-delay check"
 
   local found_lock_suspend=0
-  _gs_lock_suspend_cb() {
+  _de_lock_suspend_cb() {
     found_lock_suspend=1
     local val
-    val=$(echo "$3" | xargs)
-    if [[ "$val" == "true" ]]; then
-      pass "Lock on suspend enabled for $1"
-    else
-      fail "Lock on suspend disabled for $1"
-    fi
+    val=$(echo "$3" | xargs | tr '[:upper:]' '[:lower:]')
+    case "$val" in
+      true|1)  pass "Lock on suspend enabled for $1 [$_DE_FAMILY]" ;;
+      false|0) fail "Lock on suspend disabled for $1 [$_DE_FAMILY]" ;;
+    esac
   }
-  _gs_lock_enabled_cb() {
-    found_lock_suspend=1
-    local val
-    val=$(echo "$3" | xargs)
-    if [[ "$val" == "true" ]]; then
-      pass "Screen locking enabled for $1"
-    else
-      fail "Screen locking disabled for $1"
-    fi
-  }
-  _gsettings_for_users "org.gnome.desktop.screensaver" "ubuntu-lock-on-suspend" _gs_lock_suspend_cb
-  if [[ "$found_lock_suspend" -eq 0 ]]; then
-    _gsettings_for_users "org.gnome.desktop.screensaver" "lock-enabled" _gs_lock_enabled_cb
-  fi
-  [[ "$found_lock_suspend" -eq 0 ]] && info "No active GNOME sessions found for lock-on-suspend check"
+  case "$_DE_FAMILY" in
+    gnome)
+      _gsettings_for_users "org.gnome.desktop.screensaver" "ubuntu-lock-on-suspend" _de_lock_suspend_cb
+      # Fallback — Ubuntu's lock-on-suspend key is missing on upstream GNOME
+      [[ "$found_lock_suspend" -eq 0 ]] && \
+        _gsettings_for_users "org.gnome.desktop.screensaver" "lock-enabled" _de_lock_suspend_cb
+      ;;
+    kde)
+      _kreadconfig_for_users "kscreenlockerrc" "Daemon" "LockOnResume" _de_lock_suspend_cb
+      # KDE default is true if key absent — assume enabled when sessions exist but key unset
+      ;;
+    xfce|mate|cinnamon)
+      # No equivalent — fall back to "screen lock enabled" as proxy for lock-on-suspend
+      _de_check_screen_lock _de_lock_suspend_cb
+      ;;
+  esac
+  [[ "$found_lock_suspend" -eq 0 && "$_DE_FAMILY" != "unknown" ]] && \
+    info "No active $_DE_FAMILY sessions found for lock-on-suspend check"
 
   local found_notif=0
-  _gs_notif_cb() {
+  _de_notif_cb() {
     found_notif=1
     local val
-    val=$(echo "$3" | xargs)
-    if [[ "$val" == "false" ]]; then
-      pass "Lock screen notifications hidden for $1"
-    else
-      warn "Lock screen shows notification previews for $1"
-    fi
+    val=$(echo "$3" | xargs | tr '[:upper:]' '[:lower:]')
+    case "$_DE_FAMILY" in
+      gnome|cinnamon)
+        # show-in-lock-screen=false → notifications hidden (good)
+        case "$val" in
+          false|0) pass "Lock screen notifications hidden for $1 [$_DE_FAMILY]" ;;
+          true|1)  warn "Lock screen shows notification previews for $1 [$_DE_FAMILY]" ;;
+        esac
+        ;;
+      kde)
+        # plasmanotifyrc DoNotDisturb/WhenScreenLocked=true → notifications hidden (good)
+        case "$val" in
+          true|1)  pass "Lock screen notifications hidden for $1 [KDE DND]" ;;
+          false|0) warn "Lock screen shows notifications for $1 [KDE DND]" ;;
+        esac
+        ;;
+    esac
   }
-  _gsettings_for_users "org.gnome.desktop.notifications" "show-in-lock-screen" _gs_notif_cb
-  [[ "$found_notif" -eq 0 ]] && info "No active GNOME sessions for notification check"
+  case "$_DE_FAMILY" in
+    gnome)    _gsettings_for_users  "org.gnome.desktop.notifications" "show-in-lock-screen"  _de_notif_cb ;;
+    kde)      _kreadconfig_for_users "plasmanotifyrc" "DoNotDisturb"  "WhenScreenLocked"   _de_notif_cb ;;
+    cinnamon) _gsettings_for_users  "org.cinnamon.desktop.notifications" "display-notifications-on-lock-screen" _de_notif_cb ;;
+  esac
+  [[ "$found_notif" -eq 0 && "$_DE_FAMILY" != "unknown" ]] && \
+    info "Lock screen notification check not available for $_DE_FAMILY"
 
   local autologin_found=0
   for conf in /etc/gdm*/custom.conf /etc/gdm*/daemon.conf; do
@@ -4733,18 +4970,34 @@ check_desktop_session() {
   fi
 
   local found_switch=0
-  _gs_switch_cb() {
+  _de_switch_cb() {
     found_switch=1
     local val
-    val=$(echo "$3" | xargs)
-    if [[ "$val" == "true" ]]; then
-      pass "User switching restricted for $1"
-    else
-      info "User switching allowed for $1"
-    fi
+    val=$(echo "$3" | xargs | tr '[:upper:]' '[:lower:]')
+    case "$_DE_FAMILY" in
+      gnome|cinnamon)
+        # disable-user-switching=true → restricted (good for kiosk/lab)
+        case "$val" in
+          true|1)  pass "User switching restricted for $1 [$_DE_FAMILY]" ;;
+          false|0) info "User switching allowed for $1 [$_DE_FAMILY]" ;;
+        esac
+        ;;
+      kde)
+        # KDE Action Restrictions/action/start_new_session: false=restricted (good)
+        case "$val" in
+          false|0) pass "User switching restricted for $1 [KDE]" ;;
+          true|1)  info "User switching allowed for $1 [KDE]" ;;
+        esac
+        ;;
+    esac
   }
-  _gsettings_for_users "org.gnome.desktop.lockdown" "disable-user-switching" _gs_switch_cb
-  [[ "$found_switch" -eq 0 ]] && info "No active sessions for user-switch check"
+  case "$_DE_FAMILY" in
+    gnome)    _gsettings_for_users  "org.gnome.desktop.lockdown" "disable-user-switching"        _de_switch_cb ;;
+    kde)      _kreadconfig_for_users "kdeglobals" "KDE Action Restrictions" "action/start_new_session" _de_switch_cb ;;
+    cinnamon) _gsettings_for_users  "org.cinnamon.desktop.lockdown" "disable-user-switching"     _de_switch_cb ;;
+  esac
+  [[ "$found_switch" -eq 0 && "$_DE_FAMILY" != "unknown" ]] && \
+    info "No user-switching policy found for $_DE_FAMILY sessions"
 
   local userlist_checked=0
   for conf in /etc/gdm*/custom.conf /etc/gdm*/daemon.conf; do
@@ -4989,15 +5242,22 @@ check_keyring_security() {
     warn "No password manager detected (consider keepassxc, bitwarden, or pass)"
   fi
 
+  # F-264: Cross-DE keyring PAM detection — GNOME Keyring + KDE KWallet (pam_kwallet5)
   local keyring_pam=0
-  for pamfile in /etc/pam.d/gdm-password /etc/pam.d/gdm-autologin /etc/pam.d/login /etc/pam.d/lightdm; do
+  for pamfile in /etc/pam.d/gdm-password /etc/pam.d/gdm-autologin /etc/pam.d/login \
+                 /etc/pam.d/lightdm /etc/pam.d/sddm /etc/pam.d/sddm-autologin \
+                 /etc/pam.d/kde /etc/pam.d/kdm; do
     [[ -f "$pamfile" ]] || continue
     if grep -qs 'pam_gnome_keyring.so' "$pamfile"; then
       keyring_pam=1
       info "GNOME Keyring auto-unlock configured in $(basename "$pamfile")"
     fi
+    if grep -qs -E 'pam_kwallet5?\.so' "$pamfile"; then
+      keyring_pam=1
+      info "KDE KWallet auto-unlock configured in $(basename "$pamfile")"
+    fi
   done
-  [[ "$keyring_pam" -eq 0 ]] && info "GNOME Keyring PAM auto-unlock not found"
+  [[ "$keyring_pam" -eq 0 ]] && info "No keyring PAM auto-unlock found (GNOME Keyring/KWallet)"
 
   local ssh_checked=0
   while IFS=: read -r user _ uid _ _ home shell; do
