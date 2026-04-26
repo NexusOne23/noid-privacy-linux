@@ -110,6 +110,22 @@ PASS=0; FAIL=0; WARN=0; INFO=0
 TOTAL_START=$(date +%s)
 TOTAL_SECTIONS=42
 
+# F-008: graceful SIGINT/SIGTERM handler. Long-running checks (rpm -Va,
+# ausearch, find /) can take minutes; without trap, Ctrl-C kills the script
+# mid-output with no summary. Print partial results and exit with standard
+# 130 (SIGINT) or 143 (SIGTERM) so wrappers can distinguish from clean
+# exit codes (0/1/2 from F-007 final block).
+_noid_interrupted() {
+  local sig="$1" rc="$2"
+  echo "" >&2
+  printf '\n  ⚠️  Interrupted by %s — partial results:\n' "$sig" >&2
+  printf '     PASS=%s FAIL=%s WARN=%s INFO=%s (scan incomplete)\n' \
+    "${PASS:-0}" "${FAIL:-0}" "${WARN:-0}" "${INFO:-0}" >&2
+  exit "$rc"
+}
+trap '_noid_interrupted INT 130'  INT
+trap '_noid_interrupted TERM 143' TERM
+
 # Safe count: reads stdin, strips all non-digit characters, returns the number (or 0).
 # Used after `wc -l | ccount` or `grep -c | ccount` to handle whitespace and empty output.
 ccount() { local v; v=$(cat); v=${v//[^0-9]/}; echo "${v:-0}"; }
@@ -256,14 +272,17 @@ _gsettings_user() {
 }
 
 _human_size() {
+  # F-002: Use IEC binary prefixes (GiB/MiB/KiB) since values use 2^30/2^20/2^10
+  # boundaries — labelling them GB/MB/KB (SI = 10^9/10^6/10^3) is technically
+  # incorrect and confuses users comparing to drive marketing capacities.
   local bytes="${1:-0}"
   [[ "$bytes" =~ ^[0-9]+$ ]] || { echo "0B"; return; }
   if [[ "$bytes" -ge 1073741824 ]]; then
-    echo "$(( bytes / 1073741824 ))GB"
+    echo "$(( bytes / 1073741824 ))GiB"
   elif [[ "$bytes" -ge 1048576 ]]; then
-    echo "$(( bytes / 1048576 ))MB"
+    echo "$(( bytes / 1048576 ))MiB"
   elif [[ "$bytes" -ge 1024 ]]; then
-    echo "$(( bytes / 1024 ))KB"
+    echo "$(( bytes / 1024 ))KiB"
   else
     echo "${bytes}B"
   fi
@@ -273,17 +292,20 @@ _human_size() {
 # Usage: _systemd_conf_val <unit_conf> <key>
 # Example: _systemd_conf_val /etc/systemd/coredump.conf Storage
 _systemd_conf_val() {
+  # F-003: previously used `cut -d= -f2` which truncates values containing '='
+  # (e.g. Environment=FOO=bar would lose '=bar'). Now uses sed to capture
+  # everything after the first '=' and trims surrounding whitespace.
   local base_conf="$1" key="$2" val=""
   local dropin_dir="${base_conf%.conf}.conf.d"
   # Main config
   if [[ -f "$base_conf" ]]; then
-    val=$(grep -i "^${key}\s*=" "$base_conf" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d ' ')
+    val=$(grep -i "^${key}\s*=" "$base_conf" 2>/dev/null | tail -1 | sed -E 's/^[^=]+=[[:space:]]*//' | sed -E 's/[[:space:]]+$//')
   fi
   # Drop-in overrides (alphabetical, last one wins)
   for dropin in "${dropin_dir}"/*.conf; do
     [[ -f "$dropin" ]] || continue
     local dval
-    dval=$(grep -i "^${key}\s*=" "$dropin" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d ' ')
+    dval=$(grep -i "^${key}\s*=" "$dropin" 2>/dev/null | tail -1 | sed -E 's/^[^=]+=[[:space:]]*//' | sed -E 's/[[:space:]]+$//')
     [[ -n "$dval" ]] && val="$dval"
   done
   echo "$val"
@@ -5636,3 +5658,17 @@ else
 fi
 
 fi # end summary
+
+# F-007: explicit exit code so CI/automation can distinguish results.
+# Convention (matches Lynis/OpenSCAP/Tripwire):
+#   0 = clean (no FAIL)
+#   1 = FAIL findings present
+#   2 = WARN-only (informational signal — no failures but issues to review)
+# entrypoint.sh wraps this for the GitHub Action, so exit codes here are
+# stable contract for shell users and CI consumers.
+if [[ "${FAIL:-0}" -gt 0 ]]; then
+  exit 1
+elif [[ "${WARN:-0}" -gt 0 ]]; then
+  exit 2
+fi
+exit 0

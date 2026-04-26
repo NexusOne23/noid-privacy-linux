@@ -44,8 +44,16 @@ MIN_SCORE_THRESHOLD="${INPUT_FAIL_THRESHOLD:-0}"
 echo "::group::Running NoID Privacy Audit"
 echo "Command: ${CMD[*]}"
 
-JSON_OUTPUT=$("${CMD[@]}" 2>/dev/null) || true
+# F-271 wired to F-007: capture audit exit code so we can distinguish
+# clean (0) / FAIL-present (1) / WARN-only (2) / interrupted (130/143)
+# from JSON-parse failures further down. `set -euo pipefail` would kill
+# us on rc>0 from the audit, so wrap explicitly.
+set +e
+JSON_OUTPUT=$("${CMD[@]}" 2>/dev/null)
+AUDIT_EXIT=$?
+set -e
 echo "::endgroup::"
+echo "Audit exit code: ${AUDIT_EXIT}"
 
 # --- Parse JSON ---
 if ! echo "$JSON_OUTPUT" | jq -e '.summary' >/dev/null 2>&1; then
@@ -176,3 +184,15 @@ if [[ "$MIN_SCORE_THRESHOLD" -gt 0 ]] && [[ "$SCORE" -lt "$MIN_SCORE_THRESHOLD" 
   echo "::error::Security score ${SCORE}% is below minimum threshold ${MIN_SCORE_THRESHOLD}%"
   exit 1
 fi
+
+# Note: the audit script itself returns:
+#   0 = clean (no FAIL)
+#   1 = FAIL present (the score-threshold check above already handled this case)
+#   2 = WARN-only
+# We deliberately do NOT propagate rc=2 as a job failure — it's informational
+# and would make every cosmetic warning fail the workflow. Users who want
+# strict mode can use a higher fail-threshold input or check `outputs.warn`.
+if [[ "$AUDIT_EXIT" -eq 130 || "$AUDIT_EXIT" -eq 143 ]]; then
+  echo "::warning::Audit was interrupted (signal-induced exit ${AUDIT_EXIT})"
+fi
+exit 0
