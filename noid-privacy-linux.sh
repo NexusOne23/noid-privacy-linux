@@ -723,16 +723,32 @@ case "${DESKTOP_ENV,,}" in
 esac
 
 # --- Dynamic Interface & Gateway Detection ---
+# F-005: VPN-interface regex now covers Tailscale/ZeroTier/Nebula/Mullvad
+# in addition to OpenVPN/WireGuard/Proton.
+_VPN_IFACE_REGEX='^(tun|tap|wg|proton|pvpn|tailscale|zt|nebula|mullvad|nordlynx)'
+
 PRIMARY_IFACE=$(ip route show default 2>/dev/null | grep -oP 'dev \K\S+' | head -1)
-if [[ -z "$PRIMARY_IFACE" ]] || echo "$PRIMARY_IFACE" | grep -qE "^(tun|wg|proton|pvpn)"; then
-  PRIMARY_IFACE=$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep -vE '^(lo|tun|wg|proton|pvpn|docker|br-|veth)' | head -1)
+if [[ -z "$PRIMARY_IFACE" ]] || echo "$PRIMARY_IFACE" | grep -qE "$_VPN_IFACE_REGEX"; then
+  PRIMARY_IFACE=$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' \
+    | grep -vE "^(lo|docker|br-|veth|virbr|cni|flannel|calico|kube)|$_VPN_IFACE_REGEX" \
+    | head -1)
 fi
 PRIMARY_IFACE="${PRIMARY_IFACE:-eth0}"
 
+# F-070: when VPN is up, lowest-metric default gateway is the VPN gateway,
+# not the physical LAN gateway. Find physical LAN gateway by filtering routes
+# whose interface matches a VPN pattern.
 ACTUAL_GW=$(ip route show default 2>/dev/null | grep -oP 'via \K\S+' | head -1)
+LAN_GW=$(ip route show default 2>/dev/null | awk '{
+  for (i=1; i<=NF; i++) if ($i=="via") via=$(i+1)
+  for (i=1; i<=NF; i++) if ($i=="dev") dev=$(i+1)
+  if (dev !~ /^(tun|tap|wg|proton|pvpn|tailscale|zt|nebula|mullvad|nordlynx)/) print via
+}' | head -1)
+LAN_GW="${LAN_GW:-$ACTUAL_GW}"
 
 # VPN interfaces (dynamic)
-VPN_IFACES=$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep -E '^(tun|wg|proton|pvpn)' | tr '\n' ' ')
+VPN_IFACES=$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' \
+  | grep -E "$_VPN_IFACE_REGEX" | tr '\n' ' ')
 
 # Helper: check if any nftables rule drops traffic on the physical interface
 has_nft_drop_on_phys() {
@@ -820,15 +836,40 @@ else
   warn "Kernel Lockdown: not available"
 fi
 
-# Kernel Taint
+# Kernel Taint — F-021: decode all 19 bits per Documentation/admin-guide/tainted-kernels.rst
+# Severity tier: PROPRIETARY/OOT/CRAP/AUX/LIVEPATCH/RANDSTRUCT/UNSIGNED/TEST = informational
+# (legitimate use), all others (DIE/FORCED_MODULE/OVERRIDDEN/WARNING/MACHINE_CHECK/etc) = warn
 TAINT=$(< /proc/sys/kernel/tainted)
 if [[ "$TAINT" -eq 0 ]]; then
   pass "Kernel Taint: 0 (clean)"
 else
-  if (( TAINT & 4096 )) || (( TAINT & 1 )); then
-    info "Kernel Taint: $TAINT (proprietary/out-of-tree module — expected with NVIDIA)"
+  declare -A _TAINT_FLAGS=(
+    [1]="PROPRIETARY"      [2]="FORCED_MODULE"      [4]="UNSAFE_SMP"
+    [8]="FORCED_RMMOD"     [16]="MACHINE_CHECK"     [32]="BAD_PAGE"
+    [64]="USER"            [128]="DIE"              [256]="OVERRIDDEN_ACPI_TABLE"
+    [512]="WARNING"        [1024]="CRAP"            [2048]="FIRMWARE_WORKAROUND"
+    [4096]="OOT_MODULE"    [8192]="UNSIGNED_MODULE" [16384]="SOFTLOCKUP"
+    [32768]="LIVEPATCH"    [65536]="AUX"            [131072]="RANDSTRUCT"
+    [262144]="TEST"
+  )
+  # Bits that indicate user choice rather than runtime trouble
+  declare -a _TAINT_BENIGN=(1 4096 1024 65536 131072 32768 8192 262144)
+  declare -A _TAINT_BENIGN_MAP=()
+  for _b in "${_TAINT_BENIGN[@]}"; do _TAINT_BENIGN_MAP[$_b]=1; done
+
+  _decoded=""
+  _all_benign=true
+  for _bit in 1 2 4 8 16 32 64 128 256 512 1024 2048 4096 8192 16384 32768 65536 131072 262144; do
+    if (( TAINT & _bit )); then
+      _decoded+="${_TAINT_FLAGS[$_bit]}+"
+      [[ -z "${_TAINT_BENIGN_MAP[$_bit]:-}" ]] && _all_benign=false
+    fi
+  done
+  _decoded="${_decoded%+}"
+  if $_all_benign; then
+    info "Kernel Taint: $TAINT ($_decoded — known-benign flags)"
   else
-    warn "Kernel Taint: $TAINT (unexpected taint flags)"
+    warn "Kernel Taint: $TAINT ($_decoded — review flags)"
   fi
 fi
 
@@ -849,12 +890,19 @@ for PARAM in "init_on_alloc=1" "init_on_free=1" "slab_nomerge" "pti=on" "vsyscal
   fi
 done
 
-# Grub cmdline security params (new)
+# F-026: spec_store_bypass_disable=on is only required on CPUs vulnerable to
+# Spectre v4. Modern Intel (Alder Lake+) and AMD Zen3+ have hardware mitigation
+# and don't need the boot param. Read CPU vuln state to decide WARN vs INFO.
 PARAM="spec_store_bypass_disable=on"
+_SSB_STATE=$(cat /sys/devices/system/cpu/vulnerabilities/spec_store_bypass 2>/dev/null)
 if echo "$CMDLINE" | grep -qw "$PARAM"; then
   pass "Boot security param: $PARAM"
+elif [[ "$_SSB_STATE" == "Not affected" ]]; then
+  info "Boot security param '$PARAM' not set — CPU not affected by Spectre v4 (HW mitigation)"
+elif [[ "$_SSB_STATE" =~ Mitigation ]]; then
+  info "Boot security param '$PARAM' not set — CPU already mitigated ($_SSB_STATE)"
 else
-  warn "Boot security param missing: $PARAM"
+  warn "Boot security param missing: $PARAM (CPU state: ${_SSB_STATE:-unknown})"
 fi
 # Optional params (can break NVIDIA/hardware on desktop systems)
 for PARAM in "iommu=force" "lockdown=confidentiality"; do
@@ -1240,7 +1288,8 @@ if require_cmd nft; then
     # Duplicate rule check
     ALL_RULES=""
     while read -r ks_family ks_table; do
-      ALL_RULES+=$(nft list table "$ks_family" "$ks_table" 2>/dev/null | grep "oifname")
+      # F-054: only count drop rules — accept rules are not kill-switch material
+      ALL_RULES+=$(nft list table "$ks_family" "$ks_table" 2>/dev/null | grep -E "oifname.*\<drop\>")
       ALL_RULES+=$'\n'
     done <<< "$KS_TABLES"
     RULE_COUNT=$(echo "$ALL_RULES" | grep -c "oifname" || true)
@@ -1335,7 +1384,27 @@ done
 if $VPN_DNS; then
   pass "DNS via VPN (private/CGNAT range)"
 elif $STUB_DNS && $VPN_UP; then
-  pass "DNS via systemd-resolved (stub resolver — VPN routes DNS)"
+  # F-062: stub resolver alone doesn't prove VPN routing — query upstream via
+  # resolvectl to verify the actual DNS server falls into a VPN range.
+  if require_cmd resolvectl; then
+    _UPSTREAM_DNS=$(resolvectl status 2>/dev/null | awk '/Current DNS Server/ {print $4; exit}')
+    if [[ -z "$_UPSTREAM_DNS" ]]; then
+      _UPSTREAM_DNS=$(resolvectl status 2>/dev/null | grep -A1 "DNS Servers" | tail -1 | awk '{print $1}')
+    fi
+    if [[ -n "$_UPSTREAM_DNS" ]] && \
+       [[ "$_UPSTREAM_DNS" =~ ^10\. || \
+          "$_UPSTREAM_DNS" =~ ^172\.(1[6-9]|2[0-9]|3[01])\. || \
+          "$_UPSTREAM_DNS" =~ ^192\.168\. || \
+          "$_UPSTREAM_DNS" =~ ^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\. ]]; then
+      pass "DNS via systemd-resolved (upstream $_UPSTREAM_DNS in VPN range)"
+    elif [[ -n "$_UPSTREAM_DNS" ]]; then
+      info "DNS via systemd-resolved (upstream: $_UPSTREAM_DNS — verify it routes via VPN)"
+    else
+      pass "DNS via systemd-resolved (stub resolver — VPN routes DNS)"
+    fi
+  else
+    pass "DNS via systemd-resolved (stub resolver — VPN routes DNS)"
+  fi
 else
   if $VPN_UP; then
     warn "DNS servers not on VPN network (potential DNS leak)"
@@ -1405,10 +1474,19 @@ else
   pass "IPv6: completely disabled"
 fi
 
-# LAN Isolation
-LAN_GW_LIST="192.168.1.1 192.168.0.1 10.0.0.1"
-if [[ -n "$ACTUAL_GW" ]]; then
-  LAN_GW_LIST="$ACTUAL_GW $LAN_GW_LIST"
+# LAN Isolation — F-069: extend gateway list with common defaults beyond
+# the original 3 (Fritz!Box DE, Speedport DE, corporate, Asus, USG).
+# Plus dynamically learned LAN_GW (F-070, picks physical iface gateway not VPN).
+LAN_GW_LIST="192.168.1.1 192.168.0.1 192.168.2.1 192.168.50.1 192.168.178.1 \
+             10.0.0.1 10.0.0.138 10.0.1.1 172.16.0.1"
+[[ -n "$LAN_GW" ]] && LAN_GW_LIST="$LAN_GW $LAN_GW_LIST"
+[[ -n "$ACTUAL_GW" && "$ACTUAL_GW" != "$LAN_GW" ]] && LAN_GW_LIST="$ACTUAL_GW $LAN_GW_LIST"
+# Plus any reachable neighbors from ARP table (already-known L2 peers)
+if require_cmd ip; then
+  while read -r _arp; do
+    [[ -z "$_arp" ]] && continue
+    LAN_GW_LIST="$_arp $LAN_GW_LIST"
+  done < <(ip neigh show 2>/dev/null | awk '/REACHABLE|STALE/ && $1 ~ /^(10\.|172\.|192\.168\.|169\.254\.)/ {print $1}' | head -5)
 fi
 TESTED_GWS=""
 for GW in $LAN_GW_LIST; do
@@ -2155,16 +2233,47 @@ PASS_MIN=$(grep "^PASS_MIN_DAYS" /etc/login.defs | awk '{print $2}')
 PASS_WARN=$(grep "^PASS_WARN_AGE" /etc/login.defs | awk '{print $2}')
 info "Password policy: MAX=$PASS_MAX, MIN=$PASS_MIN, WARN=$PASS_WARN"
 
-# Umask Check (new)
-UMASK_VAL=$(grep -hiE '^\s*umask\s+' /etc/login.defs /etc/profile /etc/bashrc /etc/bash.bashrc /etc/profile.d/*.sh 2>/dev/null | tail -1 | awk '{print $2}')
-if [[ -n "$UMASK_VAL" ]]; then
-  if [[ "$UMASK_VAL" =~ ^0*27$ || "$UMASK_VAL" =~ ^0*77$ ]]; then
-    pass "Default umask: $UMASK_VAL (restrictive)"
+# Umask Check — F-105: scan all sources individually, report mismatches.
+# tail -1 across multi-file glob picks last match in alphabetic order which
+# != runtime precedence (login.defs is for login shells via PAM; /etc/profile
+# applies to interactive shells; profile.d/*.sh apply in alphabetic order).
+sub_header "Default umask"
+declare -A _UMASK_BY_FILE=()
+_UMASK_BY_FILE["/etc/login.defs"]=$(grep -iE '^\s*UMASK\s+' /etc/login.defs 2>/dev/null | tail -1 | awk '{print $2}')
+for _umf in /etc/profile /etc/bashrc /etc/bash.bashrc /etc/zsh/zshenv /etc/zsh/zshrc; do
+  [[ -f "$_umf" ]] || continue
+  _val=$(grep -hiE '^\s*umask\s+' "$_umf" 2>/dev/null | tail -1 | awk '{print $2}')
+  [[ -n "$_val" ]] && _UMASK_BY_FILE["$_umf"]="$_val"
+done
+for _umf in /etc/profile.d/*.sh /etc/profile.d/*.zsh; do
+  [[ -f "$_umf" ]] || continue
+  _val=$(grep -hiE '^\s*umask\s+' "$_umf" 2>/dev/null | tail -1 | awk '{print $2}')
+  [[ -n "$_val" ]] && _UMASK_BY_FILE["$_umf"]="$_val"
+done
+
+# Count distinct values; if multiple, list them all (potential conflict)
+declare -A _UMASK_DISTINCT=()
+for _file in "${!_UMASK_BY_FILE[@]}"; do
+  _v="${_UMASK_BY_FILE[$_file]}"
+  [[ -n "$_v" ]] && _UMASK_DISTINCT["$_v"]=1
+done
+if [[ "${#_UMASK_DISTINCT[@]}" -eq 0 ]]; then
+  warn "Default umask not explicitly set in any /etc/ source"
+elif [[ "${#_UMASK_DISTINCT[@]}" -eq 1 ]]; then
+  UMASK_VAL="${!_UMASK_DISTINCT[*]}"
+  if [[ "$UMASK_VAL" =~ ^0*(27|77)$ ]]; then
+    pass "Default umask: $UMASK_VAL (restrictive, consistent across /etc/)"
   else
     warn "Default umask: $UMASK_VAL (recommended: 027 or 077)"
   fi
 else
-  warn "Default umask not explicitly set"
+  # Conflicting umask values — likely runtime confusion, report all
+  _conflict_summary=""
+  for _file in "${!_UMASK_BY_FILE[@]}"; do
+    [[ -n "${_UMASK_BY_FILE[$_file]}" ]] && \
+      _conflict_summary+="${_file##*/}=${_UMASK_BY_FILE[$_file]}, "
+  done
+  warn "Default umask has CONFLICTING values across files: ${_conflict_summary%, } (last shell-init wins at runtime)"
 fi
 
 # Faillock
@@ -2184,19 +2293,38 @@ if require_cmd faillock; then
   fi
 fi
 
-# History File Permissions (new)
+# History File Permissions — F-109: extended coverage beyond bash/zsh.
+# Severity tier: shell histories (bash/zsh/fish) = warn on 077-loose perms;
+# app histories (Python/DB/etc) often contain tokens too — warn at higher
+# threshold (only world-readable group is fine for non-shell as those
+# typically don't store passwords typed inline).
 sub_header "History File Permissions"
+declare -a _SHELL_HISTS=(".bash_history" ".zsh_history" ".fish_history" ".local/share/fish/fish_history")
+declare -a _APP_HISTS=(".python_history" ".psql_history" ".mysql_history" ".sqlite_history"
+                       ".node_repl_history" ".lua_history" ".gdb_history" ".irb_history"
+                       ".lesshst" ".viminfo"
+                       ".local/share/nano/search_history"
+                       ".config/nvim/shada/main.shada")
 for USER_HOME in /home/* /root; do
   [[ -d "$USER_HOME" ]] || continue
-  for HIST in .bash_history .zsh_history; do
-    if [[ -f "$USER_HOME/$HIST" ]]; then
-      PERMS=$(stat -c %a "$USER_HOME/$HIST" 2>/dev/null)
-      if (( (8#${PERMS:-777} & 8#077) != 0 )); then
-        warn "History file too open: $USER_HOME/$HIST ($PERMS, should be 600 or stricter)"
-      else
-        pass "History file: $USER_HOME/$HIST ($PERMS)"
-      fi
+  # Shell histories: strict 077 check (passwords typed inline land here)
+  for HIST in "${_SHELL_HISTS[@]}"; do
+    [[ -f "$USER_HOME/$HIST" ]] || continue
+    PERMS=$(stat -c %a "$USER_HOME/$HIST" 2>/dev/null)
+    if (( (8#${PERMS:-777} & 8#077) != 0 )); then
+      warn "Shell history too open: $USER_HOME/$HIST ($PERMS, should be 600 or stricter)"
+    else
+      pass "Shell history: $USER_HOME/$HIST ($PERMS)"
     fi
+  done
+  # App histories: world-readable (007) bit is the danger; group access acceptable
+  for HIST in "${_APP_HISTS[@]}"; do
+    [[ -f "$USER_HOME/$HIST" ]] || continue
+    PERMS=$(stat -c %a "$USER_HOME/$HIST" 2>/dev/null)
+    if (( (8#${PERMS:-777} & 8#007) != 0 )); then
+      warn "App history world-readable: $USER_HOME/$HIST ($PERMS — may contain tokens/credentials)"
+    fi
+    # No PASS for app histories — too noisy at scale; user gets implicit pass via no-warn
   done
 done
 
