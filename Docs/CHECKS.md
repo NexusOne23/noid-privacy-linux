@@ -2,7 +2,7 @@
 
 Section-by-section overview of what the audit checks and why it matters.
 
-> **Version:** 3.4.0 | **Total Checks:** 390+ | **Sections:** 42
+> **Version:** 3.4.1 | **Total Checks:** 390+ | **Sections:** 42
 
 > **Note**: This is a high-level overview. For the full enumeration of every
 > individual check, severity-trigger conditions, and pass/fail values, read

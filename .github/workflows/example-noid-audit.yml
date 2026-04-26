@@ -25,7 +25,7 @@ jobs:
         # SECURITY: Pin to a specific version (or full commit SHA for max safety).
         # Never use @main in production workflows — supply chain risk.
         # See https://docs.github.com/en/actions/security-guides for guidance.
-        uses: NexusOne23/noid-privacy-linux@v3.3.0
+        uses: NexusOne23/noid-privacy-linux@v3.4.1
         with:
           fail-threshold: '70'
           # ai: 'true'        # Uncomment to generate AI remediation prompt

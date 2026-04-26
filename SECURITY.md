@@ -78,7 +78,7 @@ NoID Privacy for Linux is designed with security in mind:
 
 | Version | Supported          | Notes |
 | ------- | ------------------ | ----- |
-| 3.4.x   | ✅ Fully Supported | Current release — 6 critical bug fixes (false-FAIL elimination) |
+| 3.4.x   | ✅ Fully Supported | Current release — false-FAIL elimination + container-storage handling |
 | 3.3.x   | ⚠️ Limited Support  | Upgrade to 3.4.x recommended |
 | 3.1.x   | ⚠️ Limited Support  | Upgrade to 3.4.x recommended |
 | 2.0.x   | ❌ End of Life     | Upgrade to 3.4.x |

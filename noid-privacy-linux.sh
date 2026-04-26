@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 ###############################################################################
-#  NoID Privacy for Linux v3.4.0 — Privacy & Security Audit
+#  NoID Privacy for Linux v3.4.1 — Privacy & Security Audit
 #  Copyright (C) 2026 Fabio Mantegna (NexusOne23)
 #
 #  This program is free software: you can redistribute it and/or modify
@@ -21,7 +21,7 @@
 #  390+ checks across 42 sections
 #  Requires: root
 ###############################################################################
-NOID_PRIVACY_VERSION="3.4.0"
+NOID_PRIVACY_VERSION="3.4.1"
 set +e          # Don't exit on errors — we handle them ourselves
 
 # Bash 4+ required for associative arrays and other features

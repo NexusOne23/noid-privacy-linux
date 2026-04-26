@@ -5,7 +5,7 @@
 ### Privacy & Security Audit for Linux Desktops
 
 [![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](https://github.com/NexusOne23/noid-privacy-linux/blob/main/LICENSE)
-[![Version](https://img.shields.io/badge/version-3.4.0-green.svg)](https://github.com/NexusOne23/noid-privacy-linux/releases)
+[![Version](https://img.shields.io/badge/version-3.4.1-green.svg)](https://github.com/NexusOne23/noid-privacy-linux/releases)
 [![Pure Bash](https://img.shields.io/badge/pure-bash-4EAA25.svg?logo=gnu-bash&logoColor=white)](https://github.com/NexusOne23/noid-privacy-linux)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen.svg)](https://github.com/NexusOne23/noid-privacy-linux)
 [![Checks](https://img.shields.io/badge/checks-390%2B-orange.svg)](https://github.com/NexusOne23/noid-privacy-linux)
@@ -120,7 +120,7 @@ sudo bash noid-privacy-linux.sh --json
 ```
 $ sudo bash noid-privacy-linux.sh --ai
 
-  NoID Privacy for Linux v3.4.0 — Privacy & Security Audit for Linux Desktops
+  NoID Privacy for Linux v3.4.1 — Privacy & Security Audit for Linux Desktops
   YYYY-MM-DD HH:MM:SS | mydesktop | 6.19.x-200.fc43.x86_64
   Arch: x86_64 | Distro: Fedora Linux 43 (Workstation Edition)
   Checks: 390+ across 42 sections
@@ -215,7 +215,7 @@ Use NoID Privacy for Linux in your CI/CD pipeline to enforce privacy & security 
 ```yaml
 - name: Privacy & Security Audit
   # SECURITY: Pin to specific version, never @main (supply chain risk)
-  uses: NexusOne23/noid-privacy-linux@v3.3.0
+  uses: NexusOne23/noid-privacy-linux@v3.4.1
   id: audit
   with:
     fail-threshold: '70'   # Fail if score < 70%
@@ -249,7 +249,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4.2.2
-      - uses: NexusOne23/noid-privacy-linux@v3.3.0  # Pin to version, not @main
+      - uses: NexusOne23/noid-privacy-linux@v3.4.1  # Pin to version, not @main
         with:
           fail-threshold: '70'
 ```

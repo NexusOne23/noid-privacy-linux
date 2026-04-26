@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.4.1] - 2026-04-27
+
+### 🐛 Post-Release Fixup (after v3.4.0 user testing)
+
+Live test on Snapper+Podman+bootc-build system revealed remaining FPs that
+v3.4.0 didn't catch:
+
+- **`_safe_find_root` extended**: Excludes `/var/lib/containers/storage/*`
+  (Podman default), `/var/lib/docker/*`, `/var/lib/lxd/*`, `/var/lib/lxc/*`,
+  `/var/lib/machines/*`, and OSTree object stores (`*/ostree/repo/objects/*`).
+  Container/image-build systems had 60+ phantom SUIDs from layer overlays
+  containing complete /usr/bin trees with sudo/mount/passwd binaries.
+- **`_safe_find_home` extended**: Also excludes `__pycache__/*` and `target/*`
+  (Rust builds).
+- **Section 20 (Disk Usage)**: Now skips read-only image filesystems by both
+  type (iso9660, squashfs, erofs, cramfs, romfs) and mount-flag (`ro,`).
+  Previously FAILed on Fedora ISO loopback mounts (always 100% full by design).
+- **Section 39 (VNC/RDP detection)**: Distinguishes localhost-only (INFO —
+  qemu SPICE/VNC console, normal for VM development) from externally-bound
+  (WARN). Previously WARNed on every system running qemu-system with SPICE.
+- **Section 42 (Plaintext secrets)**: Severity-tiered by permissions:
+  - World-accessible (007 bits): FAIL
+  - Group-accessible (070 bits): WARN
+  - Private (600/400): INFO with "consider encrypting" hint
+
+  Previously FAILed on private dev `.env` files which is normal workflow.
+
+Verified on auditor's system: SUID count 81 → 15 (matches actual rootfs count).
+
+---
+
 ## [3.4.0] - 2026-04-27
 
 ### 🔥 Critical Bug Fixes (False-FAIL elimination)
