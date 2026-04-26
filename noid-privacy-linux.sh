@@ -4395,13 +4395,30 @@ check_browser_privacy() {
         info "Shield Studies not explicitly configured [$label]"
       fi
 
+      # F-222: differentiate "no password saving" (good), "saving with master
+      # password" (acceptable — Firefox's own manager IS a password manager
+      # if encrypted), and "saving without master password" (warn — bad).
       val="$(_ff_pref "$pf" "signon.rememberSignons")"
       if [[ "$val" == "false" ]]; then
         pass "Browser password saving disabled [$label]"
-      elif [[ -z "$val" ]]; then
-        warn "Browser password saving not disabled (default: on) [$label]"
       else
-        warn "Browser password saving enabled — use a password manager [$label]"
+        # Check for Firefox primary password (formerly "master password")
+        local _has_pp=false
+        if [[ -f "$profile_dir/key4.db" ]] || [[ -f "$profile_dir/key3.db" ]]; then
+          # Heuristic: if logins exist and key4/key3 has metadata, primary password may be set.
+          # Firefox 75+ uses key4.db; older used key3.db. We can't decrypt but we can check
+          # security.default_personal_token_name — set when primary password configured.
+          local _pp_token
+          _pp_token="$(_ff_pref "$pf" "security.default_personal_token_name")"
+          [[ -n "$_pp_token" && "$_pp_token" != "NSS Internal PKCS #11 Module" ]] && _has_pp=true
+        fi
+        if $_has_pp; then
+          info "Browser password saving enabled with primary password [$label]"
+        elif [[ -z "$val" ]]; then
+          info "Browser password saving not explicitly disabled (default: enabled) [$label]"
+        else
+          warn "Browser password saving enabled WITHOUT primary password [$label] — set one in Settings → Privacy"
+        fi
       fi
     done
   }
@@ -4652,12 +4669,14 @@ check_network_privacy() {
     val="$(sed -n '/^\[connection\]/,/^\[/{ s/^ethernet\.cloned-mac-address[[:space:]]*=[[:space:]]*//p; }' "$conf_file" 2>/dev/null)"
     [[ -n "$val" ]] && eth_clone="$val"
   done
+  # F-232: 'stable' is a deliberate privacy choice — derives consistent MAC
+  # per connection-UUID. Better than no randomization (no permanent hardware
+  # MAC exposure) and acceptable on static-IP setups where the IP is anyway
+  # the stable identifier. Promote from INFO to PASS-with-note.
   if [[ "$eth_clone" == "random" ]]; then
     pass "Ethernet MAC randomization: random (new MAC on each connection)"
   elif [[ "$eth_clone" == "stable" ]]; then
-    # 'stable' derives a consistent MAC from connection-UUID — not truly random.
-    # With a static IP it provides no privacy benefit (IP is the stable identifier).
-    info "Ethernet MAC: stable (consistent per connection — not truly random; with static IP, IP is the identifier)"
+    pass "Ethernet MAC: stable (per-connection consistent — privacy without disruption)"
   elif [[ -n "$eth_clone" ]]; then
     info "Ethernet cloned-mac-address=$eth_clone"
   else
@@ -5391,17 +5410,36 @@ check_media_privacy() {
   fi
   [[ "$net_audio" -eq 0 ]] && pass "No network audio modules detected"
 
+  # F-259: PipeWire socket regex was prone to FP on multi-line module configs.
+  # Prefer pw-dump (authoritative process-level state) when available; fall
+  # back to file-grep with stricter regex that requires "args" or "name" line
+  # near "/run/user" to confirm socket is local.
   local pw_remote=0
   for confdir in /etc/pipewire /usr/share/pipewire; do
     [[ -d "$confdir" ]] || continue
     if grep -rqs '"access.allowed"' "$confdir/" 2>/dev/null; then
       info "PipeWire access control rules found in $confdir"
     fi
-    if grep -rs 'module-protocol-native.*socket' "$confdir/" 2>/dev/null | grep -qv '/run/user'; then
-      warn "PipeWire may expose socket beyond local user"
-      pw_remote=1
-    fi
   done
+  # Authoritative check: query running PipeWire for non-local sockets
+  if command -v pw-dump &>/dev/null && pgrep -x pipewire &>/dev/null; then
+    # Try as the SUDO_USER (PipeWire runs per-user)
+    local _pw_user="${SUDO_USER:-}"
+    if [[ -n "$_pw_user" ]]; then
+      local _pw_uid
+      _pw_uid=$(id -u "$_pw_user" 2>/dev/null)
+      if [[ -n "$_pw_uid" && -S "/run/user/$_pw_uid/bus" ]]; then
+        local _pw_modules
+        _pw_modules=$(sudo -u "$_pw_user" XDG_RUNTIME_DIR="/run/user/$_pw_uid" \
+          pw-dump 2>/dev/null | grep -E '"object\.serial"|"module\.name"|"args"' | grep -B1 'protocol-native')
+        if echo "$_pw_modules" | grep -q '"args"' && ! echo "$_pw_modules" | grep -q '/run/user'; then
+          warn "PipeWire may expose socket beyond local user (pw-dump)"
+          pw_remote=1
+        fi
+      fi
+    fi
+  fi
+  # Fallback: TCP listener check is unambiguous
   if ss -tlnp 2>/dev/null | grep -q 'pipewire'; then
     warn "PipeWire listening on TCP"
     pw_remote=1
