@@ -3207,14 +3207,27 @@ while read -r line; do
   fi
 done < <(df -h -T -x tmpfs -x devtmpfs -x squashfs -x iso9660 -x erofs -x overlay 2>/dev/null | tail -n+2)
 
-INODE_PCT=$(df -i / | tail -1 | awk '{print $5}' | tr -d '%')
-if [[ "$INODE_PCT" == "-" ]] || [[ -z "$INODE_PCT" ]]; then
-  pass "Inodes /: N/A (Btrfs — dynamic)"
-elif [[ "$INODE_PCT" -gt 90 ]]; then
-  fail "Inodes /: ${INODE_PCT}%"
-else
-  pass "Inodes /: ${INODE_PCT}%"
-fi
+# F-160: Inode check — detect FS type to label dynamic-inode systems
+# correctly. Btrfs/ZFS/F2FS/Bcachefs all return "-" or 0% — dynamic
+# allocation, not a measurement. Add 80% WARN tier for fixed-inode FS.
+ROOT_FS_TYPE=$(df -T / 2>/dev/null | awk 'NR==2{print $2}')
+INODE_PCT=$(df -i / 2>/dev/null | tail -1 | awk '{print $5}' | tr -d '%')
+case "$ROOT_FS_TYPE" in
+  btrfs|zfs|f2fs|bcachefs)
+    pass "Inodes /: N/A ($ROOT_FS_TYPE — dynamic allocation)"
+    ;;
+  *)
+    if [[ "$INODE_PCT" == "-" ]] || [[ -z "$INODE_PCT" ]]; then
+      info "Inodes /: not reportable ($ROOT_FS_TYPE)"
+    elif [[ "$INODE_PCT" -gt 90 ]]; then
+      fail "Inodes /: ${INODE_PCT}% ($ROOT_FS_TYPE — critical)"
+    elif [[ "$INODE_PCT" -gt 80 ]]; then
+      warn "Inodes /: ${INODE_PCT}% ($ROOT_FS_TYPE — approaching limit)"
+    else
+      pass "Inodes /: ${INODE_PCT}% ($ROOT_FS_TYPE)"
+    fi
+    ;;
+esac
 
 # F-161: read /proc/stat directly (instant, no 2-second blocking call,
 # no column-position parsing, no fallback-magic-number).
@@ -3565,9 +3578,15 @@ if systemctl is-active chronyd &>/dev/null || systemctl is-active chrony &>/dev/
     CHRONY_SOURCES=${CHRONY_SOURCES:-0}
     info "Chrony sources: $CHRONY_SOURCES"
 
-    # Network Time Security (NTS) check
-    # Primary: chronyc authdata shows "NTS" for authenticated sources (chrony 4.0+)
-    NTS_SOURCES=$(chronyc -n authdata 2>/dev/null | awk '$3 == "NTS" {c++} END {print c+0}')
+    # Network Time Security (NTS) check — F-180: detect chrony version first
+    # since `authdata` is chrony 4.0+ only. RHEL 8 ships chrony 3.x; on those,
+    # skip authdata path and go straight to config-grep fallback.
+    CHRONY_VER=$(chronyd -v 2>&1 | grep -oE 'version [0-9]+\.[0-9]+' | head -1 | awk '{print $2}')
+    CHRONY_MAJOR="${CHRONY_VER%%.*}"
+    NTS_SOURCES=0
+    if [[ "${CHRONY_MAJOR:-0}" -ge 4 ]]; then
+      NTS_SOURCES=$(chronyc -n authdata 2>/dev/null | awk '$3 == "NTS" {c++} END {print c+0}')
+    fi
     if [[ "$NTS_SOURCES" -gt 0 ]]; then
       pass "NTS (Network Time Security): $NTS_SOURCES active source(s) using NTS"
     else
@@ -3662,9 +3681,20 @@ fi
 USERS_LOGGED=$(who | wc -l)
 info "Currently logged in: $USERS_LOGGED users"
 
+# F-186: sudo usage count exposes admin-activity rhythm. On multi-user systems
+# this leaks behavioral metadata when audit output is shared. Bucketize by
+# magnitude rather than exact count.
 SUDO_USAGE=$(journalctl _COMM=sudo --since "1 hour ago" --no-pager 2>/dev/null | grep -c "COMMAND" || true)
 SUDO_USAGE=${SUDO_USAGE:-0}
-info "Sudo commands (1h): $SUDO_USAGE"
+if [[ "$SUDO_USAGE" -eq 0 ]]; then
+  info "Sudo activity (1h): no sudo commands logged"
+elif [[ "$SUDO_USAGE" -lt 10 ]]; then
+  info "Sudo activity (1h): low (<10 commands — typical admin)"
+elif [[ "$SUDO_USAGE" -lt 100 ]]; then
+  info "Sudo activity (1h): moderate (10-99 commands — active admin/automation)"
+else
+  info "Sudo activity (1h): high (100+ commands — heavy automation or scripted use)"
+fi
 
 fi # end logins
 
@@ -3713,8 +3743,23 @@ for COMP in gcc g++ cc make as; do
   fi
 done
 if [[ -n "$COMPILERS_FOUND" ]]; then
-  if [[ -n "$DESKTOP_ENV" && "$DESKTOP_ENV" != "unknown" ]]; then
+  # F-189: Distinguish desktop / CI build host / production server.
+  # Desktop with DE → normal. CI/build host signature → expected. Anything else
+  # = production server where compilers are an unnecessary attack surface.
+  _IS_BUILD_HOST=false
+  for _bh_indicator in /var/lib/jenkins /home/buildbot /home/gitlab-runner /var/lib/buildbot \
+                       /etc/buildbot /var/lib/gitlab-runner; do
+    [[ -d "$_bh_indicator" ]] && _IS_BUILD_HOST=true && break
+  done
+  if ! $_IS_BUILD_HOST; then
+    for _bh_svc in jenkins gitlab-runner buildbot-master buildbot-worker drone-server gitea-runner; do
+      systemctl is-active "$_bh_svc" &>/dev/null && _IS_BUILD_HOST=true && break
+    done
+  fi
+  if $_IS_DESKTOP; then
     info "Compilers/build tools present: $COMPILERS_FOUND(normal for development desktop)"
+  elif $_IS_BUILD_HOST; then
+    info "Compilers/build tools present: $COMPILERS_FOUND(expected on CI/build host)"
   else
     warn "Compilers/build tools present: $COMPILERS_FOUND(risk on production systems)"
   fi
