@@ -302,11 +302,16 @@ _gsettings_for_users() {
   done < /etc/passwd
 }
 
-# Snapshot/backup-aware find for system-wide scans.
-# Excludes Snapper (/.snapshots, /home/.snapshots, /var/.snapshots etc.),
-# Timeshift (Mint default), and custom btrfs snapshot conventions.
-# Without this, find / -xdev still traverses btrfs subvolumes (same dev-id),
-# inflating SUID/SGID/WW counts massively on Snapper/Timeshift systems.
+# Snapshot/backup/container-aware find for system-wide scans.
+# Excludes:
+# - Snapper (/.snapshots, /home/.snapshots, /var/.snapshots) — btrfs subvolumes
+#   share dev-id with parent, so -xdev alone doesn't filter them
+# - Timeshift (Mint default)
+# - Custom btrfs snapshot conventions (.btrfs-snapshots, .snapper)
+# - Container storage (Podman, Docker, LXD, systemd-nspawn) — image layers
+#   contain full /usr/bin SUID trees that inflate counts massively on
+#   bootc/Silverblue/OCI-image-build systems
+# - OSTree object stores — content-addressed file objects carry original SUID
 _safe_find_root() {
   timeout 30 find / -xdev \
     -not -path '*/.snapshots/*' \
@@ -314,6 +319,12 @@ _safe_find_root() {
     -not -path '*/timeshift-btrfs/*' \
     -not -path '*/.btrfs-snapshots/*' \
     -not -path '*/.snapper/*' \
+    -not -path '/var/lib/containers/storage/*' \
+    -not -path '/var/lib/docker/*' \
+    -not -path '/var/lib/lxd/*' \
+    -not -path '/var/lib/lxc/*' \
+    -not -path '/var/lib/machines/*' \
+    -not -path '*/ostree/repo/objects/*' \
     "$@" 2>/dev/null
 }
 
@@ -328,6 +339,8 @@ _safe_find_home() {
     -not -path '*/.git/objects/*' \
     -not -path '*/.cache/*' \
     -not -path '*/.venv/*' \
+    -not -path '*/__pycache__/*' \
+    -not -path '*/target/*' \
     "$@" 2>/dev/null
 }
 
@@ -2777,10 +2790,25 @@ else
 fi
 
 sub_header "Disk Usage"
+# Read-only filesystems (ISO loopbacks, squashfs, erofs, OverlayFS lowerdirs)
+# are by definition always 100% full. Filter them to avoid false FAIL.
 while read -r line; do
   [[ -z "$line" ]] && continue
   PCT=$(echo "$line" | awk '{print $5}' | tr -d '%')
   MOUNT=$(echo "$line" | awk '{print $6}')
+  FSTYPE=$(echo "$line" | awk '{print $2}')
+  # Skip read-only image filesystems (always 100% by design)
+  case "$FSTYPE" in
+    iso9660|squashfs|erofs|cramfs|romfs)
+      info "Disk $MOUNT: read-only $FSTYPE image (always 100% — skipped)"
+      continue
+      ;;
+  esac
+  # Skip explicitly read-only mounts (loopback ISOs etc.)
+  if mount | grep -qE "on $MOUNT type [^ ]+ \(ro,"; then
+    info "Disk $MOUNT: read-only mount (skipped)"
+    continue
+  fi
   if [[ "$PCT" -gt 90 ]]; then
     fail "Disk $MOUNT: ${PCT}% full!"
   elif [[ "$PCT" -gt 80 ]]; then
@@ -2792,7 +2820,7 @@ while read -r line; do
   else
     pass "Disk $MOUNT: ${PCT}% used"
   fi
-done < <(df -h -x tmpfs -x devtmpfs -x squashfs 2>/dev/null | tail -n+2)
+done < <(df -h -T -x tmpfs -x devtmpfs -x squashfs -x iso9660 -x erofs -x overlay 2>/dev/null | tail -n+2)
 
 INODE_PCT=$(df -i / | tail -1 | awk '{print $5}' | tr -d '%')
 if [[ "$INODE_PCT" == "-" ]] || [[ -z "$INODE_PCT" ]]; then
@@ -4655,11 +4683,17 @@ check_desktop_session() {
     remote_found=1
   fi
   if command -v ss &>/dev/null; then
-    local vnc_listen
-    vnc_listen=$(ss -tlnp 2>/dev/null | grep -E ':590[0-9]|:3389' | head -3)
-    if [[ -n "$vnc_listen" ]]; then
-      warn "VNC/RDP port listening detected"
+    # Only flag externally-bound VNC/RDP — localhost-only (qemu SPICE console,
+    # etc.) is not a remote-access risk
+    local vnc_external
+    vnc_external=$(ss -tlnp 2>/dev/null | grep -E ':590[0-9]|:3389' | grep -vE '127\.0\.0\.1|::1' | head -3)
+    local vnc_local
+    vnc_local=$(ss -tlnp 2>/dev/null | grep -E ':590[0-9]|:3389' | grep -E '127\.0\.0\.1|::1' | head -3)
+    if [[ -n "$vnc_external" ]]; then
+      warn "VNC/RDP port listening EXTERNALLY"
       remote_found=1
+    elif [[ -n "$vnc_local" ]]; then
+      info "VNC/RDP port listening on localhost only (likely qemu SPICE/VNC console)"
     fi
   fi
   _gs_rdp_cb() {
@@ -5012,11 +5046,25 @@ check_keyring_security() {
   # F-267: subdirectory search for secret files (most .env files live in
   # project subdirs, not directly in home). _safe_find_home excludes
   # .snapshots, node_modules, .git, .cache, .venv.
+  # Severity-tier by permissions: FAIL on world-readable, WARN on group-readable,
+  # INFO on private (600/400) — dev .env files with 600 are normal.
   local secrets_found=0
+  local secrets_warn=0
+  local secrets_info=0
   while read -r f; do
     [[ -z "$f" ]] && continue
-    fail "Plaintext secret file: $f"
-    secrets_found=1
+    local fperms
+    fperms=$(stat -c '%a' "$f" 2>/dev/null)
+    if (( (8#${fperms:-777} & 8#007) != 0 )); then
+      fail "Plaintext secret file (world-accessible $fperms): $f"
+      secrets_found=1
+    elif (( (8#${fperms:-777} & 8#070) != 0 )); then
+      warn "Plaintext secret file (group-accessible $fperms): $f"
+      ((secrets_warn++))
+    else
+      info "Plaintext secret file (private $fperms — consider encrypting): $f"
+      ((secrets_info++))
+    fi
   done < <(_safe_find_home -maxdepth 6 -type f -size +0c \
     \( -name ".env" -o -name ".env.local" -o -name ".env.production" \
        -o -name ".env.development" -o -name ".password" -o -name ".secret" \
