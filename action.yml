@@ -1,5 +1,5 @@
 name: 'NoID Privacy for Linux'
-description: 'Privacy & security audit for Linux desktops — 390+ checks, 42 sections, AI-powered fixes'
+description: 'Privacy & security audit for Linux desktops — 390+ checks, 42 sections, AI-friendly remediation prompts'
 author: 'NexusOne23'
 
 branding:
@@ -37,8 +37,14 @@ outputs:
     description: 'Number of warnings'
   info:
     description: 'Number of informational findings'
+  rating:
+    description: 'Score rating (FORTRESS/EXCELLENT/SOLID/NEEDS WORK/CRITICAL)'
+  badge_color:
+    description: 'Shields.io color name for the score (brightgreen/green/yellowgreen/orange/red)'
+  badge_url:
+    description: 'Pre-built Shields.io badge URL for embedding in README'
   json:
-    description: 'Full JSON output'
+    description: 'Full JSON output (includes ai_prompt field if input ai=true)'
 
 runs:
   using: 'composite'

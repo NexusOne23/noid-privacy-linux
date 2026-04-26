@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 ###############################################################################
-#  NoID Privacy for Linux v3.3.0 — Privacy & Security Audit
+#  NoID Privacy for Linux v3.4.0 — Privacy & Security Audit
 #  Copyright (C) 2026 Fabio Mantegna (NexusOne23)
 #
 #  This program is free software: you can redistribute it and/or modify
@@ -21,7 +21,7 @@
 #  390+ checks across 42 sections
 #  Requires: root
 ###############################################################################
-NOID_PRIVACY_VERSION="3.3.0"
+NOID_PRIVACY_VERSION="3.4.0"
 set +e          # Don't exit on errors — we handle them ourselves
 
 # Bash 4+ required for associative arrays and other features
@@ -50,6 +50,8 @@ Options:
   --no-color      Disable color output (for logs/pipes)
   --ai            Generate AI assistant prompt with findings at the end
   --json          Output results as JSON only (no normal output)
+  --offline       Skip all sections that make network requests
+                  (equivalent to --skip vpn --skip interfaces --skip netleaks)
   --skip SECTION  Skip a section (can be repeated)
                   Sections: kernel, selinux, firewall, nftables, vpn,
                   sysctl, services, ports, ssh, audit, users, filesystem,
@@ -79,13 +81,13 @@ while [[ $# -gt 0 ]]; do
     --ai) AI_MODE=true; shift ;;
     --json) JSON_MODE=true; NO_COLOR=true; shift ;;
     --skip) [[ -z "${2:-}" ]] && { echo "Error: --skip requires a section name"; exit 1; }; SKIP_SECTIONS+=("$2"); shift 2 ;;
+    --offline) SKIP_SECTIONS+=("vpn" "interfaces" "netleaks"); shift ;;
     *) echo "Unknown option: $1 (try --help)"; exit 1 ;;
   esac
 done
 
-if $AI_MODE && $JSON_MODE; then
-  echo "Error: --ai and --json are mutually exclusive"; exit 1
-fi
+# --ai and --json now combine: JSON output includes ai_prompt as a field
+# (eliminates the entrypoint.sh double-run problem, F-273)
 
 should_skip() {
   local section="$1"
@@ -300,6 +302,116 @@ _gsettings_for_users() {
   done < /etc/passwd
 }
 
+# Snapshot/backup-aware find for system-wide scans.
+# Excludes Snapper (/.snapshots, /home/.snapshots, /var/.snapshots etc.),
+# Timeshift (Mint default), and custom btrfs snapshot conventions.
+# Without this, find / -xdev still traverses btrfs subvolumes (same dev-id),
+# inflating SUID/SGID/WW counts massively on Snapper/Timeshift systems.
+_safe_find_root() {
+  timeout 30 find / -xdev \
+    -not -path '*/.snapshots/*' \
+    -not -path '*/.timeshift/*' \
+    -not -path '*/timeshift-btrfs/*' \
+    -not -path '*/.btrfs-snapshots/*' \
+    -not -path '*/.snapper/*' \
+    "$@" 2>/dev/null
+}
+
+# Same exclusion pattern, scoped to /home and /root for secret/key scans.
+# Also excludes common dev/cache directories where false-positive .key/.env
+# files live (node_modules, .git/objects, .cache, .venv).
+_safe_find_home() {
+  find /home /root \
+    -not -path '*/.snapshots/*' \
+    -not -path '*/.timeshift/*' \
+    -not -path '*/node_modules/*' \
+    -not -path '*/.git/objects/*' \
+    -not -path '*/.cache/*' \
+    -not -path '*/.venv/*' \
+    "$@" 2>/dev/null
+}
+
+# Content-based private key detection.
+# Filename ".key" alone is NOT a key (uBlock Origin IDB records, test fixtures,
+# API config files all use this). Magic-string check on first 64 bytes for
+# OpenSSL/PEM headers, fallback to file(1) for OpenSSH custom format.
+_is_real_private_key() {
+  local f="$1"
+  [[ -r "$f" && -s "$f" ]] || return 1
+  # OpenSSL/PEM format (covers RSA, EC, DSA, encrypted keys)
+  if head -c 64 "$f" 2>/dev/null | grep -qE "^-----BEGIN.*PRIVATE KEY-----"; then
+    return 0
+  fi
+  # OpenSSH custom format (id_ed25519 etc. without PEM header)
+  if command -v file &>/dev/null; then
+    file "$f" 2>/dev/null | grep -qiE "openssh private key|ssh private key|pem rsa private|pem ec private" && return 0
+  fi
+  return 1
+}
+
+# Generalized firewall-block check: any active firewall blocking on PRIMARY_IFACE.
+# Replaces nft-only has_nft_drop_on_phys for fairness on iptables/ufw systems.
+has_firewall_block_on_phys() {
+  has_nft_drop_on_phys && return 0
+  if require_cmd iptables; then
+    iptables -L -n -v 2>/dev/null | awk -v iface="$PRIMARY_IFACE" \
+      '/DROP/ && $0 ~ iface {found=1} END{exit !found}' && return 0
+    iptables -L INPUT -n 2>/dev/null | grep -qE "policy DROP|policy REJECT" && return 0
+  fi
+  if require_cmd ufw && systemctl is-active ufw &>/dev/null; then
+    return 0
+  fi
+  return 1
+}
+
+# Cross-distro GRUB main-config path detection.
+_grub_main_cfg() {
+  local p
+  for p in /boot/grub2/grub.cfg /boot/grub/grub.cfg \
+           /boot/efi/EFI/fedora/grub.cfg /boot/efi/EFI/debian/grub.cfg \
+           /boot/efi/EFI/ubuntu/grub.cfg /boot/efi/EFI/arch/grub.cfg; do
+    [[ -f "$p" ]] && { echo "$p"; return; }
+  done
+}
+
+# Cross-distro password-file paths for GRUB.
+_grub_password_paths() {
+  local paths=()
+  [[ -f /boot/grub2/user.cfg ]] && paths+=(/boot/grub2/user.cfg)
+  [[ -f /boot/grub/user.cfg ]] && paths+=(/boot/grub/user.cfg)
+  [[ -d /etc/grub.d ]] && paths+=(/etc/grub.d)
+  [[ -f /etc/default/grub ]] && paths+=(/etc/default/grub)
+  printf '%s\n' "${paths[@]}"
+}
+
+# Service-name normalization across distros.
+# httpd|apache2 are different distros' names for the same Apache.
+# smb|smbd|nmb|nmbd vary between Fedora and Debian.
+_service_active_any() {
+  # Returns 0 if any of the service names is active
+  local s
+  for s in "$@"; do
+    systemctl is-active "$s" &>/dev/null && return 0
+  done
+  return 1
+}
+
+_service_masked_any() {
+  local s
+  for s in "$@"; do
+    systemctl is-masked "$s" &>/dev/null && return 0
+  done
+  return 1
+}
+
+_service_enabled_any() {
+  local s
+  for s in "$@"; do
+    systemctl is-enabled "$s" &>/dev/null && return 0
+  done
+  return 1
+}
+
 [[ $EUID -ne 0 ]] && { echo "Requires root. Run with: sudo bash \"$0\""; exit 1; }
 
 # --- Distro Detection ---
@@ -356,6 +468,33 @@ else
   fi
 fi
 DESKTOP_ENV="${DESKTOP_ENV:-unknown}"
+
+# Desktop detection — used by service-severity adjustments throughout.
+# Considers system "desktop" if any DE detected OR a display manager is active.
+_IS_DESKTOP=false
+[[ "$DESKTOP_ENV" != "unknown" ]] && _IS_DESKTOP=true
+if ! $_IS_DESKTOP; then
+  for _dm in gdm gdm3 lightdm sddm lxdm; do
+    if systemctl is-active "$_dm" &>/dev/null; then
+      _IS_DESKTOP=true
+      break
+    fi
+  done
+fi
+
+# DE-family classification for per-DE config dispatching (KDE/XFCE/etc).
+# Used by screen-lock, file-indexer, clipboard, keyring checks instead of
+# GNOME-only gsettings calls.
+_DE_FAMILY="unknown"
+case "${DESKTOP_ENV,,}" in
+  *gnome*|*unity*|*budgie*|*pantheon*) _DE_FAMILY="gnome" ;;
+  *kde*|*plasma*) _DE_FAMILY="kde" ;;
+  *xfce*) _DE_FAMILY="xfce" ;;
+  *cinnamon*) _DE_FAMILY="cinnamon" ;;
+  *mate*) _DE_FAMILY="mate" ;;
+  *lxqt*) _DE_FAMILY="lxqt" ;;
+  *sway*|*hypr*|*wayfire*|*river*) _DE_FAMILY="wm" ;;
+esac
 
 # --- Dynamic Interface & Gateway Detection ---
 PRIMARY_IFACE=$(ip route show default 2>/dev/null | grep -oP 'dev \K\S+' | head -1)
@@ -420,15 +559,25 @@ header "01" "KERNEL & BOOT INTEGRITY"
 
 info "Kernel: $KERNEL"
 
-# Secure Boot
-if require_cmd mokutil; then
+# Secure Boot — only relevant on UEFI systems (F-018: legacy BIOS misclassified)
+if [[ ! -d /sys/firmware/efi ]]; then
+  info "Secure Boot: N/A (legacy BIOS, no UEFI firmware)"
+elif require_cmd mokutil; then
   if mokutil --sb-state 2>/dev/null | grep -q "enabled"; then
     pass "Secure Boot: ENABLED"
   else
     fail "Secure Boot: DISABLED"
   fi
+elif [[ -d /sys/firmware/efi/efivars ]]; then
+  # Fallback: read EFI variable directly when mokutil missing
+  _SB_VAR=$(find /sys/firmware/efi/efivars -name "SecureBoot-*" 2>/dev/null | head -1)
+  if [[ -n "$_SB_VAR" ]] && [[ "$(od -An -t u1 -N1 -j4 "$_SB_VAR" 2>/dev/null | tr -d ' ')" == "1" ]]; then
+    pass "Secure Boot: ENABLED (via efivars)"
+  else
+    info "Secure Boot: cannot determine without mokutil"
+  fi
 else
-  warn "mokutil not installed — cannot check Secure Boot"
+  info "Secure Boot: cannot determine (mokutil missing, efivars unreadable)"
 fi
 
 # Kernel Lockdown
@@ -889,15 +1038,17 @@ header "05" "VPN & NETWORK"
 # NOTE: This section makes network requests (ping, dig).
 # Use --skip vpn to avoid network traffic from this section.
 
-# Internet Connectivity Test (use curl to avoid ICMP-blocked false negatives)
-# NOTE: HTTP (not HTTPS) is intentional — captive portal detection requires unencrypted
-# HTTP to detect redirects. This single request goes through the VPN tunnel if active.
-if curl -fsS --max-time 5 http://detectportal.firefox.com/success.txt &>/dev/null; then
-  pass "Internet connectivity: OK"
-elif ping -c1 -W5 1.1.1.1 &>/dev/null; then
-  pass "Internet connectivity: OK"
+# Internet Connectivity Test — F-057: prefer ICMP-only (no HTTP tracking)
+# Try ping first (no third-party logs); fall back to Cloudflare's
+# generate_204 endpoint (less identifiable than detectportal.firefox.com).
+if ping -c1 -W2 1.1.1.1 &>/dev/null; then
+  pass "Internet connectivity: OK (ICMP)"
+elif ping -c1 -W2 9.9.9.9 &>/dev/null; then
+  pass "Internet connectivity: OK (ICMP fallback)"
+elif curl -fsS --max-time 5 http://cp.cloudflare.com/generate_204 &>/dev/null; then
+  pass "Internet connectivity: OK (HTTP)"
 else
-  warn "Internet connectivity: FAIL (HTTP + ICMP timeout)"
+  warn "Internet connectivity: FAIL (ICMP + HTTP timeout)"
 fi
 
 # VPN Interface
@@ -1043,10 +1194,13 @@ for GW in $LAN_GW_LIST; do
   fi
 done
 
-# Promiscuous Mode
-PROMISC=$(ip -o link show | grep -i promisc || true)
+# Promiscuous Mode — F-072: filter known virtualization bridges/veth pairs
+# (libvirt virbr*, docker docker0/br-*, lxc lxcbr*, podman cni-*) that
+# legitimately enable promisc when slaves are attached.
+PROMISC=$(ip -o link show | grep -i promisc | \
+  grep -vE '^[0-9]+: (virbr|docker[0-9]|br-|veth|lxcbr|cni-|podman[0-9]+|tap)' || true)
 if [[ -z "$PROMISC" ]]; then
-  pass "No promiscuous mode"
+  pass "No promiscuous mode (virt bridges excluded)"
 else
   fail "Promiscuous mode active: $PROMISC"
 fi
@@ -1180,16 +1334,63 @@ if ! should_skip "services"; then
 header "07" "SERVICES & DAEMONS"
 ###############################################################################
 
-SHOULD_BE_OFF="sshd ssh telnet.socket rsh.socket rlogin.socket rexec.socket vsftpd httpd nginx cups avahi-daemon bluetooth.service bluetooth.socket rpcbind nfs-server smb nmb"
-for SVC in $SHOULD_BE_OFF; do
-  if systemctl is-active "$SVC" &>/dev/null; then
-    fail "Service running: $SVC"
-  elif systemctl is-masked "$SVC" &>/dev/null; then
-    pass "Service masked: $SVC"
-  elif systemctl is-enabled "$SVC" &>/dev/null; then
-    warn "Service enabled but inactive: $SVC"
+# Service groups: list of equivalent-name aliases across distros.
+# httpd (RHEL/Fedora) vs apache2 (Debian/Ubuntu); smb/smbd/nmb/nmbd vary.
+# Each row is one logical service; any matching name being active = active.
+_SVC_GROUPS_OFF=(
+  "sshd ssh"
+  "telnet.socket"
+  "rsh.socket"
+  "rlogin.socket"
+  "rexec.socket"
+  "vsftpd"
+  "httpd apache2 apache"
+  "nginx"
+  "rpcbind"
+  "nfs-server nfs-kernel-server"
+  "smb smbd"
+  "nmb nmbd"
+)
+
+# Desktop-relevant services: WARN with context on desktop, FAIL on server.
+# cups (printing), avahi (mDNS/discovery), bluetooth (laptops) are normal
+# desktop defaults and don't warrant FAIL diagnosis.
+_SVC_GROUPS_DESKTOP=(
+  "cups:printing"
+  "avahi-daemon:Bonjour/mDNS discovery"
+  "bluetooth.service:Bluetooth"
+  "bluetooth.socket:Bluetooth"
+)
+
+for _grp in "${_SVC_GROUPS_OFF[@]}"; do
+  # First name in group is the canonical display name
+  _canonical="${_grp%% *}"
+  # shellcheck disable=SC2086  # intentional word-split on space-separated group
+  if _service_active_any $_grp; then
+    fail "Service running: $_canonical"
+  elif _service_masked_any $_grp; then
+    pass "Service masked: $_canonical"
+  elif _service_enabled_any $_grp; then
+    warn "Service enabled but inactive: $_canonical"
   else
-    pass "Service off: $SVC"
+    pass "Service off: $_canonical"
+  fi
+done
+
+# Desktop-relevant services with context-aware severity
+for _entry in "${_SVC_GROUPS_DESKTOP[@]}"; do
+  _svc="${_entry%%:*}"
+  _ctx="${_entry##*:}"
+  if systemctl is-active "$_svc" &>/dev/null; then
+    if $_IS_DESKTOP; then
+      info "Service running: $_svc (desktop default — $_ctx)"
+    else
+      warn "Service running: $_svc (consider disabling on server — $_ctx)"
+    fi
+  elif systemctl is-masked "$_svc" &>/dev/null; then
+    pass "Service masked: $_svc"
+  else
+    pass "Service off: $_svc"
   fi
 done
 
@@ -1274,7 +1475,7 @@ while read -r line; do
   if echo "$ADDR" | grep -qE "^(127\.|::1|\[::1\]|\[?::ffff:127\.)"; then
     pass "TCP $ADDR ($PROC) — localhost only"
   else
-    if has_nft_drop_on_phys; then
+    if has_firewall_block_on_phys; then
       warn "TCP $ADDR ($PROC) — externally bound, but firewall/kill-switch blocks"
     else
       fail "TCP $ADDR ($PROC) — EXTERNALLY REACHABLE"
@@ -1299,7 +1500,7 @@ while read -r line; do
       info "UDP $ADDR (kernel — no WireGuard interfaces found)"
     fi
   else
-    if has_nft_drop_on_phys; then
+    if has_firewall_block_on_phys; then
       info "UDP $ADDR ($PROC) — externally bound, but firewall/kill-switch blocks"
     else
       warn "UDP $ADDR ($PROC) — external"
@@ -1316,7 +1517,7 @@ UNUSUAL_PORTS=$(while read -r port; do
   esac
 done < <(ss -tnp state established 2>/dev/null | awk '{print $4}' | grep -oP ':\K\d+$' | sort -n | uniq))
 if [[ -n "$UNUSUAL_PORTS" ]]; then
-  info "Connections to non-standard ports: $(echo $UNUSUAL_PORTS | tr '\n' ' ')"
+  info "Connections to non-standard ports: $(echo "$UNUSUAL_PORTS" | tr '\n' ' ')"
 else
   pass "All connections on standard ports"
 fi
@@ -1399,9 +1600,9 @@ else
       # Convert to seconds: sshd -T returns seconds, but config fallback may return 1m/2m/1h
       LGT_SEC="$LGT"
       if [[ "$LGT" =~ ^([0-9]+)m$ ]]; then
-        LGT_SEC=$(( ${BASH_REMATCH[1]} * 60 ))
+        LGT_SEC=$(( BASH_REMATCH[1] * 60 ))
       elif [[ "$LGT" =~ ^([0-9]+)h$ ]]; then
-        LGT_SEC=$(( ${BASH_REMATCH[1]} * 3600 ))
+        LGT_SEC=$(( BASH_REMATCH[1] * 3600 ))
       elif [[ "$LGT" =~ ^([0-9]+)s?$ ]]; then
         LGT_SEC="${BASH_REMATCH[1]}"
       fi
@@ -1544,7 +1745,7 @@ fi
 info "Wheel/sudo members: $WHEEL_MEMBERS"
 
 # Shell users
-SHELL_USERS=$(grep -v '/nologin\|/false\|/sync\|/shutdown\|/halt' /etc/passwd | wc -l)
+SHELL_USERS=$(grep -cv '/nologin\|/false\|/sync\|/shutdown\|/halt' /etc/passwd)
 info "Users with login shell: $SHELL_USERS"
 if ! $JSON_MODE; then
   while IFS=: read -r user _ uid _ _ _ shell; do
@@ -1677,8 +1878,10 @@ if [[ -f /etc/sudoers ]]; then
     done
     [[ "$_SUDOERSD_BAD" -eq 0 ]] && pass "sudoers.d drop-ins: all permissions correct"
   fi
-  # Check for NOPASSWD
-  _NOPASSWD=$(grep -rn "NOPASSWD" /etc/sudoers /etc/sudoers.d/ 2>/dev/null | grep -v "^#" | grep -v ":#" || true)
+  # Check for NOPASSWD — F-107: properly skip commented lines including
+  # tab-indented comments. Use anchored regex on file contents (not grep
+  # output prefix-based filter which fails on tab-prefixed comments).
+  _NOPASSWD=$(grep -rE -- '^[[:space:]]*[^#[:space:]].*NOPASSWD' /etc/sudoers /etc/sudoers.d/ 2>/dev/null || true)
   if [[ -n "$_NOPASSWD" ]]; then
     warn "NOPASSWD found in sudoers (passwordless sudo enabled)"
     if ! $JSON_MODE; then
@@ -1757,8 +1960,8 @@ if ! should_skip "filesystem"; then
 header "12" "FILESYSTEM SECURITY"
 ###############################################################################
 
-# SUID Files
-SUID_COUNT=$(timeout 30 find / -xdev -not -path '/.snapshots/*' -perm -4000 -type f 2>/dev/null | wc -l)
+# SUID Files (uses _safe_find_root which excludes Snapper/Timeshift snapshots)
+SUID_COUNT=$(_safe_find_root -perm -4000 -type f | wc -l)
 if [[ "$SUID_COUNT" -le 30 ]]; then
   pass "SUID files: $SUID_COUNT"
 elif [[ "$SUID_COUNT" -le 45 ]]; then
@@ -1768,7 +1971,7 @@ else
 fi
 
 # SGID Files
-SGID_COUNT=$(timeout 30 find / -xdev -not -path '/.snapshots/*' -perm -2000 -type f 2>/dev/null | wc -l)
+SGID_COUNT=$(_safe_find_root -perm -2000 -type f | wc -l)
 if [[ "$SGID_COUNT" -le 10 ]]; then
   pass "SGID files: $SGID_COUNT"
 elif [[ "$SGID_COUNT" -le 20 ]]; then
@@ -1778,7 +1981,9 @@ else
 fi
 
 # World-Writable
-WW_COUNT=$(timeout 30 find / -xdev -not -path '/.snapshots/*' -perm -0002 -type f ! -path "/proc/*" ! -path "/sys/*" ! -path "/dev/*" 2>/dev/null | wc -l)
+_WW_FIND_ARGS=(-perm -0002 -type f
+  ! -path "/proc/*" ! -path "/sys/*" ! -path "/dev/*")
+WW_COUNT=$(_safe_find_root "${_WW_FIND_ARGS[@]}" | wc -l)
 if [[ "$WW_COUNT" -eq 0 ]]; then
   pass "World-writable files: 0"
 else
@@ -1786,12 +1991,12 @@ else
   if ! $JSON_MODE; then
     while read -r f; do
       printf "       %s\n" "$f"
-    done < <(timeout 30 find / -xdev -not -path '/.snapshots/*' -perm -0002 -type f ! -path "/proc/*" ! -path "/sys/*" ! -path "/dev/*" 2>/dev/null | head -5)
+    done < <(_safe_find_root "${_WW_FIND_ARGS[@]}" | head -5)
   fi
 fi
 
 # Unowned Files
-UNOWNED=$(timeout 30 find / -xdev -not -path '/.snapshots/*' -not -path '/var/lib/gdm/*' \( -nouser -o -nogroup \) 2>/dev/null | wc -l)
+UNOWNED=$(_safe_find_root -not -path '/var/lib/gdm/*' \( -nouser -o -nogroup \) | wc -l)
 if [[ "$UNOWNED" -eq 0 ]]; then
   pass "Unowned files: 0"
 elif [[ "$UNOWNED" -le 5 ]]; then
@@ -2001,9 +2206,9 @@ header "14" "UPDATES & PACKAGES"
 
 UPDATES="?"
 if require_cmd dnf5; then
-  UPDATES=$(dnf5 check-upgrade --quiet 2>/dev/null | grep -v "^$" | wc -l)
+  UPDATES=$(dnf5 check-upgrade --quiet 2>/dev/null | grep -cv "^$")
 elif require_cmd dnf; then
-  UPDATES=$(dnf check-update --quiet 2>/dev/null | grep -v "^$" | wc -l)
+  UPDATES=$(dnf check-update --quiet 2>/dev/null | grep -cv "^$")
 elif require_cmd apt; then
   # No apt update — this is a read-only audit, don't write to /var/lib/apt/lists/
   UPDATES=$(apt list --upgradable 2>/dev/null | grep -c "upgradable" || true)
@@ -2031,7 +2236,7 @@ SEC_CHECKED=false
 SEC_UPDATES=0
 if require_cmd dnf5; then
   SEC_CHECKED=true
-  SEC_UPDATES=$(dnf5 check-upgrade --security --quiet 2>/dev/null | grep -v "^$" | wc -l || true)
+  SEC_UPDATES=$(dnf5 check-upgrade --security --quiet 2>/dev/null | grep -cv "^$" || true)
   SEC_UPDATES=${SEC_UPDATES:-0}
 elif require_cmd dnf; then
   SEC_CHECKED=true
@@ -2185,46 +2390,45 @@ if ! should_skip "rootkit"; then
 header "15" "ROOTKIT & MALWARE SCAN"
 ###############################################################################
 
-# rkhunter
+# rkhunter (deprecated — last release 2018-02-24, signatures don't cover
+# post-2018 rootkits like XZ Backdoor, Bootkitty, Kovid, BPFDoor).
+# Recommend chkrootkit (last release 2025-05-12) which knows modern threats.
 if require_cmd rkhunter; then
-  $JSON_MODE || printf "  ${CYN}Running rkhunter...${RST}\n"
-  RKH_OUT=$(rkhunter --check --skip-keypress --report-warnings-only 2>/dev/null || true)
-  RKH_WARNS=$(echo "$RKH_OUT" | grep -c "Warning:" || true)
-  RKH_WARNS=${RKH_WARNS:-0}
-  if [[ "$RKH_WARNS" -eq 0 ]]; then
-    pass "rkhunter: clean"
-  else
-    warn "rkhunter: $RKH_WARNS warnings"
-    if ! $JSON_MODE; then
-      while read -r w; do
-        printf "       %s\n" "$w"
-      done < <(echo "$RKH_OUT" | grep "Warning:" | head -5)
-    fi
-  fi
+  info "rkhunter installed but UNMAINTAINED since 2018-02 — signatures miss XZ Backdoor, Bootkitty, BPFDoor; use chkrootkit instead"
 else
-  info "rkhunter not installed — skipped"
+  info "rkhunter not installed (chkrootkit + AIDE + IMA preferred for modern rootkit detection)"
 fi
 
-# chkrootkit with false-positive filter
+# chkrootkit with false-positive filter (timeout 120s prevents hangs).
+# F-132: filtered FPs are surfaced as INFO so user can audit nothing's hidden.
 if require_cmd chkrootkit; then
-  $JSON_MODE || printf "  ${CYN}Running chkrootkit...${RST}\n"
-  CHKRK_OUT=$(chkrootkit 2>/dev/null || true)
-  # Filter known false positives
-  CHKRK_FP_PATTERN="bindshell|sniffer|chkutmp|w55808|slapper|scalper|wted|Xor\.DDoS|linux_ldiscs|suckit"
-  CHKRK_INFECTED=$(echo "$CHKRK_OUT" | grep "INFECTED" | grep -viE "$CHKRK_FP_PATTERN" | wc -l | ccount)
-  CHKRK_FP=$(echo "$CHKRK_OUT" | grep "INFECTED" | grep -ciE "$CHKRK_FP_PATTERN" | ccount)
-  if [[ "$CHKRK_INFECTED" -eq 0 ]]; then
-    pass "chkrootkit: clean (0 real INFECTED, $CHKRK_FP known false positives filtered)"
+  $JSON_MODE || printf "  ${CYN}Running chkrootkit (max 120s)...${RST}\n"
+  CHKRK_OUT=$(timeout 120 chkrootkit 2>/dev/null || echo "TIMEOUT")
+  if [[ "$CHKRK_OUT" == "TIMEOUT" ]]; then
+    warn "chkrootkit: timed out after 120s"
   else
-    fail "chkrootkit: $CHKRK_INFECTED INFECTED (after filtering $CHKRK_FP known FPs)"
-    if ! $JSON_MODE; then
-      while read -r i; do
-        printf "       %s\n" "$i"
-      done < <(echo "$CHKRK_OUT" | grep "INFECTED" | grep -viE "$CHKRK_FP_PATTERN" | head -5)
+    CHKRK_FP_PATTERN="bindshell|sniffer|chkutmp|w55808|slapper|scalper|wted|Xor\.DDoS|linux_ldiscs|suckit"
+    CHKRK_INFECTED=$(echo "$CHKRK_OUT" | grep "INFECTED" | grep -viE "$CHKRK_FP_PATTERN" | wc -l | ccount)
+    CHKRK_FP=$(echo "$CHKRK_OUT" | grep "INFECTED" | grep -ciE "$CHKRK_FP_PATTERN" | ccount)
+    if [[ "$CHKRK_INFECTED" -eq 0 ]]; then
+      pass "chkrootkit: clean (0 real INFECTED, $CHKRK_FP known false positives filtered)"
+      # F-132: show filtered FPs as INFO so user can verify nothing legit was hidden
+      if [[ "$CHKRK_FP" -gt 0 ]] && ! $JSON_MODE; then
+        echo "$CHKRK_OUT" | grep "INFECTED" | grep -iE "$CHKRK_FP_PATTERN" | head -3 | while read -r fp; do
+          printf "       (filtered FP) %s\n" "${fp:0:80}"
+        done
+      fi
+    else
+      fail "chkrootkit: $CHKRK_INFECTED INFECTED (after filtering $CHKRK_FP known FPs)"
+      if ! $JSON_MODE; then
+        while read -r i; do
+          printf "       %s\n" "$i"
+        done < <(echo "$CHKRK_OUT" | grep "INFECTED" | grep -viE "$CHKRK_FP_PATTERN" | head -5)
+      fi
     fi
   fi
 else
-  info "chkrootkit not installed — skipped"
+  info "chkrootkit not installed — skipped (recommended over rkhunter for 2026)"
 fi
 
 # Suspect Cron Jobs
@@ -2258,9 +2462,11 @@ header "16" "PROCESS SECURITY"
 ###############################################################################
 
 # Suspicious processes
+# F-136: Name-pattern matching is heuristic only — real attackers rename
+# binaries. PASS gives false reassurance unless annotated.
 SUSPECT_PROCS=$(ps aux 2>/dev/null | grep -iE "\bnc\s+-[a-z]*l|\bncat\s+-[a-z]*l|\bsocat\s+.*EXEC|\bsocat\s+.*TCP-LISTEN|\bmeterpreter\b|\breverse[_.-]shell\b|\bcobalt\s*strike\b|\bmimikatz\b|\blazagne\b|\bkeylog\b" | grep -v grep || true)
 if [[ -z "$SUSPECT_PROCS" ]]; then
-  pass "No suspicious processes"
+  pass "No obvious-named suspicious processes (real malware renames — see AIDE/IMA/chkrootkit for actual integrity)"
 else
   fail "Suspicious processes found:"
   if ! $JSON_MODE; then
@@ -2388,7 +2594,12 @@ header "18" "CONTAINERS & VIRTUALIZATION"
 
 if require_cmd docker; then
   if systemctl is-active docker &>/dev/null; then
-    warn "Docker daemon running"
+    # F-145: distinguish rootless (safe) from rootful (privileged daemon)
+    if docker info 2>/dev/null | grep -qi "rootless"; then
+      info "Docker rootless mode — minimal daemon attack surface"
+    else
+      warn "Docker daemon running (rootful) — consider rootless mode"
+    fi
     CONTAINERS=$(docker ps -q 2>/dev/null | wc -l)
     info "Running containers: $CONTAINERS"
   else
@@ -2452,11 +2663,13 @@ else
   fail "Journal critical (24h): $JOURNAL_CRIT"
 fi
 
-DMESG_ERR=$(dmesg --level=err,crit,alert,emerg 2>/dev/null | wc -l)
+# F-151: limit to recent (1h) — kernel ring buffer accumulates boot-time
+# errors over months on long-uptime servers, inflating count
+DMESG_ERR=$(dmesg --level=err,crit,alert,emerg --since "1 hour ago" 2>/dev/null | wc -l)
 if [[ "$DMESG_ERR" -le 5 ]]; then
-  pass "dmesg errors: $DMESG_ERR"
+  pass "dmesg errors (1h): $DMESG_ERR"
 else
-  warn "dmesg errors: $DMESG_ERR"
+  warn "dmesg errors (1h): $DMESG_ERR"
 fi
 
 OOM_KILLS=$(dmesg 2>/dev/null | grep -c "Out of memory" | ccount)
@@ -2501,15 +2714,21 @@ else
   warn "Deleted log files still open: $_DELETED_LOGS (services holding stale file handles)"
 fi
 
-# Empty log files that should have content
-_EMPTY_LOGS=0
-for _logf in /var/log/messages /var/log/syslog /var/log/auth.log /var/log/secure /var/log/kern.log; do
-  if [[ -f "$_logf" && ! -s "$_logf" ]]; then
-    ((_EMPTY_LOGS++))
-    warn "Empty log file: $_logf (logging may be broken)"
-  fi
-done
-[[ "$_EMPTY_LOGS" -eq 0 ]] && pass "No empty log files detected"
+# F-155: only check empty syslog files if rsyslog/syslog-ng is actually
+# active. On systemd-only systems (Fedora 40+, Arch, modern minimal installs)
+# these files don't exist by design and shouldn't trigger warnings.
+if systemctl is-active rsyslog syslog-ng &>/dev/null; then
+  _EMPTY_LOGS=0
+  for _logf in /var/log/messages /var/log/syslog /var/log/auth.log /var/log/secure /var/log/kern.log; do
+    if [[ -f "$_logf" && ! -s "$_logf" ]]; then
+      ((_EMPTY_LOGS++))
+      warn "Empty log file: $_logf (logging may be broken)"
+    fi
+  done
+  [[ "$_EMPTY_LOGS" -eq 0 ]] && pass "No empty log files detected"
+else
+  info "Syslog implementation not active — using systemd-journald only (modern default)"
+fi
 
 fi # end logs
 
@@ -2536,14 +2755,17 @@ fi
 MEM_TOTAL=$(free -h | awk '/^Mem:/ {print $2}')
 MEM_USED=$(free -h | awk '/^Mem:/ {print $3}')
 MEM_AVAIL=$(free -h | awk '/^Mem:/ {print $7}')
-MEM_PCT=$(free | awk '/^Mem:/ {printf "%.0f", ($3/$2)*100}')
-info "RAM: $MEM_USED / $MEM_TOTAL (${MEM_PCT}% used, $MEM_AVAIL available)"
-if [[ "$MEM_PCT" -gt 90 ]]; then
-  fail "RAM: ${MEM_PCT}% used!"
-elif [[ "$MEM_PCT" -gt 75 ]]; then
-  warn "RAM: ${MEM_PCT}% used"
+# F-158: use 'available' (column 7) instead of 'used' — Linux aggressively
+# caches files which inflates 'used'. 'available' is what apps can claim
+# without paging.
+MEM_AVAIL_PCT=$(free | awk '/^Mem:/ {printf "%.0f", ($7/$2)*100}')
+info "RAM: $MEM_USED / $MEM_TOTAL (${MEM_AVAIL_PCT}% available, $MEM_AVAIL free)"
+if [[ "$MEM_AVAIL_PCT" -lt 5 ]]; then
+  fail "RAM: only ${MEM_AVAIL_PCT}% available (critical)"
+elif [[ "$MEM_AVAIL_PCT" -lt 15 ]]; then
+  warn "RAM: ${MEM_AVAIL_PCT}% available"
 else
-  pass "RAM: ${MEM_PCT}% used"
+  pass "RAM: ${MEM_AVAIL_PCT}% available"
 fi
 
 SWAP_TOTAL=$(free -h | awk '/^Swap:/ {print $2}')
@@ -2581,10 +2803,16 @@ else
   pass "Inodes /: ${INODE_PCT}%"
 fi
 
-# Parse I/O wait dynamically from header (column position varies across distros)
-_VMSTAT_OUT=$(vmstat -w 1 2 2>/dev/null || vmstat 1 2 2>/dev/null)
-_VMSTAT_COL=$(echo "$_VMSTAT_OUT" | head -2 | tail -1 | tr -s ' ' '\n' | grep -n '^wa$' | cut -d: -f1)
-IOWAIT=$(echo "$_VMSTAT_OUT" | tail -1 | awk -v col="${_VMSTAT_COL:-16}" '{print $col}')
+# F-161: read /proc/stat directly (instant, no 2-second blocking call,
+# no column-position parsing, no fallback-magic-number).
+# Format: cpu user nice system idle iowait irq softirq steal guest guest_nice
+read -r _ _cpu_user _cpu_nice _cpu_sys _cpu_idle _cpu_iowait _ < /proc/stat
+_cpu_total=$((_cpu_user + _cpu_nice + _cpu_sys + _cpu_idle + _cpu_iowait))
+if [[ "$_cpu_total" -gt 0 ]]; then
+  IOWAIT=$(awk -v w="$_cpu_iowait" -v t="$_cpu_total" 'BEGIN{printf "%.0f", (w/t)*100}')
+else
+  IOWAIT=0
+fi
 if [[ "${IOWAIT:-0}" -gt 20 ]]; then
   warn "I/O wait: ${IOWAIT}%"
 else
@@ -2645,27 +2873,31 @@ else
   info "smartctl not installed — SMART checks skipped"
 fi
 
-# Temperature (new — enhanced)
+# Temperature (F-165: distinguish "not installed" from "installed but
+# unconfigured" — silent skip on misconfigured sensors hides actual issue)
 if require_cmd sensors; then
-  # Extract only actual temp readings (value right after "Label: +"), not thresholds
-  # in parentheses (high/crit/low values are preceded by "= +" not ": +")
-  MAX_TEMP=$(sensors 2>/dev/null | grep -oP ':\s+\+\K\d+\.\d+(?=°C)' | sort -rn | head -1)
-  if [[ -n "$MAX_TEMP" ]]; then
-    TEMP_NUM=$(echo "$MAX_TEMP" | grep -oP '^\d+')
-    if [[ "$TEMP_NUM" -gt 85 ]]; then
-      fail "Max temperature: ${MAX_TEMP}°C (CRITICAL)"
-    elif [[ "$TEMP_NUM" -gt 70 ]]; then
-      warn "Max temperature: ${MAX_TEMP}°C (elevated)"
-    else
-      pass "Max temperature: ${MAX_TEMP}°C"
+  _SENSORS_OUT=$(sensors 2>/dev/null)
+  if [[ -z "$_SENSORS_OUT" ]] || ! echo "$_SENSORS_OUT" | grep -q "°C"; then
+    info "lm_sensors installed but no readings — run 'sudo sensors-detect' to configure"
+  else
+    MAX_TEMP=$(echo "$_SENSORS_OUT" | grep -oP ':\s+\+\K\d+\.\d+(?=°C)' | sort -rn | head -1)
+    if [[ -n "$MAX_TEMP" ]]; then
+      TEMP_NUM=$(echo "$MAX_TEMP" | grep -oP '^\d+')
+      if [[ "$TEMP_NUM" -gt 85 ]]; then
+        fail "Max temperature: ${MAX_TEMP}°C (CRITICAL)"
+      elif [[ "$TEMP_NUM" -gt 70 ]]; then
+        warn "Max temperature: ${MAX_TEMP}°C (elevated)"
+      else
+        pass "Max temperature: ${MAX_TEMP}°C"
+      fi
     fi
-  fi
-  # Show all sensor zones
-  sub_header "Temperature Sensors"
-  if ! $JSON_MODE; then
-    while read -r line; do
-      printf "       %s\n" "$line"
-    done < <(sensors 2>/dev/null | grep -E "°C" | head -10)
+    # Show all sensor zones
+    sub_header "Temperature Sensors"
+    if ! $JSON_MODE; then
+      while read -r line; do
+        printf "       %s\n" "$line"
+      done < <(echo "$_SENSORS_OUT" | grep -E "°C" | head -10)
+    fi
   fi
 else
   info "lm_sensors not installed — temperature checks skipped"
@@ -2698,7 +2930,8 @@ if ! $JSON_MODE; then
 fi
 
 if require_cmd dig; then
-  DNS_TEST=$(dig +short google.com +time=3 2>/dev/null | head -1 || echo "FAIL")
+  # F-167: query DNS root nameservers (no third-party tracked)
+  DNS_TEST=$(dig +short . NS +time=3 2>/dev/null | head -1 || echo "FAIL")
   if [[ "$DNS_TEST" != "FAIL" ]] && [[ -n "$DNS_TEST" ]]; then
     pass "DNS resolution: working"
   else
@@ -2713,9 +2946,16 @@ if ! should_skip "certificates"; then
 header "23" "CRYPTO & CERTIFICATES"
 ###############################################################################
 
+# F-168: Cross-distro CA certificate count (trust is Fedora/RHEL-only)
 if require_cmd trust; then
   CA_COUNT=$(trust list 2>/dev/null | grep -c "type: certificate" || echo "?")
   info "System CA certificates: $CA_COUNT"
+elif [[ -f /etc/ssl/certs/ca-certificates.crt ]]; then
+  CA_COUNT=$(grep -c "BEGIN CERTIFICATE" /etc/ssl/certs/ca-certificates.crt 2>/dev/null || echo "?")
+  info "System CA certificates: $CA_COUNT (from ca-certificates.crt)"
+elif [[ -d /etc/ssl/certs ]]; then
+  CA_COUNT=$(find /etc/ssl/certs -maxdepth 1 \( -name "*.pem" -o -name "*.crt" \) 2>/dev/null | wc -l)
+  info "System CA certificates: $CA_COUNT (from /etc/ssl/certs/)"
 fi
 
 if require_cmd openssl; then
@@ -2750,12 +2990,23 @@ header "24" "ENVIRONMENT & SECRETS"
 ###############################################################################
 
 # World-readable private keys
+# Two-stage detection: filename candidates → content verification (magic strings).
+# Filename ".key" alone is NOT sufficient (uBlock Origin IDB records, test
+# fixtures, API config files all use this). Permission check uses 077 mask
+# but excludes 640 (common for service-managed keys with group ownership).
 EXPOSED_KEYS=$(while read -r key; do
+  _is_real_private_key "$key" || continue
   PERMS=$(stat -c %a "$key" 2>/dev/null)
-  if (( (8#${PERMS:-777} & 8#077) != 0 )); then
+  # Only flag world-readable (other bits) — group=4 is often intentional
+  # (e.g. libvirt's kvm:kvm group ownership)
+  if (( (8#${PERMS:-777} & 8#007) != 0 )); then
     echo "$key ($PERMS)"
   fi
-done < <(find /home /root \( -name "*.key" -o -name "id_rsa" -o -name "id_ed25519" -o -name "id_ecdsa" \) ! -name "*.pub" ! -path "*/cacert*" ! -path "*/ca-bundle*" ! -path "*public_key*" ! -path "*/roots.pem" 2>/dev/null))
+done < <(_safe_find_home \
+  \( -name "*.key" -o -name "id_rsa" -o -name "id_ed25519" -o -name "id_ecdsa" -o -name "id_dsa" \) \
+  ! -name "*.pub" \
+  ! -path "*/cacert*" ! -path "*/ca-bundle*" \
+  ! -path "*public_key*" ! -path "*/roots.pem"))
 if [[ -z "$EXPOSED_KEYS" ]]; then
   pass "No exposed private keys"
 else
@@ -2765,7 +3016,8 @@ else
   fi
 fi
 
-ENV_FILES=$(find /home /root /opt /srv -name ".env" -readable 2>/dev/null | wc -l)
+# .env files (uses _safe_find_home — same snapshot/cache excludes)
+ENV_FILES=$(_safe_find_home \( -name ".env" -o -name ".env.local" -o -name ".env.production" \) -readable -size +0c | wc -l)
 if [[ "$ENV_FILES" -gt 0 ]]; then
   info ".env files found: $ENV_FILES"
 fi
@@ -2978,9 +3230,13 @@ if ! $JSON_MODE; then
 fi
 
 sub_header "Failed logins"
+# F-184: redact IPs to avoid leaking attack-source data when output is shared
 if ! $JSON_MODE; then
   while read -r line; do
-    [[ -n "$line" ]] && printf "       %s\n" "$line"
+    [[ -z "$line" ]] && continue
+    # Redact IPv4 addresses (privacy when sharing audit output)
+    line_redacted=$(echo "$line" | sed 's/\b[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\b/X.X.X.X/g')
+    printf "       %s\n" "$line_redacted"
   done < <(lastb -n 5 2>/dev/null | head -5)
 fi
 
@@ -3165,10 +3421,16 @@ while IFS=: read -r _huser _ _huid _ _ _hhome _; do
   [[ -d "$_hhome" ]] || continue
   _HPERMS=$(stat -c %a "$_hhome" 2>/dev/null)
   [[ -z "$_HPERMS" ]] && continue
-  if (( (8#${_HPERMS} & 8#027) != 0 )); then
-    warn "Home directory $_hhome permissions: $_HPERMS (should be 750 or stricter)"
+  # Severity tiering: 0xx (no o/g) = pass, 0x5 (group-only) = pass, 755 (Linux
+  # default, group+other read) = INFO with note, anything writable = warn.
+  # 755 is the install default on Fedora/Ubuntu — flagging it as WARN creates
+  # systematic alarm fatigue (F-196).
+  if (( (8#${_HPERMS} & 8#022) != 0 )); then
+    warn "Home directory $_hhome: $_HPERMS (group/other writable — fix with chmod 750)"
+  elif (( (8#${_HPERMS} & 8#005) != 0 )); then
+    info "Home directory $_hhome: $_HPERMS (Linux default — chmod 750 for stricter privacy)"
   else
-    pass "Home directory $_hhome: $_HPERMS"
+    pass "Home directory $_hhome: $_HPERMS (private)"
   fi
   # Check ownership
   _HOWNER=$(stat -c %U "$_hhome" 2>/dev/null)
@@ -3228,10 +3490,17 @@ while IFS=: read -r _huser _ _huid _ _ _hhome _; do
   [[ "$_huid" -ge 1000 && "$_huid" -lt 65534 ]] || continue
   for _histf in "$_hhome/.bash_history" "$_hhome/.zsh_history"; do
     [[ -f "$_histf" ]] || continue
-    _SH_SUSP=$(grep -ciE "curl.*\|.*bash|wget.*\|.*sh|curl.*-o.*/tmp|wget.*/tmp|chmod\s+\+x.*/tmp|/dev/tcp|nc\s+-e|ncat\s+-e" "$_histf" 2>/dev/null || true)
+    _SH_PATTERN="curl.*\|.*bash|wget.*\|.*sh|curl.*-o.*/tmp|wget.*/tmp|chmod\s+\+x.*/tmp|/dev/tcp|nc\s+-e|ncat\s+-e"
+    _SH_SUSP=$(grep -ciE "$_SH_PATTERN" "$_histf" 2>/dev/null || true)
     _SH_SUSP=${_SH_SUSP:-0}
     if [[ "$_SH_SUSP" -gt 0 ]]; then
       warn "$_SH_SUSP suspicious entries in $_histf (curl|bash, wget, /dev/tcp patterns)"
+      # F-200: show first 3 examples (truncated) so user can audit instead of guess
+      if ! $JSON_MODE; then
+        grep -nE "$_SH_PATTERN" "$_histf" 2>/dev/null | head -3 | while read -r line; do
+          printf "       %s\n" "${line:0:90}"
+        done
+      fi
       ((_SUSPICIOUS_HIST += _SH_SUSP))
     fi
   done
@@ -3249,9 +3518,11 @@ header "31" "KERNEL MODULES & INTEGRITY"
 
 # Suspicious kernel modules (basic heuristic — real rootkits use innocuous names)
 sub_header "Suspicious Module Check"
+# F-201: Same anti-pattern as F-136 — real rootkits don't advertise themselves
+# with obvious names. AIDE/IMA file-integrity checks are the reliable signal.
 SUSPICIOUS_MODS=$(lsmod 2>/dev/null | awk '{print $1}' | grep -iE "backdoor|rootkit|hide|keylog|sniff|inject" || true)
 if [[ -z "$SUSPICIOUS_MODS" ]]; then
-  pass "No suspicious kernel modules loaded (basic name-based heuristic)"
+  pass "No obvious-named suspicious modules (real rootkits hide — rely on IMA/AIDE for integrity)"
 else
   fail "Suspicious kernel modules: $SUSPICIOUS_MODS"
 fi
@@ -3353,12 +3624,28 @@ else
   info "Boot mode: Legacy BIOS"
 fi
 
-# Kernel module signing
+# Kernel module signing — checks compile-time AND runtime enforcement (F-208).
+# Modern distros often build with CONFIG_MODULE_SIG=y but enforce at runtime
+# via Secure Boot or kernel cmdline (module.sig_enforce=1). Pure compile-time
+# detection misses these.
 if [[ -f /proc/sys/kernel/tainted ]]; then
+  _SIG_ENFORCED=false
+  _SIG_REASON=""
   if grep -q "CONFIG_MODULE_SIG_FORCE=y" /boot/config-"$(uname -r)" 2>/dev/null; then
-    pass "Kernel module signature enforcement: enabled"
+    _SIG_ENFORCED=true
+    _SIG_REASON="compile-time"
+  elif [[ -f /sys/module/module/parameters/sig_enforce ]] && \
+       [[ "$(cat /sys/module/module/parameters/sig_enforce 2>/dev/null)" == "Y" ]]; then
+    _SIG_ENFORCED=true
+    _SIG_REASON="runtime (likely Secure Boot)"
+  elif grep -qw "module.sig_enforce=1" /proc/cmdline 2>/dev/null; then
+    _SIG_ENFORCED=true
+    _SIG_REASON="runtime (kernel cmdline)"
+  fi
+  if $_SIG_ENFORCED; then
+    pass "Kernel module signing: enforced ($_SIG_REASON)"
   else
-    info "Kernel module signature enforcement: not forced"
+    info "Kernel module signing: not enforced"
   fi
 fi
 
@@ -3388,21 +3675,26 @@ header "34" "SYSTEM INTEGRITY CHECKS"
 # File Integrity — key system binaries
 sub_header "Critical Binary Integrity"
 if require_cmd rpm; then
-  $JSON_MODE || printf "  ${CYN}Running rpm -Va (full package verify, may take several minutes)...${RST}\n"
-  RPM_VA_OUTPUT=$(rpm -Va 2>/dev/null || true)
-  RPM_VERIFY_ALL=$(echo "$RPM_VA_OUTPUT" | grep -cE "^..5" || true)
-  RPM_VERIFY_ALL=${RPM_VERIFY_ALL:-0}
-  RPM_VERIFY_BIN=$(echo "$RPM_VA_OUTPUT" | grep -E "^..5" | grep -v " c " \
-    | grep -cv "\.pyc\b\|/__pycache__/\|/usr/lib/issue" || true)
-  RPM_VERIFY_BIN=${RPM_VERIFY_BIN:-0}
-  if [[ "$RPM_VERIFY_ALL" -eq 0 ]]; then
-    pass "RPM verify: all package files intact"
-  elif [[ "$RPM_VERIFY_BIN" -eq 0 ]]; then
-    pass "RPM verify: $RPM_VERIFY_ALL config files changed (no binaries — normal after hardening)"
-  elif [[ "$RPM_VERIFY_BIN" -le 5 ]]; then
-    warn "RPM verify: $RPM_VERIFY_BIN binaries + $((RPM_VERIFY_ALL - RPM_VERIFY_BIN)) configs changed"
+  $JSON_MODE || printf "  ${CYN}Running rpm -Va (full package verify, max 90s)...${RST}\n"
+  # Timeout prevents 5+ minute hangs on large package sets (F-211)
+  RPM_VA_OUTPUT=$(timeout 90 rpm -Va 2>/dev/null || echo "TIMEOUT")
+  if [[ "$RPM_VA_OUTPUT" == "TIMEOUT" ]]; then
+    warn "RPM verify: timed out after 90s (large package set or DB locked)"
   else
-    fail "RPM verify: $RPM_VERIFY_BIN binaries with changed checksums!"
+    RPM_VERIFY_ALL=$(echo "$RPM_VA_OUTPUT" | grep -cE "^..5" || true)
+    RPM_VERIFY_ALL=${RPM_VERIFY_ALL:-0}
+    RPM_VERIFY_BIN=$(echo "$RPM_VA_OUTPUT" | grep -E "^..5" | grep -v " c " \
+      | grep -cv "\.pyc\b\|/__pycache__/\|/usr/lib/issue" || true)
+    RPM_VERIFY_BIN=${RPM_VERIFY_BIN:-0}
+    if [[ "$RPM_VERIFY_ALL" -eq 0 ]]; then
+      pass "RPM verify: all package files intact"
+    elif [[ "$RPM_VERIFY_BIN" -eq 0 ]]; then
+      pass "RPM verify: $RPM_VERIFY_ALL config files changed (no binaries — normal after hardening)"
+    elif [[ "$RPM_VERIFY_BIN" -le 5 ]]; then
+      warn "RPM verify: $RPM_VERIFY_BIN binaries + $((RPM_VERIFY_ALL - RPM_VERIFY_BIN)) configs changed"
+    else
+      fail "RPM verify: $RPM_VERIFY_BIN binaries with changed checksums!"
+    fi
   fi
 elif require_cmd debsums; then
   DEB_VERIFY=$(debsums -s 2>/dev/null | wc -l)
@@ -3426,20 +3718,37 @@ elif require_cmd pacman; then
   fi
 fi
 
-# Check for world-writable directories in PATH
+# Check PATH for world-writable dirs AND `.`/empty/relative entries (F-214).
+# `.` in PATH is a classic privilege-escalation vector — running `ls` in an
+# attacker-controlled directory could execute their malicious binary.
 sub_header "PATH Security"
-WW_PATH=0
+PATH_ISSUES=0
 IFS=: read -ra PATH_DIRS <<< "$PATH"
 for DIR in "${PATH_DIRS[@]}"; do
+  if [[ -z "$DIR" ]]; then
+    fail "PATH contains empty entry (equivalent to '.' — privilege escalation risk)"
+    ((PATH_ISSUES++))
+    continue
+  fi
+  if [[ "$DIR" == "." ]]; then
+    fail "PATH contains '.' (current directory — privilege escalation risk)"
+    ((PATH_ISSUES++))
+    continue
+  fi
+  if [[ "$DIR" != /* ]]; then
+    fail "PATH contains relative entry: $DIR (privilege escalation risk)"
+    ((PATH_ISSUES++))
+    continue
+  fi
   # Skip symlinks (e.g. /sbin -> /usr/sbin on Fedora)
   [[ -L "$DIR" ]] && continue
   if [[ -d "$DIR" ]] && [[ "$(stat -c %a "$DIR" 2>/dev/null)" =~ [2367]$ ]]; then
     warn "World-writable directory in PATH: $DIR"
-    ((WW_PATH++))
+    ((PATH_ISSUES++))
   fi
 done
-if [[ "$WW_PATH" -eq 0 ]]; then
-  pass "No world-writable directories in PATH"
+if [[ "$PATH_ISSUES" -eq 0 ]]; then
+  pass "PATH security: no world-writable, '.', or relative entries"
 fi
 
 # Duplicate lines in /etc/hosts
@@ -3504,14 +3813,22 @@ check_browser_privacy() {
 
   _bp_check_user() {
     local user="$1" uid="$2" home="$3"
-    # Check all known Firefox profile locations:
-    # - Standard:       ~/.mozilla/firefox  (most distros)
-    # - XDG-compliant:  ~/.config/mozilla/firefox  (Fedora 33+, some others)
-    # - Flatpak:        ~/.var/app/org.mozilla.firefox/.mozilla/firefox
+    # Firefox-family profile locations (use prefs.js syntax).
+    # Privacy users (this tool's audience) often run LibreWolf/Tor Browser
+    # rather than vanilla Firefox — covered explicitly here.
     local ff_dirs=(
+      # Firefox standard + XDG + Flatpak
       "$home/.mozilla/firefox"
       "$home/.config/mozilla/firefox"
       "$home/.var/app/org.mozilla.firefox/.mozilla/firefox"
+      # LibreWolf (Firefox fork with hardened defaults)
+      "$home/.librewolf"
+      "$home/.var/app/io.gitlab.librewolf-community/.librewolf"
+      # Tor Browser (Firefox-based)
+      "$home/.local/share/torbrowser/tbb/x86_64/tor-browser/Browser/TorBrowser/Data/Browser"
+      "$home/.var/app/com.github.micahflee.torbrowser-launcher/data/.tor-browser/app/Browser/TorBrowser/Data/Browser"
+      # Waterfox
+      "$home/.waterfox"
     )
 
     local prefs_files=()
@@ -3914,14 +4231,23 @@ check_network_privacy() {
   local hostname
   hostname="$(hostname 2>/dev/null)"
   local real_names=false
+  # Word-boundary match (require name as standalone word, not substring).
+  # Min 5 chars to avoid FPs on short common names (Ann, Fox, Eve, Tim).
+  # Original 3-char threshold caused systematic FP on hostnames like
+  # "firefox-test" matching user "Fox".
+  _name_in_hostname() {
+    local name="$1" host="$2"
+    [[ ${#name} -ge 5 ]] || return 1
+    [[ "${host,,}" =~ (^|[-_.])${name,,}([-_.]|$) ]]
+  }
   while IFS=: read -r user _ uid _ gecos _ _; do
     [[ "$uid" -ge 1000 ]] || continue
     local full_name="${gecos%%,*}"
     local first_name="${full_name%% *}"
     local last_name="${full_name##* }"
     [[ -z "$first_name" ]] && first_name="$user"
-    if [[ "${hostname,,}" == *"${first_name,,}"* && ${#first_name} -ge 3 ]] || \
-       [[ -n "$last_name" && "$last_name" != "$first_name" && "${hostname,,}" == *"${last_name,,}"* && ${#last_name} -ge 3 ]]; then
+    if _name_in_hostname "$first_name" "$hostname" || \
+       { [[ -n "$last_name" && "$last_name" != "$first_name" ]] && _name_in_hostname "$last_name" "$hostname"; }; then
       real_names=true
       break
     fi
@@ -4112,33 +4438,44 @@ check_data_privacy() {
       fi
     fi
 
-    local histfile="$home/.bash_history"
-    local bashrc="$home/.bashrc"
-    if [[ -f "$histfile" ]]; then
-      local lines
-      lines="$(wc -l < "$histfile" 2>/dev/null || true)"
-      lines=${lines:-0}
-      if [[ "$lines" -gt 10000 ]]; then
-        warn "Bash history has $lines lines [$user] — may contain sensitive data"
+    # F-243: scan history files for sensitive content patterns instead of
+    # raw line count (10000 lines is arbitrary; long-time users hit it
+    # without it being a privacy issue. Real concern is content.)
+    local hist_files=(
+      "$home/.bash_history"
+      "$home/.zsh_history"
+      "$home/.fish_history"
+      "$home/.python_history"
+      "$home/.psql_history"
+      "$home/.mysql_history"
+      "$home/.sqlite_history"
+      "$home/.node_repl_history"
+    )
+    local hf
+    for hf in "${hist_files[@]}"; do
+      [[ -f "$hf" ]] || continue
+      local sensitive
+      sensitive=$(grep -ciE 'password=[^[:space:]]+|token=[^[:space:]]+|api[_-]?key=[^[:space:]]+|secret=[^[:space:]]+|export.*KEY=' "$hf" 2>/dev/null || true)
+      sensitive=${sensitive:-0}
+      if [[ "$sensitive" -gt 0 ]]; then
+        warn "$sensitive potential secrets in $hf [$user]"
       fi
-    fi
+    done
+    local bashrc="$home/.bashrc"
     if [[ -f "$bashrc" ]]; then
       local histsize
       histsize="$(grep -oP '^(export\s+)?HISTSIZE=\K\d+' "$bashrc" 2>/dev/null | tail -1)"
       if [[ -n "$histsize" && "$histsize" -gt 10000 ]]; then
-        warn "HISTSIZE=$histsize (very large) [$user]"
-      fi
-      local histfilesize
-      histfilesize="$(grep -oP '^(export\s+)?HISTFILESIZE=\K\d+' "$bashrc" 2>/dev/null | tail -1)"
-      if [[ -n "$histfilesize" && "$histfilesize" -gt 10000 ]]; then
-        warn "HISTFILESIZE=$histfilesize (very large) [$user]"
+        info "HISTSIZE=$histsize (large — consider scrubbing periodically) [$user]"
       fi
     fi
   }
 
   _for_each_user _dp_check_user
 
-  local clip_procs=("gpaste-daemon" "klipper" "clipman" "clipit" "parcellite" "copyq" "greenclip")
+  # F-244: klipper is KDE Plasma's default clipboard manager; flagging it as
+  # WARN on every Plasma install is alarm fatigue. Use INFO with config-check.
+  local clip_procs=("gpaste-daemon" "clipman" "clipit" "parcellite" "copyq" "greenclip")
   local clip_found=false
   local proc
   for proc in "${clip_procs[@]}"; do
@@ -4147,6 +4484,15 @@ check_data_privacy() {
       clip_found=true
     fi
   done
+  # KDE klipper: special-cased — it's the DE default
+  if pgrep -x klipper &>/dev/null; then
+    if [[ "$_DE_FAMILY" == "kde" ]]; then
+      info "Klipper running (KDE default) — disable clipboard history in System Settings for max privacy"
+    else
+      warn "Klipper running outside KDE — may store passwords in memory"
+    fi
+    clip_found=true
+  fi
   if [[ "$clip_found" == false ]]; then
     pass "No clipboard manager daemon detected"
   fi
@@ -4663,19 +5009,23 @@ check_keyring_security() {
   done < /etc/passwd
   [[ "$gpg_checked" -eq 0 ]] && info "No gpg-agent.conf found for any user"
 
+  # F-267: subdirectory search for secret files (most .env files live in
+  # project subdirs, not directly in home). _safe_find_home excludes
+  # .snapshots, node_modules, .git, .cache, .venv.
   local secrets_found=0
-  local secret_patterns=(".password" ".secret" ".credentials" ".env" "passwords.txt" "secrets.txt")
+  while read -r f; do
+    [[ -z "$f" ]] && continue
+    fail "Plaintext secret file: $f"
+    secrets_found=1
+  done < <(_safe_find_home -maxdepth 6 -type f -size +0c \
+    \( -name ".env" -o -name ".env.local" -o -name ".env.production" \
+       -o -name ".env.development" -o -name ".password" -o -name ".secret" \
+       -o -name ".credentials" -o -name "passwords.txt" -o -name "secrets.txt" \
+       -o -name "credentials.json" \))
   while IFS=: read -r user _ uid _ _ home shell; do
     [[ "$uid" -ge 1000 && "$uid" -lt 65534 ]] || continue
     [[ "$shell" == */nologin || "$shell" == */false ]] && continue
     [[ -d "$home" ]] || continue
-    for pat in "${secret_patterns[@]}"; do
-      local target="$home/$pat"
-      if [[ -f "$target" && -s "$target" ]]; then
-        fail "Plaintext secret file found: $target"
-        secrets_found=1
-      fi
-    done
     if [[ -f "$home/.netrc" ]]; then
       local perms
       perms=$(stat -c '%a' "$home/.netrc" 2>/dev/null)
@@ -4782,6 +5132,54 @@ else
   RATING_COLOR="$RED"
 fi
 
+# Build AI prompt text once if --ai is set (used by both JSON and text modes)
+_AI_TEXT=""
+if $AI_MODE; then
+  _ai_ctx=""
+  lsblk -o TYPE 2>/dev/null | grep -q crypt && _ai_ctx="${_ai_ctx}, LUKS"
+  [[ -n "$VPN_IFACES" ]] && _ai_ctx="${_ai_ctx}, VPN active"
+  command -v flatpak &>/dev/null && _ai_ctx="${_ai_ctx}, Flatpak"
+  $HAS_SELINUX && _ai_ctx="${_ai_ctx}, SELinux"
+  $HAS_APPARMOR && _ai_ctx="${_ai_ctx}, AppArmor"
+  _AI_TEXT="I ran NoID Privacy for Linux v${NOID_PRIVACY_VERSION} — a 390+ check privacy & security audit.
+Tool: https://github.com/NexusOne23/noid-privacy-linux
+
+System: ${DISTRO_PRETTY} ${KERNEL} ${DESKTOP_ENV}"
+  [[ -n "$_ai_ctx" ]] && _AI_TEXT="${_AI_TEXT}
+Context: ${_ai_ctx#, }"
+  _AI_TEXT="${_AI_TEXT}
+Score: ${SCORE}% ${RATING} (${PASS} pass, ${FAIL} fail, ${WARN} warn, ${INFO} info)
+"
+  if [[ ${#FAIL_MSGS[@]} -gt 0 ]]; then
+    _AI_TEXT="${_AI_TEXT}
+FAILED (${#FAIL_MSGS[@]}):"
+    for msg in "${FAIL_MSGS[@]}"; do
+      _AI_TEXT="${_AI_TEXT}
+  - $msg"
+    done
+  fi
+  if [[ ${#WARN_MSGS[@]} -gt 0 ]]; then
+    _AI_TEXT="${_AI_TEXT}
+
+WARNINGS (${#WARN_MSGS[@]}):"
+    for msg in "${WARN_MSGS[@]}"; do
+      _AI_TEXT="${_AI_TEXT}
+  - $msg"
+    done
+  fi
+  if [[ ${#FAIL_MSGS[@]} -eq 0 && ${#WARN_MSGS[@]} -eq 0 ]]; then
+    _AI_TEXT="${_AI_TEXT}
+
+No issues found. System is fully hardened."
+  fi
+  _AI_TEXT="${_AI_TEXT}
+
+For each finding: explain the risk, show the exact fix command,
+warn if it could break anything, and ask before applying.
+Verify each command against current system state before suggesting.
+If you cannot verify a fact, say so."
+fi
+
 if $JSON_MODE; then
   # --- JSON Output ---
   TOTAL=$((PASS + FAIL + WARN + INFO))
@@ -4811,7 +5209,13 @@ if $JSON_MODE; then
       printf '    %s\n' "${JSON_FINDINGS[$i]}"
     fi
   done
-  printf '  ]\n'
+  printf '  ]'
+  # F-273: embed ai_prompt as JSON field when --ai was set
+  if $AI_MODE && [[ -n "$_AI_TEXT" ]]; then
+    printf ',\n  "ai_prompt": "%s"\n' "$(_json_escape "$_AI_TEXT")"
+  else
+    printf '\n'
+  fi
   printf '}\n'
 else
   # --- Normal Summary Output ---
@@ -4835,15 +5239,8 @@ else
   printf "${CYN}Report generated: $NOW${RST}\n"
   printf "${CYN}by NexusOne23 — NoID Privacy for Linux v${NOID_PRIVACY_VERSION} | https://noid-privacy.com/linux.html${RST}\n"
 
-  # --- AI Mode Output ---
-  if $AI_MODE; then
-    _ai_ctx=""
-    lsblk -o TYPE 2>/dev/null | grep -q crypt && _ai_ctx="${_ai_ctx}, LUKS"
-    [[ -n "$VPN_IFACES" ]] && _ai_ctx="${_ai_ctx}, VPN active"
-    command -v flatpak &>/dev/null && _ai_ctx="${_ai_ctx}, Flatpak"
-    $HAS_SELINUX && _ai_ctx="${_ai_ctx}, SELinux"
-    $HAS_APPARMOR && _ai_ctx="${_ai_ctx}, AppArmor"
-
+  # --- AI Mode Output (uses _AI_TEXT built earlier) ---
+  if $AI_MODE && [[ -n "$_AI_TEXT" ]]; then
     echo ""
     echo ""
     echo -e "${BOLD}${CYN}╔══════════════════════════════════════════════════════════════════════╗${RST}"
@@ -4854,33 +5251,7 @@ else
     echo ""
     echo "▼▼▼ COPY FROM HERE ▼▼▼"
     echo ""
-    echo "I ran NoID Privacy for Linux v${NOID_PRIVACY_VERSION} — a 390+ check privacy & security audit."
-    echo "Tool: https://github.com/NexusOne23/noid-privacy-linux"
-    echo ""
-    echo "System: ${DISTRO_PRETTY} ${KERNEL} ${DESKTOP_ENV}"
-    [[ -n "$_ai_ctx" ]] && echo "Context: ${_ai_ctx#, }"
-    echo "Score: ${SCORE}% ${RATING} (${PASS} pass, ${FAIL} fail, ${WARN} warn, ${INFO} info)"
-    echo ""
-    if [[ ${#FAIL_MSGS[@]} -gt 0 ]]; then
-      echo "FAILED (${#FAIL_MSGS[@]}):"
-      for msg in "${FAIL_MSGS[@]}"; do
-        echo "  - $msg"
-      done
-      echo ""
-    fi
-    if [[ ${#WARN_MSGS[@]} -gt 0 ]]; then
-      echo "WARNINGS (${#WARN_MSGS[@]}):"
-      for msg in "${WARN_MSGS[@]}"; do
-        echo "  - $msg"
-      done
-      echo ""
-    fi
-    if [[ ${#FAIL_MSGS[@]} -eq 0 && ${#WARN_MSGS[@]} -eq 0 ]]; then
-      echo "No issues found. System is fully hardened."
-      echo ""
-    fi
-    echo "For each finding: explain the risk, show the exact fix command,"
-    echo "warn if it could break anything, and ask before applying."
+    echo "$_AI_TEXT"
     echo ""
     echo "▲▲▲ COPY TO HERE ▲▲▲"
   fi

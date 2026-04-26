@@ -7,6 +7,137 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.4.0] - 2026-04-27
+
+### 🔥 Critical Bug Fixes (False-FAIL elimination)
+
+These fixes eliminate false-FAILs on Snapper/Timeshift systems (openSUSE
+default, Mint default, many Fedora/Ubuntu setups).
+
+- **Section 12**: SUID/SGID/world-writable/unowned file scans now exclude
+  `*/.snapshots/*`, `*/timeshift-*/*`, `*/.btrfs-snapshots/*`, `*/.snapper/*`.
+  Previously inflated counts massively on btrfs+snapshot systems (real example:
+  81 → 15 SUID files on Snapper-installed Fedora).
+- **Section 24**: Private-key detection now uses content magic-string
+  verification (PEM headers) instead of filename matching. Eliminates FPs
+  from uBlock Origin IDB (`key_*.key`), test fixtures, API config files.
+  Permission threshold tightened from 077 to 007 (group-readable is often
+  intentional for service accounts like libvirt's `kvm:kvm`).
+- **Section 15**: rkhunter (last release 2018-02-24) is now reported as INFO
+  with deprecation warning. Signatures haven't been updated for 8 years and
+  miss XZ Backdoor, Bootkitty, BPFDoor, Kovid. chkrootkit (last release
+  2025-05-12) remains the recommended scanner.
+
+### 🛡️ Honesty in Documentation
+
+- **README**: Distro support claim narrowed from "Tested on 8 distros" to
+  "Optimized for Fedora/RHEL · Tested on Ubuntu/Debian · Best-effort on
+  Arch/openSUSE/Mint/Pop!_OS"
+- **README + SECURITY.md**: "no network requests" claim made honest. Tool
+  now clearly documents that `vpn`/`interfaces`/`netleaks` sections issue
+  3rd-party requests (Mozilla, Akamai, Cloudflare, Google) by default.
+- **SECURITY.md**: Removed theatrical SHA256 verification step (no published
+  hashes) and broken "verify read-only" grep command. Recommends human code
+  review as the meaningful integrity check.
+- **CHECKS.md**: Section descriptions corrected to match actual code (Sec 16
+  process check is heuristic, Sec 17 is sysctl-based not deep-analysis,
+  Sec 24 scans key files not env vars).
+
+### ✨ New Helpers + Flags
+
+- `_safe_find_root` / `_safe_find_home` — Snapshot-aware find wrappers
+- `_is_real_private_key` — Content-based crypto-key detection
+- `has_firewall_block_on_phys` — Generalized firewall-block (nft + iptables + ufw)
+- `_grub_main_cfg` / `_grub_password_paths` — Cross-distro GRUB paths
+- `_service_active_any` / `_service_masked_any` / `_service_enabled_any` —
+  Cross-distro service-name normalization (httpd|apache2, smb|smbd)
+- `--offline` flag: shorthand for `--skip vpn --skip interfaces --skip netleaks`
+
+### 🐛 Bug Fixes (28 medium findings)
+
+- **Sec 1 (Kernel)**: Secure Boot check now correctly classifies legacy BIOS
+  as N/A (was reporting DISABLED). Adds efivars-based fallback when mokutil
+  missing.
+- **Sec 3 (Firewall)**: Default-zone false-positive fixed when no interfaces
+  assigned but services declared
+- **Sec 5 (VPN)**: Connectivity check ICMP-first (no Mozilla tracking);
+  Cloudflare's `cp.cloudflare.com/generate_204` as HTTP fallback
+- **Sec 5 (VPN)**: Promiscuous-mode check excludes virtualization bridges
+  (virbr/docker/br-/veth/lxcbr/cni-/podman/tap)
+- **Sec 7 (Services)**: cups/avahi-daemon/bluetooth severity now context-aware
+  (INFO on desktop with explanation, WARN on server). Service names
+  generalized for cross-distro: httpd|apache2, smb|smbd, nmb|nmbd
+- **Sec 8 (Ports)**: Externally-bound port firewall-block check generalized
+  to cover iptables-only systems and ufw (not just nftables)
+- **Sec 11 (Users)**: NOPASSWD detection regex correctly skips tab-indented
+  comments
+- **Sec 14 (Updates)**: dnf5-automatic upgrade_type parser uses parameter
+  expansion (no more `cut -d= -f2` truncation)
+- **Sec 15 (Rootkit)**: chkrootkit now `timeout 120s`-wrapped; FP filter
+  surfaces filtered findings as INFO (transparency)
+- **Sec 16 (Process)**: Suspicious-process name-pattern check annotates PASS
+  ("real malware renames — see AIDE/IMA") to prevent false reassurance
+- **Sec 18 (Containers)**: Docker daemon distinguishes rootless (INFO) from
+  rootful (WARN)
+- **Sec 19 (Logs)**: dmesg error count limited to last 1 hour. Empty-log
+  check only runs when rsyslog/syslog-ng active.
+- **Sec 20 (Performance)**: RAM threshold uses `available` instead of `used`.
+  I/O-wait read directly from `/proc/stat` (instant, no 2-second blocking).
+- **Sec 21 (Hardware)**: lm_sensors detection distinguishes "not installed"
+  from "installed but unconfigured"
+- **Sec 22 (Interfaces)**: DNS resolution test queries root nameservers
+  (`. NS`) instead of `google.com`
+- **Sec 23 (Certs)**: CA-cert count cross-distro (trust / ca-certificates.crt
+  / /etc/ssl/certs/)
+- **Sec 29 (Logins)**: Failed-login display redacts source IPs
+- **Sec 30 (Hardening)**: Home-directory permissions tier-aware. Suspicious
+  history shows first 3 examples instead of just count.
+- **Sec 31 (Modules)**: Suspicious-module name-pattern check annotates PASS
+  to prevent false reassurance
+- **Sec 33 (Boot)**: Module signing detection now covers compile-time, runtime
+  sig_enforce, and kernel cmdline enforcement
+- **Sec 34 (Integrity)**: `rpm -Va` wrapped in `timeout 90s`. PATH security
+  detects `.`, empty entries, and relative entries (privesc vectors).
+- **Sec 35 (Browser)**: LibreWolf, Tor Browser, Waterfox profile detection
+- **Sec 37 (NetPriv)**: Hostname-real-name detection raised to 5-char minimum
+  + word-boundary match (eliminates "fox" matching "firefox-test")
+- **Sec 38 (DataPriv)**: Bash-history scan replaced size-threshold with
+  sensitive-content pattern scan; covers .zsh/.fish/.python/.psql/.mysql
+  histories. Klipper detection KDE-aware (INFO on Plasma).
+- **Sec 42 (Keyring)**: Plaintext-secret-files check now searches
+  subdirectories (most `.env` files live in dev project subdirs)
+
+### 🏗️ Architecture
+
+- **`--ai` and `--json` no longer mutually exclusive**: JSON output now
+  includes `ai_prompt` field when both flags set. Eliminates the
+  entrypoint.sh double-run problem in CI/CD.
+- **entrypoint.sh refactored**: Single audit run instead of double,
+  `badge_color` and `badge_url` outputs added (Shields.io integration),
+  grouped redirects (SC2129 clean), variable name clarity
+- **AI prompt hardened**: Now includes "Verify each command against current
+  system state before suggesting. If you cannot verify a fact, say so." to
+  reduce LLM hallucination risk
+
+### 🚀 CI Improvements
+
+- CI now triggers on develop/release branches and version tags (was main-only)
+- Distro-test matrix renamed to "Bash Syntax Compat" (honest scope — was
+  pretending to be cross-distro logic test)
+- New "Audit Smoke Test" job actually runs the audit on Ubuntu in offline
+  mode and validates JSON parses cleanly
+- ShellCheck job split into blocking warnings and non-blocking style/info
+- Example workflow pinned to `@v3.4.0` instead of `@main` (supply-chain
+  best practice — example documentation should model good security)
+
+### 🎨 Style/Cosmetic
+
+- 7 ShellCheck issues fixed (SC2086 unquoted vars, SC2126 grep|wc-l → grep -c,
+  SC2004 ${} in arithmetic, SC2129 multiple redirects)
+- entrypoint.sh: `xargs` replaced with `${var// /}` parameter expansion (no fork)
+
+---
+
 ## [3.3.0] - 2026-04-09
 
 ### ✨ New Checks (32 additions from Lynis comparison)

@@ -2,9 +2,10 @@ name: CI - Bash Quality Checks
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, develop, 'release/*' ]
+    tags: [ 'v*.*.*' ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, develop ]
   workflow_dispatch:
 
 permissions:
@@ -23,16 +24,14 @@ jobs:
         run: |
           echo "Bash version: $(bash --version | head -1)"
           echo ""
-          echo "Running syntax check..."
+          echo "Running syntax check on noid-privacy-linux.sh..."
+          bash -n noid-privacy-linux.sh
 
-          if bash -n noid-privacy-linux.sh; then
-            echo ""
-            echo "✅ Syntax check passed!"
-          else
-            echo ""
-            echo "❌ Syntax check FAILED!"
-            exit 1
-          fi
+          echo "Running syntax check on entrypoint.sh..."
+          bash -n entrypoint.sh
+
+          echo ""
+          echo "✅ Syntax check passed!"
 
   shellcheck:
     name: ShellCheck Analysis
@@ -45,15 +44,20 @@ jobs:
       - name: Install ShellCheck
         run: sudo apt-get install -y shellcheck
 
-      - name: Run ShellCheck
+      - name: Run ShellCheck (warning level)
         run: |
           echo "ShellCheck version: $(shellcheck --version | head -2 | tail -1)"
           echo ""
-          echo "Running ShellCheck (errors and warnings)..."
-
           shellcheck --severity=warning --shell=bash --format=tty noid-privacy-linux.sh
+          shellcheck --severity=warning --shell=bash --format=tty entrypoint.sh
           echo ""
-          echo "✅ ShellCheck passed!"
+          echo "✅ ShellCheck (warning) passed!"
+
+      - name: Run ShellCheck (style — non-blocking)
+        continue-on-error: true
+        run: |
+          echo "Style-level issues (informational, non-blocking):"
+          shellcheck --severity=style --shell=bash --format=tty noid-privacy-linux.sh || true
 
   validate-structure:
     name: Validate Project Structure
@@ -86,24 +90,17 @@ jobs:
             echo "✅ All required files present!"
           fi
 
-      - name: Verify script is executable-ready
+      - name: Verify script header
         run: |
-          echo "Checking script header..."
+          head -1 noid-privacy-linux.sh | grep -qE '^#!(/bin/bash|/usr/bin/env bash)' \
+            && echo "✅ Shebang present" \
+            || { echo "❌ Missing shebang"; exit 1; }
 
-          head -1 noid-privacy-linux.sh | grep -qE '^#!(/bin/bash|/usr/bin/env bash)' && echo "✅ Shebang present" || { echo "❌ Missing shebang"; exit 1; }
-
-          echo "Checking script size..."
-          lines=$(wc -l < noid-privacy-linux.sh)
-          echo "  Script: $lines lines"
-
-          if [ "$lines" -lt 3000 ]; then
-            echo "⚠️ Script seems too small (expected 3000+)"
-          else
-            echo "✅ Script size looks good"
-          fi
-
-  distro-test:
-    name: Distro Test (${{ matrix.distro }})
+  syntax-compat:
+    name: Bash Syntax Compat (${{ matrix.name }})
+    # Renamed from "distro-test" to honest scope: this only checks bash syntax
+    # compatibility across distros, NOT actual cross-distro audit logic.
+    # Real cross-distro testing requires running the audit (see audit-smoke job).
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -128,4 +125,31 @@ jobs:
         run: |
           docker run --rm -v "$PWD:/audit:ro" "${{ matrix.distro }}" \
             bash -n /audit/noid-privacy-linux.sh
-          echo "✅ Syntax OK on ${{ matrix.name }}"
+          echo "✅ Bash syntax compatible on ${{ matrix.name }}"
+
+  audit-smoke:
+    name: Audit Smoke Test (Ubuntu)
+    # Real-run smoke test: install deps, run audit with skips for sections
+    # requiring root capabilities not available in containers, validate JSON.
+    # This catches regressions that syntax-compat misses.
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4.2.2
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc curl iproute2 jq net-tools
+
+      - name: Run audit (offline mode, skip root-required sections)
+        run: |
+          # Run with --offline (no network leak tests) and skip sections
+          # requiring sudo on /etc/shadow etc. Validate JSON parses cleanly.
+          sudo bash noid-privacy-linux.sh --json --offline \
+            --skip rootkit --skip audit --skip integrity \
+            > /tmp/audit.json
+          jq . /tmp/audit.json > /dev/null
+          echo "✅ Audit produces valid JSON"
+          jq -r '.summary | "Score: \(.score)% — \(.pass) pass, \(.fail) fail, \(.warn) warn"' /tmp/audit.json

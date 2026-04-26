@@ -54,10 +54,17 @@ NoID Privacy for Linux is designed with security in mind:
 
 ### Audit-Only by Design
 - ✅ **Read-Only**: The script only **reads** system state — it never modifies your system
-- ✅ **No External Dependencies**: Zero third-party binaries, libraries, or package managers
-- ✅ **Pure Bash**: No Python, Ruby, Node.js, or compiled binaries
-- ✅ **No Network Requests by Default**: The script does not phone home or download anything. The `vpn`, `interfaces`, and `netleaks` sections make network requests (ping, dig, curl) to test connectivity, DNS, and VPN leaks. Skip them with `--skip vpn --skip interfaces --skip netleaks` for a fully offline audit.
-- ✅ **No Data Collection**: Zero telemetry, zero analytics, zero tracking
+- ✅ **Pure Bash core**: No Python, Ruby, Node.js, or compiled binaries. Uses standard Linux utilities (most pre-installed) where needed.
+- ✅ **No Telemetry, No Analytics, No Phone-Home**: Zero data collected about you or your system
+- ⚠️ **Network leak-tests run by default**: Three sections issue 3rd-party DNS/HTTP requests to detect IP/DNS leaks:
+  - Section 5 (`vpn`): `curl detectportal.firefox.com` (Mozilla), `curl ifconfig.me` (Cloudflare-fronted)
+  - Section 5 (`netleaks`): `dig whoami.akamai.net` (Akamai)
+  - Section 22 (`interfaces`): `dig google.com` (Google)
+
+  These are **inherent to leak-testing** — you can't test for an IP leak without contacting an external service. For a fully offline audit, use:
+  ```bash
+  sudo bash noid-privacy-linux.sh --skip vpn --skip interfaces --skip netleaks
+  ```
 
 ### Code Transparency
 - ✅ **Single File**: One script, easy to read and audit
@@ -71,9 +78,10 @@ NoID Privacy for Linux is designed with security in mind:
 
 | Version | Supported          | Notes |
 | ------- | ------------------ | ----- |
-| 3.3.x   | ✅ Fully Supported | Current release, 390+ checks, 42 sections |
-| 3.1.x   | ⚠️ Limited Support  | Upgrade to 3.3.x recommended |
-| 2.0.x   | ⚠️ Limited Support  | Upgrade to 3.0.x recommended |
+| 3.4.x   | ✅ Fully Supported | Current release — 6 critical bug fixes (false-FAIL elimination) |
+| 3.3.x   | ⚠️ Limited Support  | Upgrade to 3.4.x recommended |
+| 3.1.x   | ⚠️ Limited Support  | Upgrade to 3.4.x recommended |
+| 2.0.x   | ❌ End of Life     | Upgrade to 3.4.x |
 | 1.x     | ❌ Not Supported   | Legacy version |
 
 **Recommendation:** Always use the latest v3.x release.
@@ -84,21 +92,25 @@ NoID Privacy for Linux is designed with security in mind:
 
 ### Before Running
 
-1. ✅ **Verify Script Integrity**
+1. ✅ **Review the Code** (most important)
    ```bash
-   # Compare SHA256 hash against GitHub Release
-   sha256sum noid-privacy-linux.sh
-   ```
-
-2. ✅ **Review the Code**
-   ```bash
-   # It's one file — read it!
+   # It's one file in pure Bash — read it!
    less noid-privacy-linux.sh
    ```
+   This is the only meaningful integrity check. Don't trust hashes from
+   untrusted sources — read the code yourself.
 
-3. ✅ **Check the Source**
+2. ✅ **Check the Source**
    - Download only from the official GitHub repository
    - Verify the URL: `https://github.com/NexusOne23/noid-privacy-linux`
+   - For CI/CD usage: pin to a specific version (`@v3.4.0`), never `@main`
+
+3. ✅ **Verify against published releases (when available)**
+   ```bash
+   # When tagged releases publish SHA256 sums, compare them:
+   # sha256sum noid-privacy-linux.sh
+   # Compare to https://github.com/NexusOne23/noid-privacy-linux/releases
+   ```
 
 ### During Execution
 
@@ -120,7 +132,8 @@ NoID Privacy for Linux is designed with security in mind:
 
 - ⚠️ The script requires `sudo` to read certain system files (e.g., `/etc/shadow` permissions, firewall rules)
 - ✅ Root access is used for **reading only** — no writes, no modifications
-- ✅ You can verify this: `grep -c 'rm \|mv \|cp \|echo.*>\|tee \|sed -i\|install ' noid-privacy-linux.sh` (should be 0 for system files)
+- ✅ The most reliable verification is human review: the script is one file
+  in plain Bash. Open it in `less` and check what it does.
 
 ### Output Contains System Information
 

@@ -5,7 +5,7 @@
 ### Privacy & Security Audit for Linux Desktops
 
 [![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](https://github.com/NexusOne23/noid-privacy-linux/blob/main/LICENSE)
-[![Version](https://img.shields.io/badge/version-3.3.0-green.svg)](https://github.com/NexusOne23/noid-privacy-linux/releases)
+[![Version](https://img.shields.io/badge/version-3.4.0-green.svg)](https://github.com/NexusOne23/noid-privacy-linux/releases)
 [![Pure Bash](https://img.shields.io/badge/pure-bash-4EAA25.svg?logo=gnu-bash&logoColor=white)](https://github.com/NexusOne23/noid-privacy-linux)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen.svg)](https://github.com/NexusOne23/noid-privacy-linux)
 [![Checks](https://img.shields.io/badge/checks-390%2B-orange.svg)](https://github.com/NexusOne23/noid-privacy-linux)
@@ -14,8 +14,8 @@
 [![Last Commit](https://img.shields.io/github/last-commit/NexusOne23/noid-privacy-linux?style=flat)](https://github.com/NexusOne23/noid-privacy-linux/commits)
 [![Website](https://img.shields.io/badge/Website-noid--privacy.com-0078D4?style=flat)](https://noid-privacy.com)
 
-**390+ checks · 42 sections · Zero dependencies · Pure Bash · AI-powered fixes**
-**Fedora · Ubuntu · Debian · Arch · openSUSE · RHEL · Mint · Pop!_OS**
+**390+ checks · 42 sections · Pure Bash · AI-friendly remediation prompts**
+**Optimized for Fedora/RHEL · Tested on Ubuntu/Debian · Best-effort on Arch/openSUSE/Mint/Pop!_OS**
 
 [Quick Start](#-quick-start) · [What it Checks](#-what-it-checks) · [AI Fixes](#-fix-with-ai) · [Comparison](#-comparison) · [Discussions](https://github.com/NexusOne23/noid-privacy-linux/discussions)
 
@@ -120,8 +120,8 @@ sudo bash noid-privacy-linux.sh --json
 ```
 $ sudo bash noid-privacy-linux.sh --ai
 
-  NoID Privacy for Linux v3.3.0 — Privacy & Security Audit for Linux Desktops
-  2026-02-13 15:03:15 | mydesktop | 6.18.9-200.fc43.x86_64
+  NoID Privacy for Linux v3.4.0 — Privacy & Security Audit for Linux Desktops
+  YYYY-MM-DD HH:MM:SS | mydesktop | 6.19.x-200.fc43.x86_64
   Arch: x86_64 | Distro: Fedora Linux 43 (Workstation Edition)
   Checks: 390+ across 42 sections
 
@@ -214,7 +214,8 @@ Use NoID Privacy for Linux in your CI/CD pipeline to enforce privacy & security 
 
 ```yaml
 - name: Privacy & Security Audit
-  uses: NexusOne23/noid-privacy-linux@main
+  # SECURITY: Pin to specific version, never @main (supply chain risk)
+  uses: NexusOne23/noid-privacy-linux@v3.3.0
   id: audit
   with:
     fail-threshold: '70'   # Fail if score < 70%
@@ -248,7 +249,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4.2.2
-      - uses: NexusOne23/noid-privacy-linux@main
+      - uses: NexusOne23/noid-privacy-linux@v3.3.0  # Pin to version, not @main
         with:
           fail-threshold: '70'
 ```
@@ -289,9 +290,18 @@ Results appear as a rich **GitHub Actions Summary** with score, findings table, 
 
 ## 🔒 Privacy Promise
 
-This script makes **no network requests** for telemetry, analytics, or phone-home. One file, pure Bash — read every line yourself.
+**No telemetry, no analytics, no phone-home.** This tool does not collect or transmit any data about you or your system. One file, pure Bash — read every line yourself.
 
-> **Note:** The `vpn`, `interfaces`, and `netleaks` sections make network requests (ping, dig, curl) to test connectivity, DNS, and VPN leaks. Skip them with `--skip vpn --skip interfaces --skip netleaks` for a fully offline audit.
+> **⚠️ Default-mode network requests:** Three sections issue requests to third parties to test for connectivity/DNS/VPN leaks:
+> - **Section 5 (vpn):** `curl detectportal.firefox.com` (Mozilla), `curl ifconfig.me` (Cloudflare-fronted)
+> - **Section 5 (netleaks):** `dig whoami.akamai.net` (Akamai)
+> - **Section 22 (interfaces):** `dig google.com` (Google)
+>
+> For a **fully offline audit** that makes zero outbound requests, use:
+> ```bash
+> sudo bash noid-privacy-linux.sh --skip vpn --skip interfaces --skip netleaks
+> ```
+> The leak tests themselves require these third-party endpoints to function — there's no way to test "does my IP leak?" without contacting an external service.
 
 ---
 

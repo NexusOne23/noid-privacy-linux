@@ -208,7 +208,7 @@ If your checks don't fit any existing section, you can propose a new one:
 - **Use `printf` instead of `echo -e`** for portable colored output
 - **2-space indentation** (no tabs)
 - **Max line length:** 120 characters (soft limit)
-- **ShellCheck must pass.** Run `shellcheck --severity=warning noid-privacy-linux.sh` before submitting. CI enforces this.
+- **ShellCheck must pass at warning level.** Run `shellcheck --severity=warning noid-privacy-linux.sh` before submitting. CI enforces warnings/errors. Style/info-level issues are tracked but non-blocking — clean them up when convenient.
 
 ### Naming Conventions
 

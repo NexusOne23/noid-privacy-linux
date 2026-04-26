@@ -1,8 +1,13 @@
-# 📋 NoID Privacy for Linux — Complete Check Reference
+# 📋 NoID Privacy for Linux — Section Overview
 
-All 42 sections with descriptions of what each checks and why it matters.
+Section-by-section overview of what the audit checks and why it matters.
 
-> **Version:** 3.3.0 | **Total Checks:** 390+ | **Sections:** 42
+> **Version:** 3.4.0 | **Total Checks:** 390+ | **Sections:** 42
+
+> **Note**: This is a high-level overview. For the full enumeration of every
+> individual check, severity-trigger conditions, and pass/fail values, read
+> [`noid-privacy-linux.sh`](../noid-privacy-linux.sh) directly — the script
+> is intentionally one file in pure Bash, designed to be readable.
 
 ---
 
@@ -51,13 +56,24 @@ Validates LUKS encryption status, cipher strength (aes-xts-plain64), key size (5
 Checks for pending security updates, automatic update configuration (dnf-automatic/unattended-upgrades), repository integrity (GPG keys), and package verification.
 
 ### Section 15: Rootkit & Malware Scan
-Runs rkhunter and chkrootkit if installed, checks for suspicious files, hidden processes, known rootkit signatures, and unusual kernel modules. Filters known false positives.
+Runs **chkrootkit** (active maintenance, last release 2025-05; detects modern
+threats like XZ Backdoor, Bootkitty, BPFDoor) if installed. Filters known
+false positives.
+
+**Note on rkhunter**: If rkhunter is installed, it's reported as INFO with a
+deprecation warning — last release was 2018-02 and signatures don't cover
+post-2018 rootkits. Use chkrootkit + AIDE + IMA for modern integrity.
 
 ### Section 16: Process Security
-Audits running processes for suspicious activity: processes running as root that shouldn't be, unusual command lines, and hidden processes.
+Process counts, zombie processes, deleted-but-running binaries, and a basic
+name-pattern check (annotated as heuristic — real malware renames binaries).
+For actual integrity verification, rely on AIDE/IMA (Section 30) and
+chkrootkit (Section 15).
 
 ### Section 17: Network Security (Advanced)
-Deep network analysis: ARP spoofing indicators, promiscuous mode interfaces, unusual routing, IPv6 tunnel detection, and network namespace audit.
+Anti-spoofing kernel settings (ICMP redirects sysctl), TCP wrapper config
+(deprecated on modern systems — informational only), TCP TIME_WAIT connection
+counts, and ARP-monitoring tool detection (arpwatch/arpon/addrwatch).
 
 ### Section 18: Containers & Virtualization
 Detects Docker, Podman, LXC, and VM hypervisors. Checks container runtime security, socket permissions, and whether containers run as root.
@@ -78,7 +94,12 @@ Detailed network interface audit: all interfaces, IP addresses, MTU, promiscuous
 Audits system certificate store, checks for untrusted or expired certificates, and validates crypto library versions.
 
 ### Section 24: Environment & Secrets
-Scans for secrets in environment variables, exposed API keys, tokens in shell history, and world-readable credential files.
+Scans for **world-readable private key files** (content-verified via PEM
+magic strings — filename `.key` alone is NOT sufficient since uBlock Origin
+IDB and test fixtures use the same extension), `.env` files in user homes
+(uses snapshot/cache-aware find), and configuration files in `/etc` containing
+credential patterns. Snapshot directories (`.snapshots`, `timeshift-btrfs`)
+are excluded to prevent inflated counts on Snapper/Timeshift systems.
 
 ### Section 25: Systemd Security
 Audits systemd unit files for security features: sandboxing (ProtectSystem, ProtectHome, NoNewPrivileges), capability restrictions, and namespace isolation.
