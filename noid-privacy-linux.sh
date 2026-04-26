@@ -2794,9 +2794,12 @@ sub_header "Disk Usage"
 # are by definition always 100% full. Filter them to avoid false FAIL.
 while read -r line; do
   [[ -z "$line" ]] && continue
-  PCT=$(echo "$line" | awk '{print $5}' | tr -d '%')
-  MOUNT=$(echo "$line" | awk '{print $6}')
+  # df -h -T columns: 1=fs 2=type 3=size 4=used 5=avail 6=use% 7=mount
+  PCT=$(echo "$line" | awk '{print $6}' | tr -d '%')
+  MOUNT=$(echo "$line" | awk '{print $NF}')
   FSTYPE=$(echo "$line" | awk '{print $2}')
+  # Bail if PCT is non-numeric (header row, malformed line)
+  [[ "$PCT" =~ ^[0-9]+$ ]] || continue
   # Skip read-only image filesystems (always 100% by design)
   case "$FSTYPE" in
     iso9660|squashfs|erofs|cramfs|romfs)
