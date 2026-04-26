@@ -866,9 +866,30 @@ if require_cmd systemd-analyze; then
   fi
 fi
 
-# GRUB Password
-if [[ -f /boot/grub2/grub.cfg ]] || [[ -f /boot/grub/grub.cfg ]]; then
-  if [[ -f /boot/grub2/user.cfg ]] || grep -rqE '^\s*(password_pbkdf2|password)\s+' /etc/grub.d/ 2>/dev/null; then
+# GRUB Password — F-031: cross-distro detection (Fedora/RHEL: /boot/grub2/,
+# Debian/Ubuntu/Arch: /boot/grub/) plus direct grub.cfg content scan as
+# authoritative fallback (catches all generation paths).
+_GRUB_CFG=$(_grub_main_cfg)
+if [[ -n "$_GRUB_CFG" ]]; then
+  _grub_pwd_found=false
+  # 1. user.cfg (Fedora's grub-setpassword convention)
+  for _gucfg in /boot/grub2/user.cfg /boot/grub/user.cfg; do
+    [[ -f "$_gucfg" ]] && _grub_pwd_found=true
+  done
+  # 2. grub.d snippets (Debian convention via 40_password.conf or similar)
+  if ! $_grub_pwd_found; then
+    if grep -rqE '^\s*(password_pbkdf2|password)\s+' /etc/grub.d/ 2>/dev/null; then
+      _grub_pwd_found=true
+    fi
+  fi
+  # 3. Authoritative: scan generated grub.cfg directly — works on any distro
+  #    regardless of how the password was inserted (Anaconda, debconf, manual)
+  if ! $_grub_pwd_found; then
+    if grep -qE '^\s*(password_pbkdf2|password)\s+' "$_GRUB_CFG" 2>/dev/null; then
+      _grub_pwd_found=true
+    fi
+  fi
+  if $_grub_pwd_found; then
     pass "GRUB password set"
   else
     if lsblk -o TYPE 2>/dev/null | grep -q crypt; then
@@ -2269,17 +2290,26 @@ declare -A PERM_CHECKS=(
   ["/etc/shadow"]="640"
   ["/etc/gshadow"]="640"
   ["/etc/group"]="644"
-  ["/boot/grub2/grub.cfg"]="600"
   ["/etc/crontab"]="600"
   ["/etc/ssh/sshd_config"]="600"
 )
+# F-116: GRUB cfg path is distro-specific (/boot/grub2/ vs /boot/grub/).
+# Use _grub_main_cfg() which probes both, plus EFI fallback locations.
+_GRUB_CFG_PATH=$(_grub_main_cfg)
+[[ -n "$_GRUB_CFG_PATH" ]] && PERM_CHECKS["$_GRUB_CFG_PATH"]="600"
 
 for FILE in "${!PERM_CHECKS[@]}"; do
   if [[ -f "$FILE" ]]; then
     EXPECTED="${PERM_CHECKS[$FILE]}"
     ACTUAL=$(stat -c %a "$FILE" 2>/dev/null)
     if (( (8#${ACTUAL:-777} & ~8#$EXPECTED) == 0 )); then
-      pass "Permissions $FILE: $ACTUAL"
+      # Annotate when stricter-than-expected (e.g. shadow=0 vs expected 640)
+      # to avoid users panicking at "Permissions /etc/shadow: 0" output (F-115)
+      if [[ "$ACTUAL" -lt "$EXPECTED" ]] 2>/dev/null; then
+        pass "Permissions $FILE: $ACTUAL (stricter than recommended $EXPECTED)"
+      else
+        pass "Permissions $FILE: $ACTUAL"
+      fi
     else
       warn "Permissions $FILE: $ACTUAL (expected: <=$EXPECTED)"
     fi
@@ -3757,7 +3787,7 @@ fi
 
 # Unnecessary filesystem modules (new)
 sub_header "Disabled Filesystem Modules"
-for FS_MOD in cramfs freevxfs jffs2 hfs hfsplus squashfs udf; do
+for FS_MOD in cramfs freevxfs jffs2 hfs hfsplus squashfs udf affs befs sysv qnx4 qnx6; do
   if grep -rqsE "install\s+$FS_MOD\s+/(usr/)?s?bin/(false|true)|blacklist\s+$FS_MOD" /etc/modprobe.d/ 2>/dev/null; then
     pass "Module $FS_MOD: disabled"
   elif [[ "$FS_MOD" == "squashfs" ]] && command -v flatpak &>/dev/null; then
@@ -4172,20 +4202,53 @@ check_browser_privacy() {
 
   _for_each_user _bp_check_user
 
+  # F-220: Chromium-family browser detection covers tracking-heavy and
+  # privacy-focused alternatives. Severity differs:
+  # - Chrome/Edge/Vivaldi/Opera: warn (telemetry to vendor)
+  # - Brave: info (privacy-focused defaults but Chromium-based)
+  # - Chromium: info (no Google services by default on most builds)
   local chrome_bin
   local -A chrome_seen=()
-  for chrome_bin in google-chrome google-chrome-stable chromium chromium-browser; do
+  for chrome_bin in google-chrome google-chrome-stable microsoft-edge \
+                    microsoft-edge-stable opera vivaldi vivaldi-stable; do
     if command -v "$chrome_bin" &>/dev/null; then
       local chrome_real
       chrome_real="$(realpath "$(command -v "$chrome_bin")" 2>/dev/null || echo "$chrome_bin")"
       [[ -n "${chrome_seen[$chrome_real]:-}" ]] && continue
       chrome_seen["$chrome_real"]=1
-      warn "$chrome_bin installed — Google telemetry/tracking risk"
+      warn "$chrome_bin installed — vendor telemetry/tracking risk"
     fi
   done
+  for chrome_bin in chromium chromium-browser; do
+    if command -v "$chrome_bin" &>/dev/null; then
+      local chrome_real
+      chrome_real="$(realpath "$(command -v "$chrome_bin")" 2>/dev/null || echo "$chrome_bin")"
+      [[ -n "${chrome_seen[$chrome_real]:-}" ]] && continue
+      chrome_seen["$chrome_real"]=1
+      info "$chrome_bin installed (Chromium upstream — no Google services by default)"
+    fi
+  done
+  for chrome_bin in brave-browser brave; do
+    if command -v "$chrome_bin" &>/dev/null; then
+      local chrome_real
+      chrome_real="$(realpath "$(command -v "$chrome_bin")" 2>/dev/null || echo "$chrome_bin")"
+      [[ -n "${chrome_seen[$chrome_real]:-}" ]] && continue
+      chrome_seen["$chrome_real"]=1
+      info "$chrome_bin installed (privacy-focused Chromium fork)"
+    fi
+  done
+  # Flatpak Brave/Edge/Opera presence
+  if command -v flatpak &>/dev/null; then
+    if flatpak list --app --columns=application 2>/dev/null | grep -qE '^com\.brave\.Browser$'; then
+      info "Brave Browser installed (flatpak)"
+    fi
+    if flatpak list --app --columns=application 2>/dev/null | grep -qE '^com\.microsoft\.Edge$'; then
+      warn "Microsoft Edge installed (flatpak) — vendor telemetry"
+    fi
+  fi
 
   if [[ "$found_any" == false ]]; then
-    info "No Firefox profiles found"
+    info "No Firefox-family browser profiles found"
   fi
 }
 
@@ -5220,19 +5283,23 @@ check_keyring_security() {
   should_skip "keyring" && return
   header "42" "PASSWORD & KEYRING SECURITY"
 
+  # F-263: extended password manager list (KeeWeb, Buttercup, qtpass, NordPass,
+  # LessPass plus established ones).
   local pm_found=0
   local pm_list=""
-  for pm in keepassxc keepass2 bitwarden 1password op pass gopass; do
+  for pm in keepassxc keepass2 keepass keeweb bitwarden bitwarden-cli rbw \
+            1password op pass gopass passmenu lesspass nordpass \
+            buttercup qtpass enpass; do
     if command -v "$pm" &>/dev/null; then
       pm_found=1
       pm_list="${pm_list:+$pm_list, }$pm"
     fi
   done
-  if flatpak list 2>/dev/null | grep -qi 'bitwarden\|keepass\|1password'; then
+  if flatpak list 2>/dev/null | grep -qiE 'bitwarden|keepass|1password|keeweb|buttercup|enpass|nordpass|proton-pass'; then
     pm_found=1
     pm_list="${pm_list:+$pm_list, }(flatpak)"
   fi
-  if snap list 2>/dev/null | grep -qi 'bitwarden\|keepass\|1password'; then
+  if snap list 2>/dev/null | grep -qiE 'bitwarden|keepass|1password|keeweb|buttercup|enpass|nordpass'; then
     pm_found=1
     pm_list="${pm_list:+$pm_list, }(snap)"
   fi
