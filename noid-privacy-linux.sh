@@ -2735,7 +2735,8 @@ fi
 if systemctl is-active dnf5-automatic.timer &>/dev/null || systemctl is-enabled dnf5-automatic.timer &>/dev/null; then
   # Check if configured for security-only updates
   _DNF5_AUTO_CONF="/etc/dnf/dnf5-plugins/automatic.conf"
-  _DNF5_UPGRADE_TYPE=$(grep -i "^upgrade_type" "$_DNF5_AUTO_CONF" 2>/dev/null | cut -d= -f2 | tr -d ' ')
+  # F-128: sed-based extraction preserves any '=' in value (defensive)
+  _DNF5_UPGRADE_TYPE=$(grep -i "^upgrade_type" "$_DNF5_AUTO_CONF" 2>/dev/null | sed -E 's/^[^=]+=[[:space:]]*//;s/[[:space:]]+$//' | tail -1)
   if [[ "${_DNF5_UPGRADE_TYPE,,}" == "security" ]]; then
     pass "Automated updates: dnf5-automatic enabled (security-only)"
   else
@@ -2815,12 +2816,22 @@ else
   info "chkrootkit not installed — skipped (recommended over rkhunter for 2026)"
 fi
 
-# Suspect Cron Jobs
+# Suspect Cron Jobs — F-133: when cron.deny restricts users, `crontab -l -u`
+# silently fails. Read /var/spool/cron/<user> directly as authoritative source.
 sub_header "Cron jobs (all users)"
 for USER_HOME in /home/* /root; do
   [[ -d "$USER_HOME" ]] || continue
   USER=$(basename "$USER_HOME")
-  CRONTAB=$(crontab -l -u "$USER" 2>/dev/null | grep -v "^#" | grep -v "^$" || true)
+  # Direct file read survives cron.deny restrictions
+  _crontab_file=""
+  for _cf in "/var/spool/cron/$USER" "/var/spool/cron/crontabs/$USER"; do
+    [[ -f "$_cf" ]] && _crontab_file="$_cf" && break
+  done
+  if [[ -n "$_crontab_file" ]]; then
+    CRONTAB=$(grep -v "^#" "$_crontab_file" 2>/dev/null | grep -v "^$" || true)
+  else
+    CRONTAB=$(crontab -l -u "$USER" 2>/dev/null | grep -v "^#" | grep -v "^$" || true)
+  fi
   if [[ -n "$CRONTAB" ]]; then
     info "Crontab $USER:"
     while read -r line; do
