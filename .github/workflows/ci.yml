@@ -147,9 +147,24 @@ jobs:
         run: |
           # Run with --offline (no network leak tests) and skip sections
           # requiring sudo on /etc/shadow etc. Validate JSON parses cleanly.
+          # F-007 exit codes (since v3.5.0): 0=clean, 1=FAIL present, 2=WARN-only.
+          # Ubuntu CI runners are unhardened so FAILs are EXPECTED — only
+          # treat unexpected exit codes (>2 except signal-induced 130/143)
+          # as smoke-test failures. Disable `set -e` for the audit run.
+          set +e
           sudo bash noid-privacy-linux.sh --json --offline \
             --skip rootkit --skip audit --skip integrity \
             > /tmp/audit.json
+          AUDIT_RC=$?
+          set -e
+          echo "Audit exit code: $AUDIT_RC"
+          case "$AUDIT_RC" in
+            0|1|2) ;;            # F-007 valid (clean / FAIL / WARN-only)
+            130|143) ;;          # Signal-interrupted (F-008)
+            *) echo "::error::Audit unexpectedly exited with rc=$AUDIT_RC"
+               head -50 /tmp/audit.json
+               exit 1 ;;
+          esac
           jq . /tmp/audit.json > /dev/null
           echo "✅ Audit produces valid JSON"
           jq -r '.summary | "Score: \(.score)% — \(.pass) pass, \(.fail) fail, \(.warn) warn"' /tmp/audit.json
