@@ -2566,10 +2566,15 @@ fi
 
 # World-Writable — F-110: cache find result so we don't run the same scan
 # twice (counter + display). On big filesystems this halves the time.
+# Empty-string handling without grep-c trap: count via [[ -n ]] guard.
 _WW_FIND_ARGS=(-perm -0002 -type f
   ! -path "/proc/*" ! -path "/sys/*" ! -path "/dev/*")
 _WW_RESULT=$(_safe_find_root "${_WW_FIND_ARGS[@]}")
-WW_COUNT=$(echo -n "$_WW_RESULT" | grep -c '^' || echo 0)
+if [[ -z "$_WW_RESULT" ]]; then
+  WW_COUNT=0
+else
+  WW_COUNT=$(echo "$_WW_RESULT" | wc -l)
+fi
 WW_COUNT=${WW_COUNT:-0}
 if [[ "$WW_COUNT" -eq 0 ]]; then
   pass "World-writable files: 0"
@@ -4722,25 +4727,30 @@ check_browser_privacy() {
 
       local ext_json="$profile_dir/extensions.json"
       if [[ -f "$ext_json" ]]; then
-        # F-221: check if uBlock Origin is BOTH installed AND active. The
-        # extensions.json schema includes "active":true for enabled extensions.
-        if grep -q "uBlock0@raymondhill.net" "$ext_json" 2>/dev/null; then
-          # Best-effort check for active state — looks for the uBlock entry
-          # with "active":true. The JSON is one line per extension, so we can
-          # match the surrounding context.
-          if grep -oP '\{[^{}]*"id":"uBlock0@raymondhill\.net"[^{}]*\}' "$ext_json" 2>/dev/null \
-             | grep -q '"active":true'; then
+        # F-221: check uBlock state. extensions.json is single-line JSON with
+        # nested objects (sourceURI, dependencies, etc) — PCRE [^{}]* doesn't
+        # cross nesting cleanly. Use jq when available for reliable parsing;
+        # fall back to existence-only when jq missing.
+        local _ublock_status=""
+        if command -v jq &>/dev/null; then
+          _ublock_status=$(jq -r '.addons[] | select(.id=="uBlock0@raymondhill.net") | "\(.active)|\(.userDisabled)"' "$ext_json" 2>/dev/null | head -1)
+        fi
+        if [[ -n "$_ublock_status" ]]; then
+          # parse "active|userDisabled"
+          local _ub_active="${_ublock_status%|*}"
+          local _ub_userdis="${_ublock_status#*|}"
+          if [[ "$_ub_active" == "true" && "$_ub_userdis" == "false" ]]; then
             pass "uBlock Origin installed and enabled [$label]"
           else
-            warn "uBlock Origin installed but DISABLED [$label]"
+            warn "uBlock Origin installed but DISABLED (active=$_ub_active userDisabled=$_ub_userdis) [$label]"
           fi
+        elif grep -q "uBlock0@raymondhill.net" "$ext_json" 2>/dev/null; then
+          # Without jq, just confirm presence (assume active if listed)
+          pass "uBlock Origin installed [$label]"
+        elif grep -q "uBOLite@raymondhill.net\|@ublock-origin-lite" "$ext_json" 2>/dev/null; then
+          pass "uBlock Origin Lite installed [$label]"
         else
-          # Also check for uBlock Lite (newer Manifest V3 variant)
-          if grep -q "uBOLite@raymondhill.net\|@ublock-origin-lite" "$ext_json" 2>/dev/null; then
-            pass "uBlock Origin Lite installed [$label]"
-          else
-            warn "uBlock Origin not found [$label]"
-          fi
+          warn "uBlock Origin not found [$label]"
         fi
       else
         info "No extensions data found [$label]"
@@ -4902,22 +4912,39 @@ check_app_telemetry() {
   fi
 
   if command -v flatpak &>/dev/null; then
+    # F-225 (revised): only flag GENUINELY high-risk permissions. The
+    # original Phase 12.5 attempt was too aggressive — it matched
+    # `sockets=.*x11` which fires on EVERY Flatpak GUI app via fallback-x11
+    # support (sockets=x11;wayland;fallback-x11 is standard), and
+    # `--share=network` doesn't even match the actual `flatpak info` output
+    # syntax (`shared=network;...`).
+    #
+    # Genuinely high-risk:
+    #   filesystems=host[-os]   — unrestricted FS access
+    #   filesystems=home        — home dir access (defeats sandbox purpose)
+    #   org.freedesktop.Flatpak=talk — sandbox-escape permission
+    #
+    # Medium-risk (info-tier — legitimate for some apps but worth noting):
+    #   devices=all             — raw hardware (legitimate for Signal w/ webcam,
+    #                             OBS, virt-manager; problematic for unknown apps)
     local dangerous=0
     local app
     while IFS= read -r app; do
       [[ -z "$app" ]] && continue
       local perms
       perms="$(flatpak info --show-permissions "$app" 2>/dev/null)"
-      # F-225: extended Flatpak dangerous-permissions check covers host/home
-      # filesystem access plus device=all (raw device), share=network,
-      # socket=x11 (X11 fallback even on Wayland — keylog risk).
-      if echo "$perms" | grep -qE "filesystems=(host([;,[:space:]]|$)|.*[;,]host([;,[:space:]]|$))|filesystems=(host-os([;,[:space:]]|$)|.*[;,]host-os([;,[:space:]]|$))|filesystems=(home([;,[:space:]]|$)|.*[;,]home([;,[:space:]]|$))|org\.freedesktop\.Flatpak=talk|--device=all|devices=all|--share=network|sockets=.*x11"; then
-        warn "Flatpak '$app' has dangerous permissions (host/home filesystem or Flatpak portal)"
+      # High-risk patterns
+      if echo "$perms" | grep -qE "filesystems=(host([;,[:space:]]|$)|.*[;,]host([;,[:space:]]|$))|filesystems=(host-os([;,[:space:]]|$)|.*[;,]host-os([;,[:space:]]|$))|filesystems=(home([;,[:space:]]|$)|.*[;,]home([;,[:space:]]|$))|org\.freedesktop\.Flatpak=talk"; then
+        warn "Flatpak '$app' has high-risk permissions (host/home filesystem or Flatpak portal)"
         ((dangerous++))
+      fi
+      # Medium-risk: raw device access (info, not warn)
+      if echo "$perms" | grep -qE "devices=(all([;,[:space:]]|$)|.*[;,]all([;,[:space:]]|$))"; then
+        info "Flatpak '$app' has devices=all (raw hardware — legitimate for webcam/audio apps)"
       fi
     done < <(flatpak list --app --columns=application 2>/dev/null)
     if [[ "$dangerous" -eq 0 ]]; then
-      pass "No Flatpak apps with dangerous permissions"
+      pass "No Flatpak apps with high-risk permissions"
     fi
   else
     info "Flatpak not installed"
