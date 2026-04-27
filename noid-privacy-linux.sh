@@ -3608,8 +3608,12 @@ else
 fi
 
 # USB Devices
-USB_COUNT=$(lsusb 2>/dev/null | wc -l)
-info "USB devices: $USB_COUNT"
+# F-166: filter root-hub controllers from USB device count. lsusb shows
+# `Bus NNN Device NNN: ID 1d6b:NNNN Linux Foundation X.X root hub` for each
+# host controller — those are not real devices, just the bus endpoints.
+USB_COUNT=$(lsusb 2>/dev/null | grep -cv "Linux Foundation.*root hub")
+USB_COUNT=${USB_COUNT:-0}
+info "USB devices: $USB_COUNT (excluding host root hubs)"
 
 }
 
