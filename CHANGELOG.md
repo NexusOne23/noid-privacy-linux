@@ -7,6 +7,127 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.5.0] - 2026-04-27
+
+### 🎯 Phase 8 Audit Closure — DE Dispatcher, Cross-Distro, ShellCheck-Clean
+
+Closes the open findings from the v3.4.x line code audit (346 findings
+catalogued; 5 HIGH + 30 MEDIUM shipped in v3.4.0/v3.4.1, remainder addressed
+in v3.5.0).
+
+#### Added — DE Dispatcher (Sections 26, 36, 38, 39, 42)
+
+- New helpers `_kreadconfig_for_users` (KDE Plasma — kreadconfig6 → kreadconfig5
+  → INI parse fallback) and `_xfconf_for_users` (XFCE via xfconf-query).
+- Screen lock, lock-delay, idle-delay, lock-on-suspend, notifications-on-lock,
+  user-switching, file indexer, clipboard, and keyring-PAM checks now cover
+  GNOME, KDE Plasma 5/6, XFCE, MATE, Cinnamon. Previously GNOME-only.
+- KDE Baloo file-indexer detection added (Section 36).
+- KDE Klipper history-disabled check via klipperrc (Section 38) replaces
+  blanket WARN on every Plasma install.
+- KDE KWallet PAM auto-unlock detection added (Section 42).
+
+#### Added — Cross-Distro Path Normalization
+
+- GRUB password and config detection now uses `_grub_main_cfg` helper
+  probing /boot/grub2/, /boot/grub/, EFI variants. Adds direct grub.cfg
+  content scan as authoritative third fallback (catches Anaconda/debconf
+  insertions). PERM_CHECKS uses derived path instead of hardcoded.
+- Browser detection split by privacy posture: `warn` for Chrome/Edge/Opera/
+  Vivaldi (vendor telemetry); `info` for Chromium upstream and Brave
+  (privacy-focused fork); flatpak detection for com.brave.Browser and
+  com.microsoft.Edge.
+- Password manager list extended from 8 to 17 entries (KeeWeb, Buttercup,
+  qtpass, NordPass, LessPass, Enpass, rbw, bw-cli + originals).
+- Disabled FS module check extended to CIS Level 2 (affs, befs, sysv,
+  qnx4, qnx6 added alongside cramfs/freevxfs/jffs2/hfs/hfsplus/squashfs/udf).
+- LAN gateway list extended from 3 to 9 hardcoded defaults plus dynamic
+  ARP-table neighbors. Picks physical-interface gateway (LAN_GW) separately
+  from VPN gateway when VPN is up.
+- VPN-interface regex covers tailscale, zt (ZeroTier), nebula, mullvad,
+  nordlynx in addition to tun/wg/proton/pvpn.
+
+#### Added — Architecture & Lifecycle
+
+- **Exit codes** (F-007): script returns 0 (clean), 1 (FAIL present),
+  2 (WARN-only). Matches Lynis/OpenSCAP/Tripwire convention.
+- **Signal handler** (F-008): Ctrl-C / SIGTERM during long checks (rpm -Va
+  can take 5+ min) prints partial PASS/FAIL/WARN/INFO counter and exits
+  130/143 cleanly instead of dying mid-output.
+- **`SECTION_KEYS` array** (F-014): TOTAL_SECTIONS now derived from single
+  source of truth instead of hardcoded constant.
+- **entrypoint.sh** captures audit exit code, propagates SIGINT/SIGTERM as
+  workflow warnings (F-271). rc=2 (WARN-only) deliberately not a job
+  failure — strict users use higher fail-threshold input.
+
+#### Changed — MEDIUM Findings Addressed
+
+- F-002 `_human_size`: GiB/MiB/KiB (IEC binary) labels — values use 2^30
+  boundaries.
+- F-003 `_systemd_conf_val`: sed-based extraction preserves '=' in values.
+  Same fix applied to F-128 (dnf5-automatic upgrade_type extraction).
+- F-018 Secure Boot: explicit "N/A (legacy BIOS)" on non-UEFI systems.
+- F-021 Kernel taint: decodes all 19 flags per kernel docs; classifies
+  8 as benign user choice (PROPRIETARY, OOT, CRAP, AUX, RANDSTRUCT,
+  LIVEPATCH, UNSIGNED, TEST) and 11 as runtime issues.
+- F-026 spec_store_bypass_disable: only WARNs when CPU is actually
+  vulnerable (reads `/sys/devices/system/cpu/vulnerabilities/...`).
+  Modern Intel Alder Lake+/Zen3+ get INFO instead of false alarm.
+- F-054 Kill-switch rule count filtered to drop-rules only (not all
+  oifname rules including accept).
+- F-062 DNS via systemd-resolved: queries upstream via `resolvectl status`
+  to verify it's actually in VPN range, not just stub presence.
+- F-105 umask: scans all /etc/ sources individually; reports conflicts
+  if multiple files set different values.
+- F-109 history coverage: 14 history-file types (shell + DB clients +
+  Python REPL + editor histories) with severity tier.
+- F-115 permission display: annotates "stricter than recommended" when
+  ACTUAL is more restrictive than EXPECTED.
+- F-117 banner regex: extends to Arch/openSUSE/Manjaro/Mint/Pop!_OS/Rocky/
+  AlmaLinux/EndeavourOS.
+- F-133 crontab: reads /var/spool/cron/<user> directly (survives cron.deny).
+- F-160 inode check: detects FS type, skips Btrfs/ZFS/F2FS/Bcachefs (dynamic
+  allocation), adds 80% WARN tier for fixed-inode FS.
+- F-180 chrony NTS: detects chrony version before authdata call (4.0+ only).
+- F-186 sudo activity: bucketized (zero/low/moderate/high) instead of
+  exact count which leaks behavioral metadata when output is shared.
+- F-189 compiler check: distinguishes desktop / CI build host (jenkins/
+  gitlab-runner/buildbot/drone-server signatures) / production server.
+- F-222 browser password saving: 3-state classification (disabled = pass,
+  enabled with primary password = info, enabled without = warn). Avoids
+  the "use a password manager" advice when Firefox's own encrypted store
+  IS one.
+- F-232 Ethernet MAC=stable: promoted from INFO to PASS-with-note (it's a
+  deliberate privacy choice — better than no randomization).
+- F-259 PipeWire: prefers pw-dump (authoritative running state) over
+  config-grep heuristic.
+
+#### Fixed — Code Quality
+
+- ShellCheck **clean at -S style level** for both noid-privacy-linux.sh
+  and entrypoint.sh. .shellcheckrc documents project-wide disable for
+  SC2059 (color-var format strings — readability) and SC2329 (callback
+  dispatch / signal traps — false-positive class).
+- 6× `grep | wc -l` → `grep -c` (SC2126).
+- 6× `ls` parsing → shell glob with nullglob array (SC2012).
+- 1× `for x in $(cat f)` → `while read` (SC2013).
+- mapfile -t replaces array-from-cmd-substitution (SC2207).
+
+#### Fixed — Disk Output Regression (post-v3.4.1)
+
+- Section 20 disk-usage parsed `df -h -T` output with the wrong column
+  indices ($5/$6 = pre-`-T` layout) producing absurd "Disk 47%: 507G%
+  used" output and bash arithmetic errors. Fixed to use $6 (Use%) and
+  $NF (mount path) with numeric guard.
+
+#### Internal — Architecture Deferrals
+
+- F-013 (inline-vs-function section pattern mismatch) and F-015 (nested
+  function definitions becoming globals) deferred to v4.0 as architectural
+  refactor — large surface-area changes that warrant a major version bump.
+
+---
+
 ## [3.4.1] - 2026-04-27
 
 ### 🐛 Post-Release Fixup (after v3.4.0 user testing)

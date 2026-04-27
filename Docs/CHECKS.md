@@ -2,7 +2,9 @@
 
 Section-by-section overview of what the audit checks and why it matters.
 
-> **Version:** 3.4.1 | **Total Checks:** 390+ | **Sections:** 42
+> **Version:** 3.5.0 | **Total Checks:** 390+ | **Sections:** 42
+
+> **Cross-distro coverage** — Optimized for Fedora 43+ / RHEL 9+. Debian 12+ / Ubuntu 24.04+, Arch, openSUSE Tumbleweed work but some checks may produce false positives (Snapper-aware, GNOME-centric). DE-aware checks cover GNOME, KDE Plasma 5/6, XFCE, MATE, Cinnamon (since v3.5.0). See `--help` for `--skip` options to suppress sections that don't apply.
 
 > **Note**: This is a high-level overview. For the full enumeration of every
 > individual check, severity-trigger conditions, and pass/fail values, read
@@ -105,7 +107,7 @@ are excluded to prevent inflated counts on Snapper/Timeshift systems.
 Audits systemd unit files for security features: sandboxing (ProtectSystem, ProtectHome, NoNewPrivileges), capability restrictions, and namespace isolation.
 
 ### Section 26: Desktop & GUI Security
-Checks display server security (Wayland vs X11), screen locking, clipboard isolation, and desktop environment hardening.
+Checks display server security (Wayland vs X11), screen lock state across **GNOME / KDE Plasma / XFCE / MATE / Cinnamon** (DE-aware dispatcher reads kscreenlockerrc on KDE, xfce4-screensaver on XFCE, the appropriate gsettings schema on GNOME-family DEs). Falls back to GNOME-only behavior when DE cannot be detected.
 
 ### Section 27: Time Sync & NTP
 Validates NTP configuration, checks for NTS (Network Time Security) support, and ensures time is properly synchronized. Time drift can break TLS and Kerberos.
@@ -139,7 +141,7 @@ Runs package verification (rpm -Va / debsums), checks for modified system binari
 Comprehensive Firefox audit: telemetry (`toolkit.telemetry.enabled`), health reports, WebRTC IP leaks, DNS-over-HTTPS mode, tracking protection level, third-party cookie policy, Shield Studies, saved passwords, and extension inventory. Warns about Chrome/Chromium presence due to Google telemetry.
 
 ### Section 36: Application Telemetry & Privacy
-Detects and audits application-level data collection: GNOME Location Services, problem reporting (ABRT), usage statistics, file indexer (Tracker), Flatpak sandbox escapes (`filesystem=host`), Snap telemetry, Fedora `countme`, Ubuntu `popularity-contest`, and captive portal detection.
+Detects and audits application-level data collection: GNOME Location Services, problem reporting (ABRT), usage statistics, **file indexer (GNOME Tracker / KDE Baloo / Recoll — DE-aware)**, Flatpak sandbox escapes (`filesystem=host`), Snap telemetry, Fedora `countme`, Ubuntu `popularity-contest`, and captive portal detection.
 
 ### Section 37: Network Privacy
 Audits network-level privacy: WiFi MAC address randomization, Ethernet MAC cloning, Avahi/mDNS hostname broadcasting, LLMNR status, hostname privacy (detects real names), IPv6 privacy extensions, DHCP hostname leaking, and cups-browsed RCE risk (CVE-2024-47176).
@@ -152,7 +154,7 @@ Checks data-at-rest privacy: recently used files size, thumbnail caches (reveal 
 ## 🖥️ Desktop Sections (39–42)
 
 ### Section 39: Desktop Session Security
-Audits session-level security: screen lock delay, idle timeout, lock-on-suspend, notification previews on lock screen, GDM auto-login, guest accounts, timed login, remote desktop/VNC/RDP detection, autostart programs, and user list visibility.
+Audits session-level security across **GNOME / KDE Plasma / XFCE / MATE / Cinnamon**: screen lock delay (KDE LockGrace, XFCE delay-from-activation, GNOME lock-delay), idle timeout (KDE/XFCE return minutes, normalized to seconds), lock-on-suspend (KDE LockOnResume), notification previews on lock screen (KDE plasmanotifyrc DoNotDisturb), GDM auto-login, guest accounts, timed login, remote desktop/VNC/RDP detection (localhost-only listeners reported as INFO, not WARN), autostart programs, and user-switching policy (KDE kdeglobals KDE Action Restrictions).
 
 ### Section 40: Webcam & Audio Privacy
 Checks media device security: webcam device detection and permissions, microphone mute status (PipeWire/PulseAudio), network audio modules (TCP exposure), PipeWire remote access, and screen sharing portal status.
@@ -161,7 +163,7 @@ Checks media device security: webcam device detection and permissions, microphon
 Audits Bluetooth exposure: service status, discoverable mode (visible to nearby devices), pairable mode without paired devices, and active Bluetooth without usage.
 
 ### Section 42: Password & Keyring Security
-Comprehensive credential audit: password manager detection (KeePassXC, Bitwarden, pass, etc.), GNOME Keyring PAM auto-unlock, SSH `AddKeysToAgent` timeout, GPG agent cache TTL, plaintext secret files in home directories, firmware update status (fwupdmgr), and Thunderbolt security level (DMA attack prevention).
+Comprehensive credential audit: password manager detection (17 tools — KeePassXC, KeePass2, KeeWeb, Bitwarden + bw-cli, rbw, 1Password + op, pass, gopass, lesspass, NordPass, Buttercup, qtpass, Enpass), **GNOME Keyring AND KDE KWallet** PAM auto-unlock, SSH `AddKeysToAgent` timeout, GPG agent cache TTL, plaintext secret files in home directories (subdirectory-aware via `_safe_find_home`, severity-tiered by permissions: world-readable=FAIL, group-readable=WARN, private=INFO), firmware update status (fwupdmgr), and Thunderbolt security level (DMA attack prevention).
 
 ---
 

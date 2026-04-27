@@ -78,10 +78,11 @@ NoID Privacy for Linux is designed with security in mind:
 
 | Version | Supported          | Notes |
 | ------- | ------------------ | ----- |
-| 3.4.x   | ✅ Fully Supported | Current release — false-FAIL elimination + container-storage handling |
-| 3.3.x   | ⚠️ Limited Support  | Upgrade to 3.4.x recommended |
-| 3.1.x   | ⚠️ Limited Support  | Upgrade to 3.4.x recommended |
-| 2.0.x   | ❌ End of Life     | Upgrade to 3.4.x |
+| 3.5.x   | ✅ Fully Supported | Current release — DE dispatcher (KDE/XFCE/MATE/Cinnamon), exit codes, signal handling, ShellCheck-clean |
+| 3.4.x   | ⚠️ Limited Support  | Upgrade to 3.5.x recommended |
+| 3.3.x   | ⚠️ Limited Support  | Upgrade to 3.5.x recommended |
+| 3.1.x   | ❌ End of Life     | Upgrade to 3.5.x |
+| 2.0.x   | ❌ End of Life     | Upgrade to 3.5.x |
 | 1.x     | ❌ Not Supported   | Legacy version |
 
 **Recommendation:** Always use the latest v3.x release.
@@ -105,12 +106,17 @@ NoID Privacy for Linux is designed with security in mind:
    - Verify the URL: `https://github.com/NexusOne23/noid-privacy-linux`
    - For CI/CD usage: pin to a specific version (`@v3.4.0`), never `@main`
 
-3. ✅ **Verify against published releases (when available)**
+3. ✅ **Verify against the GitHub repository commit hash**
    ```bash
-   # When tagged releases publish SHA256 sums, compare them:
-   # sha256sum noid-privacy-linux.sh
-   # Compare to https://github.com/NexusOne23/noid-privacy-linux/releases
+   # The script is one file in pure Bash. Verify you're getting it from
+   # the official repo and inspect the commit history:
+   git log --oneline noid-privacy-linux.sh | head -5
+   # Or check the release tag against the live GitHub view:
+   # https://github.com/NexusOne23/noid-privacy-linux/releases
    ```
+   We do NOT publish SHA256 sums separately — the canonical integrity
+   check is the GitHub commit/tag hash itself. Code review is the
+   meaningful audit; hash-comparison from untrusted sources adds nothing.
 
 ### During Execution
 
@@ -146,9 +152,15 @@ NoID Privacy for Linux is designed with security in mind:
 ## 🔍 Code Quality
 
 ### Static Analysis
-- **ShellCheck**: All code passes ShellCheck analysis
-- **bash -n**: Syntax validation in CI pipeline
-- **Manual Review**: Every PR is reviewed for security implications
+- **ShellCheck**: clean at `--severity=style` (the strictest level) — see
+  `.shellcheckrc` for the project-wide rationale on SC2059 (color-format
+  strings) and SC2329 (callback dispatch / signal traps). The CI gate
+  enforces `--severity=warning`; style-level cleanliness is a v3.5.0
+  improvement.
+- **bash -n**: Syntax validation in CI across Ubuntu 22.04/24.04, Fedora 42/43,
+  Debian 12. Plus a real audit-smoke test job that runs the audit on Ubuntu
+  with `--offline` and validates JSON output parses.
+- **Manual Review**: Every PR is reviewed for security implications.
 
 ### Verification
 
@@ -182,5 +194,5 @@ For licensing questions, see [LICENSE](LICENSE) or open a [Discussion](https://g
 
 ---
 
-**Last Updated**: April 9, 2026
-**Policy Version**: 1.4
+**Last Updated**: April 27, 2026
+**Policy Version**: 1.5
