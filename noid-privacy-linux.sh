@@ -1077,16 +1077,18 @@ fi
 
 # SELinux Booleans (dangerous ones)
 if require_cmd getsebool; then
-  # F-038: extend dangerous-bools list with server-relevant entries:
-  # - nfs_export_all_rw / nfs_export_all_ro: world-RW NFS exports
-  # - samba_enable_home_dirs: shares /home over Samba
-  # - cron_userdomain_transition: arbitrary cron user-dom transitions
-  # - secure_mode_insmod: weakens kmod constraints (rare but present)
-  # - allow_*: legacy memory-protection bypasses
-  DANGEROUS_BOOLS="httpd_can_network_connect httpd_execmem allow_execheap allow_execmod allow_execstack \
-    nfs_export_all_rw nfs_export_all_ro samba_enable_home_dirs cron_userdomain_transition \
-    secure_mode_insmod allow_user_exec_content"
-  for BOOL in $DANGEROUS_BOOLS; do
+  # F-038: SELinux booleans audit. Two tiers:
+  # 1. Universal-dangerous (warn always when on): execheap/execmod/execstack
+  #    bypass memory-protection; httpd_can_network_connect / httpd_execmem
+  #    are exploit vectors when active without specific need.
+  # 2. Service-conditional (warn only if the corresponding service is active):
+  #    nfs_export_all_*, samba_enable_home_dirs — these only have effect when
+  #    the actual server (nfsd/smbd) runs; ON-without-service is a no-op.
+  # NOT included: cron_userdomain_transition and allow_user_exec_content are
+  # default-ON on Fedora and required for normal user-script/cron behavior;
+  # flagging them WARNs every desktop user without security benefit.
+  DANGEROUS_BOOLS_UNIVERSAL="httpd_can_network_connect httpd_execmem allow_execheap allow_execmod allow_execstack"
+  for BOOL in $DANGEROUS_BOOLS_UNIVERSAL; do
     VAL=$(getsebool "$BOOL" 2>/dev/null | awk '{print $3}' || echo "n/a")
     if [[ "$VAL" == "on" ]]; then
       if [[ "$BOOL" == "allow_execmod" || "$BOOL" == "allow_execstack" ]] && lsmod | grep -q nvidia; then
@@ -1096,6 +1098,17 @@ if require_cmd getsebool; then
       fi
     fi
   done
+  # Service-conditional bools — warn only if matching service is active
+  if _service_active_any nfs-server nfsd nfs-kernel-server; then
+    for BOOL in nfs_export_all_rw nfs_export_all_ro; do
+      VAL=$(getsebool "$BOOL" 2>/dev/null | awk '{print $3}' || echo "n/a")
+      [[ "$VAL" == "on" ]] && warn "SELinux bool active: $BOOL = on (NFS server running)"
+    done
+  fi
+  if _service_active_any smb smbd samba; then
+    VAL=$(getsebool samba_enable_home_dirs 2>/dev/null | awk '{print $3}' || echo "n/a")
+    [[ "$VAL" == "on" ]] && warn "SELinux bool active: samba_enable_home_dirs = on (Samba shares /home)"
+  fi
 fi
 
 # SELinux Denials
