@@ -3082,10 +3082,15 @@ header "19" "LOGS & MONITORING"
 # Threshold: <=15 pass, <=100 warn, >100 fail. When FAIL fires, the
 # message includes the top 3 offending source units so the user can
 # investigate rather than guess.
+# Journal format: "MMM DD HH:MM:SS hostname unit[PID]: message"
+# Match unit name as token preceded by space (the host→unit separator).
+# Previous version anchored to ^MMM DD HH:MM:SS but only stripped 2 fields
+# instead of 3 — `27 02:30:17` were fields 2 and 3 but `fedora` (hostname)
+# was field 4 and got eaten by `(phpsite|...)` which then never matched.
 _journal_filter='sudo|password is required|auth could not identify|systemd-coredump'
-_journal_filter+='|^[A-Z][a-z]{2} [^ ]+ [^ ]+ (qemu|libvirt|virtlogd|virtnetworkd|conmon|systemd-machined|virtqemud|virt-pki-validate)'
-_journal_filter+='|^[A-Z][a-z]{2} [^ ]+ [^ ]+ [a-z]+_[a-z]+\['         # Docker/Podman auto-names
-_journal_filter+='|^[A-Z][a-z]{2} [^ ]+ [^ ]+ (phpsite|php-fpm|nodejs|gunicorn|uwsgi|wsgi)\['
+_journal_filter+='| (qemu|libvirt|virtlogd|virtnetworkd|conmon|systemd-machined|virtqemud|virt-pki-validate)\['
+_journal_filter+='| [a-z]+_[a-z]+\[[0-9]+\]'  # Docker/Podman auto-names: adjective_noun[PID]
+_journal_filter+='| (phpsite|php-fpm|nodejs|gunicorn|uwsgi|wsgi)\['
 _journal_raw=$(journalctl -p err --since "1 hour ago" --no-pager -q 2>/dev/null \
   | grep -E "^[A-Z][a-z]{2} ")
 JOURNAL_ERR=$(echo "$_journal_raw" | grep -cvE "$_journal_filter" || true)
