@@ -1087,7 +1087,11 @@ if require_cmd getsebool; then
   # NOT included: cron_userdomain_transition and allow_user_exec_content are
   # default-ON on Fedora and required for normal user-script/cron behavior;
   # flagging them WARNs every desktop user without security benefit.
-  DANGEROUS_BOOLS_UNIVERSAL="httpd_can_network_connect httpd_execmem allow_execheap allow_execmod allow_execstack"
+  # cron_allow_writes (default OFF): when ON, cron-domain can write to
+  # arbitrary paths — privilege-escalation vector via crontab editing.
+  # NOT to be confused with cron_userdomain_transition (default ON, required
+  # for user crontabs to work).
+  DANGEROUS_BOOLS_UNIVERSAL="httpd_can_network_connect httpd_execmem allow_execheap allow_execmod allow_execstack cron_allow_writes"
   for BOOL in $DANGEROUS_BOOLS_UNIVERSAL; do
     VAL=$(getsebool "$BOOL" 2>/dev/null | awk '{print $3}' || echo "n/a")
     if [[ "$VAL" == "on" ]]; then
