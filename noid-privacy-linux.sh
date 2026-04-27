@@ -106,9 +106,19 @@ else
   BOLD='\033[1m'
 fi
 
+# F-014: SECTION_KEYS is the single source of truth for the 42-section
+# audit. TOTAL_SECTIONS is derived; --help (above) lists the same keys
+# manually but the count is now authoritative from this array.
+declare -a SECTION_KEYS=(
+  kernel selinux firewall nftables vpn sysctl services ports ssh audit
+  users filesystem crypto updates rootkit processes network containers
+  logs performance hardware interfaces certificates environment systemd
+  desktop ntp fail2ban logins hardening modules permissions boot integrity
+  browser telemetry netprivacy dataprivacy session media btprivacy keyring
+)
 PASS=0; FAIL=0; WARN=0; INFO=0
 TOTAL_START=$(date +%s)
-TOTAL_SECTIONS=42
+TOTAL_SECTIONS="${#SECTION_KEYS[@]}"
 
 # F-008: graceful SIGINT/SIGTERM handler. Long-running checks (rpm -Va,
 # ausearch, find /) can take minutes; without trap, Ctrl-C kills the script
