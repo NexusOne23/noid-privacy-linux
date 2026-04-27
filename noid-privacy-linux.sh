@@ -3069,24 +3069,39 @@ if ! should_skip "logs"; then
 header "19" "LOGS & MONITORING"
 ###############################################################################
 
-# Journal errors — exclude noise from VM/container subsystems whose
-# error-level messages bubble into the host journal but are local to the
-# guest's userspace (libvirtd start/stop chatter, qemu backend probes,
-# Podman conmon teardown, etc.). Also drop sudo/PAM/systemd-coredump rows
-# already filtered before. Threshold: <=15 pass, <=100 warn, >100 fail.
-# Active development with VMs running can easily hit hundreds of error-level
-# entries per hour without representing real host issues, so the upper
-# threshold sits high.
-JOURNAL_ERR=$(journalctl -p err --since "1 hour ago" --no-pager -q 2>/dev/null \
-  | grep -E "^[A-Z][a-z]{2} " \
-  | grep -cvE "sudo|password is required|auth could not identify|systemd-coredump|qemu|libvirt|virtlogd|virtnetworkd|conmon|systemd-machined|virtqemud|virt-pki-validate" || true)
+# Journal errors — separate "host security signal" from "dev workload noise".
+# We filter two classes:
+#   1. Authentication chatter (sudo PAM, pam_unix retries, systemd-coredump
+#      handler) — already non-critical and noisy on busy admin systems.
+#   2. Containerized / VM / dev-server processes whose err-level messages
+#      bubble into the host journal but are local to the guest userspace
+#      (qemu/libvirt/virtlogd/virtnetworkd/conmon/virtqemud, plus Docker/
+#      Podman auto-generated names like xenodochial_khayyam[PID] which
+#      follow the adjective_noun pattern, plus common dev runtimes:
+#      phpsite, php-fpm, nodejs, gunicorn, uwsgi).
+# Threshold: <=15 pass, <=100 warn, >100 fail. When FAIL fires, the
+# message includes the top 3 offending source units so the user can
+# investigate rather than guess.
+_journal_filter='sudo|password is required|auth could not identify|systemd-coredump'
+_journal_filter+='|^[A-Z][a-z]{2} [^ ]+ [^ ]+ (qemu|libvirt|virtlogd|virtnetworkd|conmon|systemd-machined|virtqemud|virt-pki-validate)'
+_journal_filter+='|^[A-Z][a-z]{2} [^ ]+ [^ ]+ [a-z]+_[a-z]+\['         # Docker/Podman auto-names
+_journal_filter+='|^[A-Z][a-z]{2} [^ ]+ [^ ]+ (phpsite|php-fpm|nodejs|gunicorn|uwsgi|wsgi)\['
+_journal_raw=$(journalctl -p err --since "1 hour ago" --no-pager -q 2>/dev/null \
+  | grep -E "^[A-Z][a-z]{2} ")
+JOURNAL_ERR=$(echo "$_journal_raw" | grep -cvE "$_journal_filter" || true)
 JOURNAL_ERR=${JOURNAL_ERR:-0}
 if [[ "$JOURNAL_ERR" -le 15 ]]; then
   pass "Journal errors (1h): $JOURNAL_ERR"
 elif [[ "$JOURNAL_ERR" -le 100 ]]; then
   warn "Journal errors (1h): $JOURNAL_ERR (review with: journalctl -p err --since '1 hour ago')"
 else
-  fail "Journal errors (1h): $JOURNAL_ERR (high — likely transient if running VMs/builds)"
+  fail "Journal errors (1h): $JOURNAL_ERR — top offending sources:"
+  if ! $JSON_MODE; then
+    echo "$_journal_raw" | grep -vE "$_journal_filter" | awk '{print $5}' \
+      | sort | uniq -c | sort -rn | head -3 | while read -r line; do
+        printf "       %s\n" "$line"
+      done
+  fi
 fi
 
 # journalctl short format: each actual entry starts with a 3-letter month (e.g. "Feb 26 ...").
@@ -5513,8 +5528,11 @@ check_media_privacy() {
     if grep -rqs '"access.allowed"' "$confdir/" 2>/dev/null; then
       info "PipeWire access control rules found in $confdir"
     fi
-    # Explicit TCP socket in config = remote exposure intent
-    if grep -rhsE '^\s*[^#].*tcp:[0-9]+' "$confdir/" 2>/dev/null | grep -q .; then
+    # Explicit TCP socket in config = remote exposure intent.
+    # Stricter regex: first non-whitespace MUST NOT be '#' (commented examples
+    # in stock PipeWire configs use whitespace+# prefix, the previous loose
+    # regex with `[^#]` could match a leading space too via backtracking).
+    if grep -rhsE '^[[:space:]]*[^#[:space:]].*tcp:[0-9]+' "$confdir/" 2>/dev/null | grep -q .; then
       warn "PipeWire config in $confdir declares a TCP socket — remote access enabled"
       pw_remote=1
     fi
