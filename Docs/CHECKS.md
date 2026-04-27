@@ -119,10 +119,10 @@ Checks if Fail2Ban is installed and running, validates jail configuration, and v
 Audits recent login activity: failed login attempts, unusual login times, and root login history.
 
 ### Section 30: Advanced Hardening
-Checks advanced security features: USB Guard, compiler presence (attack tool risk), AIDE/Tripwire integrity monitoring, and login banners.
+Checks advanced security features: USBGuard daemon + rules, coredump service state (storage-aware), compiler presence (build-host vs production-server vs desktop), AIDE/Tripwire integrity monitoring, IMA/EVM kernel integrity, FireWire DMA-attack surface, home directory permissions, shell idle TMOUT, AIDE database existence, and shell history sensitive-pattern scan. (Login banner check is in Section 12 / Filesystem.)
 
 ### Section 31: Kernel Modules & Integrity
-Audits loaded kernel modules, checks for blacklisted modules (USB storage, Firewire, Thunderbolt), and verifies module signing.
+Audits loaded kernel modules: heuristic name-pattern scan for suspicious modules, 12 disabled filesystem modules per CIS Level 2 (cramfs, freevxfs, jffs2, hfs, hfsplus, squashfs, udf, affs, befs, sysv, qnx4, qnx6), USB storage module blacklist, and kernel module-loading lockdown state. (Thunderbolt device security and FireWire blacklist are checked in Section 21 / Hardware and Section 30 / Hardening respectively.)
 
 ### Section 32: Permissions & Access Control
 Deep file permission audit: world-writable files, SUID/SGID binaries, cron job permissions, and sensitive file access controls.

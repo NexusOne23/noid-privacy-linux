@@ -104,7 +104,7 @@ NoID Privacy for Linux is designed with security in mind:
 2. ✅ **Check the Source**
    - Download only from the official GitHub repository
    - Verify the URL: `https://github.com/NexusOne23/noid-privacy-linux`
-   - For CI/CD usage: pin to a specific version (`@v3.4.0`), never `@main`
+   - For CI/CD usage: pin to a specific version (`@v3.5.0`), never `@main`
 
 3. ✅ **Verify against the GitHub repository commit hash**
    ```bash

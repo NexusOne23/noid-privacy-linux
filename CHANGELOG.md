@@ -9,11 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.5.0] - 2026-04-27
 
-### 🎯 Phase 8 Audit Closure — DE Dispatcher, Cross-Distro, ShellCheck-Clean
+### 🎯 Phase 8 Audit Closure + Post-Audit Polish — DE Dispatcher, Cross-Distro, ShellCheck-Clean, 15 Final Fixes
 
 Closes the open findings from the v3.4.x line code audit (346 findings
 catalogued; 5 HIGH + 30 MEDIUM shipped in v3.4.0/v3.4.1, remainder addressed
-in v3.5.0).
+in v3.5.0). Plus a final post-audit second-pass review that surfaced 15
+additional polish items, all fixed before release (see "Post-Audit Polish"
+section below).
 
 #### Added — DE Dispatcher (Sections 26, 36, 38, 39, 42)
 
@@ -120,11 +122,97 @@ in v3.5.0).
   used" output and bash arithmetic errors. Fixed to use $6 (Use%) and
   $NF (mount path) with numeric guard.
 
+#### Architecture — F-013 Refactor (done in v3.5.0, not deferred)
+
+- F-013 inline→function refactor **completed**: All 34 security sections
+  (01-34) are now wrapped as `check_*()` functions matching the privacy
+  sections (35-42) which were already function-based. Each gates on
+  `should_skip "X" && return` and prints its own header. SECTION_KEYS
+  array (F-014) is the single source of truth for `--skip` keys and
+  TOTAL_SECTIONS count.
+
 #### Internal — Architecture Deferrals
 
-- F-013 (inline-vs-function section pattern mismatch) and F-015 (nested
-  function definitions becoming globals) deferred to v4.0 as architectural
-  refactor — large surface-area changes that warrant a major version bump.
+- F-015 (nested function definitions becoming globals) deferred to v4.0 —
+  callbacks like `_de_lock_check_cb` defined inside `check_desktop_session`
+  leak to global scope per Bash semantics. Refactor to top-level helpers
+  is a large surface-area change that warrants a major version bump.
+
+---
+
+### 🔧 Post-Audit Polish (15 second-pass fixes, 2026-04-27)
+
+A line-by-line re-read of the 6358-line script after the main v3.5.0 work
+surfaced 15 additional items — all fixed before release:
+
+#### Display Bugs (3)
+
+- **CA_COUNT multi-line trap** (Sec 23): legacy `grep -c | echo "?"` would
+  produce two-line `0\n?` output when `trust list` succeeded with no certs.
+  Now uses `${var:-0}` default consistent with the rest of the codebase.
+- **UFW_RULES regex** (Sec 03): old `^[0-9.]+:` matched IP:PORT format
+  which `ufw status verbose` never emits (UFW uses `22/tcp` syntax). Now
+  counts ALLOW/DENY/REJECT/LIMIT action keywords — accurate on Ubuntu/Debian.
+- **rescue-Kernel as latest** (Sec 01): `sort -V` placed `vmlinuz-rescue-*`
+  lexicographically after numeric versions (`r` > `6`), causing false
+  "reboot recommended" warns on systems with both rescue and regular
+  kernels. Now filters `-rescue` before sorting.
+
+#### Consistency Refactors (4)
+
+- **UID-Hardcoding → `_is_human_uid`** (14 call sites): F-004 introduced
+  `_is_human_uid` which reads /etc/login.defs UID_MIN/UID_MAX, but 14
+  call sites still used hardcoded `[[ "$uid" -ge 1000 && "$uid" -lt 65534 ]]`.
+  All converted; comment block updated to reflect canonical pattern.
+- **`_safe_find_home` timeout + Atomic Fedora `/var/home`**: matches
+  `_safe_find_root` with `timeout 30` to prevent indefinite hangs on huge
+  homes / stuck NFS mounts. Includes `/var/home/*` for Atomic Fedora
+  (Silverblue/Kinoite) where `/home → /var/home` symlink may or may not
+  be present.
+- **`_iter_user_homes` helper** for the 4 `for USER_HOME in /home/* /root`
+  loops in Sec 09/12/15/23. Deduplicates `/home/nexus` and `/var/home/nexus`
+  via `realpath` so Atomic users aren't iterated twice.
+- **`USER` loop variable shadowing**: Section 20 `ps -eo` while-read used
+  uppercase `USER`, shadowing the environment variable. Renamed to
+  `_user`/`_cron_user`/`_ssh_user` at all 3 affected loops.
+
+#### Help-Text & Docs (2)
+
+- **`--help` section order** matches SECTION_KEYS array (was: `hardening,
+  permissions, modules, boot, integrity`; now: `hardening, modules,
+  permissions, boot, integrity`).
+- **Virtual flags documented**: `netleaks` (sub-check inside Sec 05) and
+  `summary` (final results block) are not full sections in SECTION_KEYS
+  but are valid `--skip` targets. `--help` now lists them under a dedicated
+  "Virtual flags" subheader.
+
+#### Style/Cleanup (3)
+
+- **Redundant `2>/dev/null`** on 2 `[[ ]]` tests removed (Sec 12, Sec 39).
+  `[[ ]]` writes nothing to stderr under normal conditions.
+- **15 BRE `\|` → ERE `-E`** alternations: GNU grep accepts `\|` BRE
+  alternation but it's a non-POSIX extension. Converted to `-E` flag with
+  `|` for portability/style consistency. (One intentional mixed pattern
+  in `_SH_PATTERN` left untouched — it relies on literal `|` matching for
+  `curl | bash` detection alongside ERE alternation between sub-patterns.)
+- **`nullglob` for home iteration** auto-resolved by `_iter_user_homes`
+  helper using `shopt -s nullglob` internally.
+
+#### Behavior Refinements (3)
+
+- **`systemd-coredump.socket` context-aware** (Sec 30): old check WARNed
+  whenever socket was active, even with `Storage=none`. Modern Fedora
+  defaults to socket-activated coredump, so this fired on every Fedora
+  desktop. Now: `Storage=none` + socket-active = INFO (no persistence,
+  socket harmless); `Storage!=none` + socket-active = WARN (real risk).
+- **PAM nullok line context** (Sec 11): FAIL message now shows the
+  offending line content (truncated to 100 chars) so users can audit
+  whether `nullok` is in `pam_unix` (real risk) vs. another module.
+- **SUID/SGID thresholds as documented constants**: `_SUID_PASS_MAX=30`,
+  `_SUID_WARN_MAX=45`, `_SGID_PASS_MAX=10`, `_SGID_WARN_MAX=20` declared
+  at the top of the section with calibration baseline notes (Fedora
+  desktop ~22-32 SUID, Ubuntu ~28-38, server-minimal ~12-18). Single
+  source of truth; output annotates the threshold (`SUID files: 15 (≤30)`).
 
 ---
 

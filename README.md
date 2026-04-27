@@ -133,7 +133,7 @@ $ sudo bash noid-privacy-linux.sh --ai
 ━━━ [05/42] VPN & NETWORK ━━━
   ✅ PASS  VPN interface proton0: active
   ✅ PASS  Default route via VPN
-  ✅ PASS  IPv6: completely disabled
+  ✅ PASS  IPv6: disabled/minimal
 
 ━━━ [35/42] BROWSER PRIVACY ━━━
   ✅ PASS  Firefox telemetry disabled
@@ -141,10 +141,11 @@ $ sudo bash noid-privacy-linux.sh --ai
   ⚠️  WARN  google-chrome installed — Google telemetry risk
 
 ━━━ SUMMARY ━━━
-  Total checks:      341 (228 pass, 4 fail, 19 warn, 90 info)
-  SECURITY & PRIVACY SCORE:    89% SOLID
+  Total checks:      460 (298 pass, 0 fail, 5 warn, 157 info)
+  SECURITY & PRIVACY SCORE:    98% 🏰 FORTRESS
 
 Score formula: PASS×100 / (PASS + FAIL×2 + WARN)
+Exit codes:    0 = clean · 1 = FAIL present · 2 = WARN-only · 130/143 = interrupted
 ```
 
 ---
@@ -218,14 +219,15 @@ Use NoID Privacy for Linux in your CI/CD pipeline to enforce privacy & security 
   uses: NexusOne23/noid-privacy-linux@v3.5.0
   id: audit
   with:
-    fail-threshold: '70'   # Fail if score < 70%
+    min-score: '70'   # Fail if score < 70%
 ```
 
 ### Inputs
 
 | Input | Default | Description |
 |-------|---------|-------------|
-| `fail-threshold` | `0` | Minimum score to pass (0 = never fail) |
+| `min-score` | `0` | Minimum score to pass (0 = never fail). Canonical name since v3.5.0. |
+| `fail-threshold` | `''` | DEPRECATED alias for `min-score`. Will be removed in v4.0. |
 | `ai` | `false` | Generate AI remediation prompt in summary |
 | `skip` | `''` | Comma-separated sections to skip |
 | `args` | `''` | Additional arguments for the script |
@@ -251,7 +253,7 @@ jobs:
       - uses: actions/checkout@v4.2.2
       - uses: NexusOne23/noid-privacy-linux@v3.5.0  # Pin to version, not @main
         with:
-          fail-threshold: '70'
+          min-score: '70'
 ```
 
 Results appear as a rich **GitHub Actions Summary** with score, findings table, and optional AI fix prompt.

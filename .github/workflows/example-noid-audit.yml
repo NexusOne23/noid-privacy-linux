@@ -30,7 +30,7 @@ jobs:
         # See https://docs.github.com/en/actions/security-guides for guidance.
         uses: NexusOne23/noid-privacy-linux@v3.5.0
         with:
-          fail-threshold: '70'
+          min-score: '70'   # canonical name since v3.5.0 (fail-threshold still works as deprecated alias)
           # ai: 'true'        # Uncomment to generate AI remediation prompt
           # skip: 'rootkit,containers'  # Uncomment to skip sections
 

@@ -54,14 +54,17 @@ Options:
   --offline       Skip all sections that make network requests
                   (equivalent to --skip vpn --skip interfaces --skip netleaks)
   --skip SECTION  Skip a section (can be repeated)
-                  Sections: kernel, selinux, firewall, nftables, vpn,
-                  sysctl, services, ports, ssh, audit, users, filesystem,
-                  crypto, updates, rootkit, processes, network, containers,
-                  logs, performance, hardware, interfaces, certificates,
-                  environment, systemd, desktop, ntp, fail2ban, logins,
-                  hardening, permissions, modules, boot, integrity,
-                  browser, telemetry, netprivacy, netleaks, dataprivacy,
-                  session, media, btprivacy, keyring, summary
+                  Sections (in display order): kernel, selinux, firewall,
+                  nftables, vpn, sysctl, services, ports, ssh, audit,
+                  users, filesystem, crypto, updates, rootkit, processes,
+                  network, containers, logs, performance, hardware,
+                  interfaces, certificates, environment, systemd, desktop,
+                  ntp, fail2ban, logins, hardening, modules, permissions,
+                  boot, integrity, browser, telemetry, netprivacy,
+                  dataprivacy, session, media, btprivacy, keyring
+                  Virtual flags (sub-checks, not full sections):
+                  netleaks (network-side leak tests in vpn section),
+                  summary (final results block)
 
 Examples:
   sudo bash noid-privacy-linux.sh
@@ -228,11 +231,11 @@ sshd_cfg_val() {
 }
 
 # F-004: read UID_MIN/UID_MAX from /etc/login.defs to honor distro-specific
-# bounds. Defaults match RHEL/Fedora (1000-60000) but are overridable.
-# Cached at first read into _NOID_UID_MIN / _NOID_UID_MAX globals; the
-# `[[ "$uid" -ge 1000 && "$uid" -lt 65534 ]]` pattern at call sites is
-# preserved as a hardcoded fallback for back-compat — but new code can
-# call `_is_human_uid "$uid"` instead.
+# bounds. Defaults match RHEL/Fedora (1000-65533, excluding nobody at 65534)
+# but are overridable. Cached at first read into _NOID_UID_MIN/_NOID_UID_MAX.
+# All section-body UID checks use `_is_human_uid "$uid"` (consistency fix
+# v3.5.x — formerly hardcoded `[[ "$uid" -ge 1000 && "$uid" -lt 65534 ]]`
+# pattern in 14+ places, now centralized).
 _NOID_UID_MIN=""
 _NOID_UID_MAX=""
 _load_uid_bounds() {
@@ -249,6 +252,27 @@ _is_human_uid() {
   local uid="$1"
   [[ "$uid" =~ ^[0-9]+$ ]] || return 1
   [[ "$uid" -ge "$_NOID_UID_MIN" && "$uid" -le "$_NOID_UID_MAX" ]]
+}
+
+# Iterate over user home directories across classic + Atomic Fedora layouts.
+# Yields one path per line on stdout, deduplicated by canonical path so that
+# `/home/nexus` (Silverblue symlink to `/var/home/nexus`) and `/var/home/nexus`
+# are not both returned.
+_iter_user_homes() {
+  local seen=() resolved h s already
+  shopt -s nullglob
+  for h in /home/* /var/home/* /root; do
+    [[ -d "$h" ]] || continue
+    resolved=$(realpath -- "$h" 2>/dev/null) || resolved="$h"
+    already=false
+    for s in "${seen[@]}"; do
+      [[ "$s" == "$resolved" ]] && { already=true; break; }
+    done
+    $already && continue
+    seen+=("$resolved")
+    printf '%s\n' "$h"
+  done
+  shopt -u nullglob
 }
 
 # --- Privacy Section Helpers ---
@@ -360,7 +384,7 @@ _systemd_conf_val() {
 _gsettings_for_users() {
   local schema="$1" key="$2" callback="$3"
   while IFS=: read -r user _ uid _ _ home shell; do
-    [[ "$uid" -ge 1000 && "$uid" -lt 65534 ]] || continue
+    _is_human_uid "$uid" || continue
     [[ "$shell" == */nologin || "$shell" == */false ]] && continue
     [[ -S "/run/user/$uid/bus" ]] || continue
     local val
@@ -377,7 +401,7 @@ _gsettings_for_users() {
 _kreadconfig_for_users() {
   local file="$1" group="$2" key="$3" callback="$4"
   while IFS=: read -r user _ uid _ _ home shell; do
-    [[ "$uid" -ge 1000 && "$uid" -lt 65534 ]] || continue
+    _is_human_uid "$uid" || continue
     [[ "$shell" == */nologin || "$shell" == */false ]] && continue
     [[ -S "/run/user/$uid/bus" ]] || continue
     [[ -d "$home/.config" ]] || continue
@@ -409,7 +433,7 @@ _xfconf_for_users() {
   local channel="$1" property="$2" callback="$3"
   command -v xfconf-query &>/dev/null || return 0
   while IFS=: read -r user _ uid _ _ home shell; do
-    [[ "$uid" -ge 1000 && "$uid" -lt 65534 ]] || continue
+    _is_human_uid "$uid" || continue
     [[ "$shell" == */nologin || "$shell" == */false ]] && continue
     [[ -S "/run/user/$uid/bus" ]] || continue
     local val
@@ -532,7 +556,7 @@ _de_check_file_indexer() {
     gnome)
       local _u _uid _shell
       while IFS=: read -r _u _ _uid _ _ _ _shell; do
-        [[ "$_uid" -ge 1000 && "$_uid" -lt 65534 ]] || continue
+        _is_human_uid "$_uid" || continue
         [[ "$_shell" == */nologin || "$_shell" == */false ]] && continue
         if sudo -u "$_u" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${_uid}/bus" \
              systemctl --user is-active --quiet tracker-miner-fs-3.service 2>/dev/null \
@@ -590,8 +614,17 @@ _safe_find_root() {
 # Same exclusion pattern, scoped to /home and /root for secret/key scans.
 # Also excludes common dev/cache directories where false-positive .key/.env
 # files live (node_modules, .git/objects, .cache, .venv).
+# Atomic Fedora (Silverblue/Kinoite) uses /var/home — included so user home
+# scanning works on those distros even without the /home → /var/home symlink.
+# `timeout 30` matches _safe_find_root: prevents indefinite hangs on huge
+# home directories or stuck NFS/sshfs mounts.
 _safe_find_home() {
-  find /home /root \
+  local _hd_args=()
+  [[ -d /home ]] && _hd_args+=(/home)
+  [[ -d /var/home ]] && _hd_args+=(/var/home)
+  [[ -d /root ]] && _hd_args+=(/root)
+  [[ "${#_hd_args[@]}" -eq 0 ]] && return 0
+  timeout 30 find "${_hd_args[@]}" \
     -not -path '*/.snapshots/*' \
     -not -path '*/.timeshift/*' \
     -not -path '*/node_modules/*' \
@@ -1029,15 +1062,20 @@ if [[ -n "$_GRUB_CFG" ]]; then
 fi
 
 # Running latest installed kernel?
-# SC2012-clean: shell glob with version-sort instead of `ls -v`
+# SC2012-clean: shell glob with version-sort instead of `ls -v`.
+# Filter rescue kernels (vmlinuz-0-rescue-*, vmlinuz-*-rescue-*): `sort -V`
+# would otherwise place "rescue" lexicographically after numeric versions
+# (`r` > `6`), causing a false "reboot recommended" warn on systems with
+# both a rescue and a regular kernel installed.
 shopt -s nullglob
 _kernel_files=(/boot/vmlinuz-*)
 shopt -u nullglob
+LATEST_KERNEL=""
 if [[ "${#_kernel_files[@]}" -gt 0 ]]; then
-  mapfile -t _kernel_sorted < <(printf '%s\n' "${_kernel_files[@]}" | sort -V)
-  LATEST_KERNEL="${_kernel_sorted[-1]##*/vmlinuz-}"
-else
-  LATEST_KERNEL=""
+  mapfile -t _kernel_sorted < <(printf '%s\n' "${_kernel_files[@]}" | grep -v -- '-rescue' | sort -V)
+  if [[ "${#_kernel_sorted[@]}" -gt 0 ]]; then
+    LATEST_KERNEL="${_kernel_sorted[-1]##*/vmlinuz-}"
+  fi
 fi
 if [[ -n "$LATEST_KERNEL" ]]; then
   if [[ "$KERNEL" == "$LATEST_KERNEL" ]]; then
@@ -1308,7 +1346,11 @@ elif require_cmd ufw; then
         fail "ufw: default-incoming policy 'allow' — blocks nothing"
         ;;
     esac
-    UFW_RULES=$(echo "$UFW_STATUS_VERB" | grep -cE "^[0-9.]+:")
+    # F-bug: previous regex `^[0-9.]+:` matched IP:PORT format which UFW
+    # never emits — ufw rules look like `22/tcp ALLOW IN Anywhere`. Count
+    # action keywords (ALLOW/DENY/REJECT/LIMIT) instead, which appear once
+    # per rule line in `ufw status verbose` output.
+    UFW_RULES=$(echo "$UFW_STATUS_VERB" | grep -cE '\b(ALLOW|DENY|REJECT|LIMIT)\b')
     UFW_RULES=${UFW_RULES:-0}
     info "ufw: $UFW_RULES configured rules"
   else
@@ -2119,7 +2161,7 @@ else
 
     # SSH Key Strength
     sub_header "SSH Key Strength"
-    for USER_HOME in /home/* /root; do
+    while read -r USER_HOME; do
       [[ -d "$USER_HOME" ]] || continue
       for KEY in "$USER_HOME"/.ssh/*.pub; do
         [[ -f "$KEY" ]] || continue
@@ -2141,7 +2183,7 @@ else
           pass "SSH key: $KEY ($BITS bit $TYPE)"
         fi
       done
-    done
+    done < <(_iter_user_homes)
   fi
 fi
 
@@ -2236,11 +2278,16 @@ else
   fail "$EMPTY_PW accounts with empty password (no authentication required!)"
 fi
 
-# PAM nullok
+# PAM nullok — empty passwords accepted = critical risk on system-auth/password-auth.
+# Surface the offending line so users can audit (sometimes nullok is in
+# a non-pam_unix module like pam_localuser where the impact differs).
+# Skip commented lines.
 for PAM_FILE in /etc/pam.d/system-auth /etc/pam.d/password-auth; do
   if [[ -f "$PAM_FILE" ]]; then
-    if grep -q "nullok" "$PAM_FILE"; then
-      fail "PAM nullok in $(basename "$PAM_FILE")"
+    _nullok_line=$(grep -E '^[[:space:]]*[^#[:space:]].*nullok' "$PAM_FILE" 2>/dev/null | head -1)
+    if [[ -n "$_nullok_line" ]]; then
+      fail "PAM nullok in $(basename "$PAM_FILE") — empty passwords allowed"
+      $JSON_MODE || printf "       %s\n" "${_nullok_line:0:100}"
     else
       pass "PAM nullok removed: $(basename "$PAM_FILE")"
     fi
@@ -2267,12 +2314,12 @@ fi
 info "Wheel/sudo members: $WHEEL_MEMBERS"
 
 # Shell users
-SHELL_USERS=$(grep -cv '/nologin\|/false\|/sync\|/shutdown\|/halt' /etc/passwd)
+SHELL_USERS=$(grep -cvE '/nologin|/false|/sync|/shutdown|/halt' /etc/passwd)
 info "Users with login shell: $SHELL_USERS"
 if ! $JSON_MODE; then
   while IFS=: read -r user _ uid _ _ _ shell; do
     printf "       %s (UID=%s, Shell=%s)\n" "$user" "$uid" "$shell"
-  done < <(grep -v '/nologin\|/false\|/sync\|/shutdown\|/halt' /etc/passwd)
+  done < <(grep -vE '/nologin|/false|/sync|/shutdown|/halt' /etc/passwd)
 fi
 
 # Password Hashing Method
@@ -2297,14 +2344,14 @@ else
 fi
 
 # Password Hashing Rounds
-_PW_ROUNDS=$(grep -i "^SHA_CRYPT_MAX_ROUNDS\|^YESCRYPT_COST_FACTOR" /etc/login.defs 2>/dev/null | tail -1 | awk '{print $2}')
+_PW_ROUNDS=$(grep -iE "^SHA_CRYPT_MAX_ROUNDS|^YESCRYPT_COST_FACTOR" /etc/login.defs 2>/dev/null | tail -1 | awk '{print $2}')
 if [[ -n "$_PW_ROUNDS" ]]; then
   info "Password hashing rounds/cost: $_PW_ROUNDS"
 fi
 
 # PAM password quality (pwquality/cracklib)
 _PW_QUALITY=false
-if grep -rqs "pam_pwquality\|pam_cracklib" /etc/pam.d/ 2>/dev/null; then
+if grep -rqsE "pam_pwquality|pam_cracklib" /etc/pam.d/ 2>/dev/null; then
   _PW_QUALITY=true
   pass "Password quality enforcement: pam_pwquality/pam_cracklib active"
 else
@@ -2329,7 +2376,7 @@ if ! $_CENTRAL_AUTH; then
       ((_NO_EXPIRE++))
     fi
     # Check for expired passwords
-    _pw_expired=$(chage -l "$_user" 2>/dev/null | grep "Password expires" | grep -ci "password must be changed\|expired" || true)
+    _pw_expired=$(chage -l "$_user" 2>/dev/null | grep "Password expires" | grep -ciE "password must be changed|expired" || true)
     if [[ "${_pw_expired:-0}" -gt 0 ]]; then
       warn "Password expired for user: $_user"
     fi
@@ -2375,7 +2422,7 @@ fi
 sub_header "Account Status"
 _LOCKED_ACCOUNTS=0
 while IFS=: read -r _lu_user _ _lu_uid _ _ _ _; do
-  [[ "$_lu_uid" -ge 1000 && "$_lu_uid" -lt 65534 ]] || continue
+  _is_human_uid "$_lu_uid" || continue
   _lu_status=$(passwd -S "$_lu_user" 2>/dev/null | awk '{print $2}')
   if [[ "$_lu_status" == "L" || "$_lu_status" == "LK" ]]; then
     info "Account locked: $_lu_user"
@@ -2513,7 +2560,7 @@ declare -a _APP_HISTS=(".python_history" ".psql_history" ".mysql_history" ".sqli
                        ".lesshst" ".viminfo"
                        ".local/share/nano/search_history"
                        ".config/nvim/shada/main.shada")
-for USER_HOME in /home/* /root; do
+while read -r USER_HOME; do
   [[ -d "$USER_HOME" ]] || continue
   # Shell histories: strict 077 check (passwords typed inline land here)
   for HIST in "${_SHELL_HISTS[@]}"; do
@@ -2534,7 +2581,7 @@ for USER_HOME in /home/* /root; do
     fi
     # No PASS for app histories — too noisy at scale; user gets implicit pass via no-warn
   done
-done
+done < <(_iter_user_homes)
 
 }
 
@@ -2544,24 +2591,34 @@ check_filesystem() {
   header "12" "FILESYSTEM SECURITY"
 ###############################################################################
 
-# SUID Files (uses _safe_find_root which excludes Snapper/Timeshift snapshots)
+# SUID/SGID baseline thresholds (excludes container-storage SUID layers
+# via _safe_find_root). Values calibrated against:
+#   - hardened Fedora desktop with Flatpak: ~22-32 SUID typical
+#   - vanilla Ubuntu desktop: ~28-38 SUID typical
+#   - server-minimal install: ~12-18 SUID typical
+# Adjust here (single source of truth) if your baseline differs.
+_SUID_PASS_MAX=30
+_SUID_WARN_MAX=45
+_SGID_PASS_MAX=10
+_SGID_WARN_MAX=20
+
 SUID_COUNT=$(_safe_find_root -perm -4000 -type f | wc -l)
-if [[ "$SUID_COUNT" -le 30 ]]; then
-  pass "SUID files: $SUID_COUNT"
-elif [[ "$SUID_COUNT" -le 45 ]]; then
-  warn "SUID files: $SUID_COUNT (>30, investigate)"
+if [[ "$SUID_COUNT" -le "$_SUID_PASS_MAX" ]]; then
+  pass "SUID files: $SUID_COUNT (≤${_SUID_PASS_MAX})"
+elif [[ "$SUID_COUNT" -le "$_SUID_WARN_MAX" ]]; then
+  warn "SUID files: $SUID_COUNT (>${_SUID_PASS_MAX}, investigate)"
 else
-  fail "SUID files: $SUID_COUNT (>45)"
+  fail "SUID files: $SUID_COUNT (>${_SUID_WARN_MAX})"
 fi
 
 # SGID Files
 SGID_COUNT=$(_safe_find_root -perm -2000 -type f | wc -l)
-if [[ "$SGID_COUNT" -le 10 ]]; then
-  pass "SGID files: $SGID_COUNT"
-elif [[ "$SGID_COUNT" -le 20 ]]; then
-  warn "SGID files: $SGID_COUNT (>10)"
+if [[ "$SGID_COUNT" -le "$_SGID_PASS_MAX" ]]; then
+  pass "SGID files: $SGID_COUNT (≤${_SGID_PASS_MAX})"
+elif [[ "$SGID_COUNT" -le "$_SGID_WARN_MAX" ]]; then
+  warn "SGID files: $SGID_COUNT (>${_SGID_PASS_MAX})"
 else
-  fail "SGID files: $SGID_COUNT (>20)"
+  fail "SGID files: $SGID_COUNT (>${_SGID_WARN_MAX})"
 fi
 
 # World-Writable — F-110: cache find result so we don't run the same scan
@@ -2673,7 +2730,7 @@ for FILE in "${!PERM_CHECKS[@]}"; do
     if (( (8#${ACTUAL:-777} & ~8#$EXPECTED) == 0 )); then
       # Annotate when stricter-than-expected (e.g. shadow=0 vs expected 640)
       # to avoid users panicking at "Permissions /etc/shadow: 0" output (F-115)
-      if [[ "$ACTUAL" -lt "$EXPECTED" ]] 2>/dev/null; then
+      if [[ "$ACTUAL" -lt "$EXPECTED" ]]; then
         pass "Permissions $FILE: $ACTUAL (stricter than recommended $EXPECTED)"
       else
         pass "Permissions $FILE: $ACTUAL"
@@ -2752,7 +2809,7 @@ if [[ -c /dev/hwrng ]]; then
   pass "Hardware RNG: /dev/hwrng present"
 elif [[ -d /sys/class/misc/hw_random ]]; then
   pass "Hardware RNG: hw_random device available"
-elif grep -q "rdrand\|rdseed" /proc/cpuinfo 2>/dev/null; then
+elif grep -qE "rdrand|rdseed" /proc/cpuinfo 2>/dev/null; then
   pass "Hardware RNG: CPU supports RDRAND/RDSEED"
 else
   info "No hardware RNG detected (software entropy only)"
@@ -2907,7 +2964,7 @@ if require_cmd rpm; then
   # user's machine and inherently cannot carry an RPM GPG signature. They are
   # typically MOK-signed for Secure Boot, which is a separate trust chain.
   RPM_NOSIG_KMOD=$(rpm -qa --qf '%{NAME}-%{VERSION}-%{RELEASE} RSA:%{RSAHEADER:pgpsig} PGP:%{SIGPGP:pgpsig} GPG:%{SIGGPG:pgpsig}\n' 2>/dev/null \
-    | grep "RSA:(none) PGP:(none) GPG:(none)" | grep -cv "^gpg-pubkey-\|^kmod-" | ccount)
+    | grep "RSA:(none) PGP:(none) GPG:(none)" | grep -cvE "^gpg-pubkey-|^kmod-" | ccount)
   RPM_NOSIG_KMOD_ONLY=$(( RPM_NOSIG - RPM_NOSIG_KMOD ))
   if [[ "$RPM_NOSIG" -eq 0 ]]; then
     pass "All RPM packages signed"
@@ -3045,21 +3102,21 @@ fi
 # Suspect Cron Jobs — F-133: when cron.deny restricts users, `crontab -l -u`
 # silently fails. Read /var/spool/cron/<user> directly as authoritative source.
 sub_header "Cron jobs (all users)"
-for USER_HOME in /home/* /root; do
+while read -r USER_HOME; do
   [[ -d "$USER_HOME" ]] || continue
-  USER=$(basename "$USER_HOME")
+  _cron_user=$(basename "$USER_HOME")
   # Direct file read survives cron.deny restrictions
   _crontab_file=""
-  for _cf in "/var/spool/cron/$USER" "/var/spool/cron/crontabs/$USER"; do
+  for _cf in "/var/spool/cron/$_cron_user" "/var/spool/cron/crontabs/$_cron_user"; do
     [[ -f "$_cf" ]] && _crontab_file="$_cf" && break
   done
   if [[ -n "$_crontab_file" ]]; then
     CRONTAB=$(grep -v "^#" "$_crontab_file" 2>/dev/null | grep -v "^$" || true)
   else
-    CRONTAB=$(crontab -l -u "$USER" 2>/dev/null | grep -v "^#" | grep -v "^$" || true)
+    CRONTAB=$(crontab -l -u "$_cron_user" 2>/dev/null | grep -v "^#" | grep -v "^$" || true)
   fi
   if [[ -n "$CRONTAB" ]]; then
-    info "Crontab $USER:"
+    info "Crontab $_cron_user:"
     while read -r line; do
       $JSON_MODE || printf "       %s\n" "$line"
       if echo "$line" | grep -qiE "curl|wget|nc |ncat|python.*http|bash.*http|/dev/tcp"; then
@@ -3067,7 +3124,7 @@ for USER_HOME in /home/* /root; do
       fi
     done <<< "$CRONTAB"
   fi
-done
+done < <(_iter_user_homes)
 for CRONDIR in /etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/cron.weekly /etc/cron.monthly; do
   if [[ -d "$CRONDIR" ]]; then
     # SC2012-clean: count via shell glob with nullglob
@@ -3248,7 +3305,7 @@ if require_cmd podman; then
 fi
 
 if require_cmd virsh; then
-  VM_COUNT=$(virsh list --all 2>/dev/null | grep -c "running\|paused" | ccount)
+  VM_COUNT=$(virsh list --all 2>/dev/null | grep -cE "running|paused" | ccount)
   info "Running VMs: $VM_COUNT"
 fi
 
@@ -3532,16 +3589,17 @@ fi
 sub_header "Top 5 CPU"
 if ! $JSON_MODE; then
   # shellcheck disable=SC2009  # ps -eo + grep filters the sort header line — pgrep can't replace this
-  while read -r USER CPU MEM CMD; do
-    printf "       %s %s%% %s\n" "$USER" "$CPU" "$(echo "$CMD" | cut -c1-60)"
+  # Lowercase loop vars so we don't shadow the $USER environment variable.
+  while read -r _user _cpu _mem _cmd; do
+    printf "       %s %s%% %s\n" "$_user" "$_cpu" "$(echo "$_cmd" | cut -c1-60)"
   done < <(ps -eo user,pcpu,pmem,args --sort=-pcpu 2>/dev/null | grep -v 'sort=-pcpu' | head -6 | tail -5)
 fi
 
 sub_header "Top 5 Memory"
 if ! $JSON_MODE; then
   # shellcheck disable=SC2009
-  while read -r USER CPU MEM CMD; do
-    printf "       %s %s%% %s\n" "$USER" "$MEM" "$(echo "$CMD" | cut -c1-60)"
+  while read -r _user _cpu _mem _cmd; do
+    printf "       %s %s%% %s\n" "$_user" "$_mem" "$(echo "$_cmd" | cut -c1-60)"
   done < <(ps -eo user,pcpu,pmem,args --sort=-pmem 2>/dev/null | grep -v 'sort=-pmem' | head -6 | tail -5)
 fi
 
@@ -3586,16 +3644,16 @@ if require_cmd smartctl; then
         continue
         ;;
     esac
-    SMART=$(smartctl -H "$DISK" 2>/dev/null | grep -i "health\|result" | tail -1)
+    SMART=$(smartctl -H "$DISK" 2>/dev/null | grep -iE "health|result" | tail -1)
     if [[ -z "$SMART" ]]; then
       # Empty output often means USB/eSATA bridge — retry with -d sat
-      SMART=$(smartctl -H -d sat "$DISK" 2>/dev/null | grep -i "health\|result" | tail -1)
+      SMART=$(smartctl -H -d sat "$DISK" 2>/dev/null | grep -iE "health|result" | tail -1)
     fi
     if [[ -z "$SMART" ]]; then
       # Some USB bridges need the JMicron passthrough
-      SMART=$(smartctl -H -d usbjmicron "$DISK" 2>/dev/null | grep -i "health\|result" | tail -1)
+      SMART=$(smartctl -H -d usbjmicron "$DISK" 2>/dev/null | grep -iE "health|result" | tail -1)
     fi
-    if echo "$SMART" | grep -qi "passed\|ok"; then
+    if echo "$SMART" | grep -qiE "passed|ok"; then
       pass "SMART $DISK: OK"
     elif [[ -n "$SMART" ]]; then
       fail "SMART $DISK: $SMART"
@@ -3686,12 +3744,17 @@ check_certificates() {
   header "23" "CRYPTO & CERTIFICATES"
 ###############################################################################
 
-# F-168: Cross-distro CA certificate count (trust is Fedora/RHEL-only)
+# F-168: Cross-distro CA certificate count (trust is Fedora/RHEL-only).
+# `grep -c` returns rc=1 with stdout="0" on no-match; the legacy `|| echo "?"`
+# pattern would APPEND "?" to "0", producing multi-line "0\n?" in info output.
+# Use ${var:-0} default instead so empty/zero captures cleanly.
 if require_cmd trust; then
-  CA_COUNT=$(trust list 2>/dev/null | grep -c "type: certificate" || echo "?")
+  CA_COUNT=$(trust list 2>/dev/null | grep -c "type: certificate")
+  CA_COUNT=${CA_COUNT:-0}
   info "System CA certificates: $CA_COUNT"
 elif [[ -f /etc/ssl/certs/ca-certificates.crt ]]; then
-  CA_COUNT=$(grep -c "BEGIN CERTIFICATE" /etc/ssl/certs/ca-certificates.crt 2>/dev/null || echo "?")
+  CA_COUNT=$(grep -c "BEGIN CERTIFICATE" /etc/ssl/certs/ca-certificates.crt 2>/dev/null)
+  CA_COUNT=${CA_COUNT:-0}
   info "System CA certificates: $CA_COUNT (from ca-certificates.crt)"
 elif [[ -d /etc/ssl/certs ]]; then
   CA_COUNT=$(find /etc/ssl/certs -maxdepth 1 \( -name "*.pem" -o -name "*.crt" \) 2>/dev/null | wc -l)
@@ -3710,8 +3773,8 @@ if require_cmd openssl; then
 fi
 
 sub_header "SSH Keys"
-for USER_HOME in /home/* /root; do
-  USER=$(basename "$USER_HOME")
+while read -r USER_HOME; do
+  _ssh_user=$(basename "$USER_HOME")
   if [[ -d "$USER_HOME/.ssh" ]]; then
     # SC2012-clean: count via shell glob with nullglob
     shopt -s nullglob
@@ -3721,10 +3784,10 @@ for USER_HOME in /home/* /root; do
     AUTH_KEYS=$(wc -l "$USER_HOME/.ssh/authorized_keys" 2>/dev/null | awk '{print $1}' || true)
     AUTH_KEYS=${AUTH_KEYS:-0}
     if [[ "$KEY_COUNT" -gt 0 ]] || [[ "$AUTH_KEYS" -gt 0 ]]; then
-      info "SSH keys for $USER: $KEY_COUNT keys, $AUTH_KEYS authorized"
+      info "SSH keys for $_ssh_user: $KEY_COUNT keys, $AUTH_KEYS authorized"
     fi
   fi
-done
+done < <(_iter_user_homes)
 
 }
 
@@ -4031,21 +4094,33 @@ check_hardening() {
   header "30" "ADVANCED HARDENING"
 ###############################################################################
 
-# Coredump Service Check (new)
+# Coredump Service Check
+# F-bug: socket-active alone is not a hardening regression — modern Fedora
+# enables systemd-coredump.socket by default for socket-activation. What
+# matters is whether dumps actually persist (Storage= setting). Check
+# storage first, then qualify socket state by storage outcome.
 sub_header "Core Dump Service"
-if systemctl is-active systemd-coredump.socket &>/dev/null; then
-  warn "systemd-coredump socket: active"
-else
-  pass "systemd-coredump socket: inactive"
-fi
-# Read effective storage setting — check drop-ins too (they override main config)
 COREDUMP_STORAGE=$(_systemd_conf_val /etc/systemd/coredump.conf Storage)
+_coredump_socket_active=false
+systemctl is-active systemd-coredump.socket &>/dev/null && _coredump_socket_active=true
+
 if [[ "${COREDUMP_STORAGE,,}" == "none" ]]; then
   pass "Coredump storage: none (disabled)"
+  if $_coredump_socket_active; then
+    info "systemd-coredump socket: active (no persistence — storage=none)"
+  else
+    pass "systemd-coredump socket: inactive (fully disabled)"
+  fi
 elif [[ -n "$COREDUMP_STORAGE" ]]; then
   warn "Coredump storage: $COREDUMP_STORAGE (should be 'none')"
+  if $_coredump_socket_active; then
+    warn "systemd-coredump socket: active with storage=$COREDUMP_STORAGE"
+  fi
 else
   info "Coredump storage: default/external (not explicitly disabled)"
+  if $_coredump_socket_active; then
+    info "systemd-coredump socket: active (default behavior — set Storage=none to suppress)"
+  fi
 fi
 
 # USB Guard (new)
@@ -4211,7 +4286,7 @@ fi
 # Home directory permissions
 sub_header "Home Directory Security"
 while IFS=: read -r _huser _ _huid _ _ _hhome _; do
-  [[ "$_huid" -ge 1000 && "$_huid" -lt 65534 ]] || continue
+  _is_human_uid "$_huid" || continue
   [[ -d "$_hhome" ]] || continue
   _HPERMS=$(stat -c %a "$_hhome" 2>/dev/null)
   [[ -z "$_HPERMS" ]] && continue
@@ -4281,7 +4356,7 @@ fi
 sub_header "Shell History Analysis"
 _SUSPICIOUS_HIST=0
 while IFS=: read -r _huser _ _huid _ _ _hhome _; do
-  [[ "$_huid" -ge 1000 && "$_huid" -lt 65534 ]] || continue
+  _is_human_uid "$_huid" || continue
   for _histf in "$_hhome/.bash_history" "$_hhome/.zsh_history"; do
     [[ -f "$_histf" ]] || continue
     _SH_PATTERN="curl.*\|.*bash|wget.*\|.*sh|curl.*-o.*/tmp|wget.*/tmp|chmod\s+\+x.*/tmp|/dev/tcp|nc\s+-e|ncat\s+-e"
@@ -4490,7 +4565,7 @@ if require_cmd rpm; then
     RPM_VERIFY_ALL=$(echo "$RPM_VA_OUTPUT" | grep -cE "^..5" || true)
     RPM_VERIFY_ALL=${RPM_VERIFY_ALL:-0}
     RPM_VERIFY_BIN=$(echo "$RPM_VA_OUTPUT" | grep -E "^..5" | grep -v " c " \
-      | grep -cv "\.pyc\b\|/__pycache__/\|/usr/lib/issue" || true)
+      | grep -cvE "\.pyc\b|/__pycache__/|/usr/lib/issue" || true)
     RPM_VERIFY_BIN=${RPM_VERIFY_BIN:-0}
     if [[ "$RPM_VERIFY_ALL" -eq 0 ]]; then
       pass "RPM verify: all package files intact"
@@ -4610,7 +4685,7 @@ fi
 # Available valid shells
 sub_header "Valid Shells"
 if [[ -f /etc/shells ]]; then
-  _SHELL_COUNT=$(grep -cv "^#\|^$" /etc/shells 2>/dev/null || true)
+  _SHELL_COUNT=$(grep -cvE "^#|^$" /etc/shells 2>/dev/null || true)
   info "Valid shells in /etc/shells: ${_SHELL_COUNT:-0}"
   # Check for insecure shells
   # F-217: extended legacy-shell list includes csh/tcsh and bare sh/dash
@@ -4755,7 +4830,7 @@ check_browser_privacy() {
         elif grep -q "uBlock0@raymondhill.net" "$ext_json" 2>/dev/null; then
           # Without jq, just confirm presence (assume active if listed)
           pass "uBlock Origin installed [$label]"
-        elif grep -q "uBOLite@raymondhill.net\|@ublock-origin-lite" "$ext_json" 2>/dev/null; then
+        elif grep -qE "uBOLite@raymondhill.net|@ublock-origin-lite" "$ext_json" 2>/dev/null; then
           pass "uBlock Origin Lite installed [$label]"
         else
           warn "uBlock Origin not found [$label]"
@@ -5664,7 +5739,7 @@ check_desktop_session() {
   total_autostart=$((total_autostart + sys_count))
 
   while IFS=: read -r user _ uid _ _ home _; do
-    [[ "$uid" -ge 1000 && "$uid" -lt 65534 ]] || continue
+    _is_human_uid "$uid" || continue
     local ucount=0
     ucount=$(find "$home/.config/autostart/" -name '*.desktop' 2>/dev/null | wc -l)
     if [[ "$ucount" -gt 0 ]]; then
@@ -5724,7 +5799,7 @@ check_desktop_session() {
         userlist_disabled=1
       fi
     fi
-    if [[ -S "/run/user/$(id -u gdm 2>/dev/null)/bus" ]] 2>/dev/null; then
+    if [[ -S "/run/user/$(id -u gdm 2>/dev/null)/bus" ]]; then
       local gdm_uid
       gdm_uid=$(id -u gdm 2>/dev/null)
       local val
@@ -5774,7 +5849,7 @@ check_media_privacy() {
   local mic_checked=0
   if command -v wpctl &>/dev/null; then
     while IFS=: read -r user _ uid _ _ _ shell; do
-      [[ "$uid" -ge 1000 && "$uid" -lt 65534 ]] || continue
+      _is_human_uid "$uid" || continue
       [[ "$shell" == */nologin || "$shell" == */false ]] && continue
       [[ -S "/run/user/$uid/bus" ]] || continue
       local vol
@@ -5790,7 +5865,7 @@ check_media_privacy() {
     done < /etc/passwd
   elif command -v pactl &>/dev/null; then
     while IFS=: read -r user _ uid _ _ _ shell; do
-      [[ "$uid" -ge 1000 && "$uid" -lt 65534 ]] || continue
+      _is_human_uid "$uid" || continue
       [[ "$shell" == */nologin || "$shell" == */false ]] && continue
       [[ -S "/run/user/$uid/bus" ]] || continue
       local muted
@@ -5815,7 +5890,7 @@ check_media_privacy() {
       net_audio=1
     fi
     while IFS=: read -r user _ uid _ _ _ shell; do
-      [[ "$uid" -ge 1000 && "$uid" -lt 65534 ]] || continue
+      _is_human_uid "$uid" || continue
       [[ "$shell" == */nologin || "$shell" == */false ]] && continue
       [[ -S "/run/user/$uid/bus" ]] || continue
       if sudo -u "$user" XDG_RUNTIME_DIR="/run/user/$uid" \
@@ -5990,7 +6065,7 @@ check_keyring_security() {
 
   local ssh_checked=0
   while IFS=: read -r user _ uid _ _ home shell; do
-    [[ "$uid" -ge 1000 && "$uid" -lt 65534 ]] || continue
+    _is_human_uid "$uid" || continue
     [[ "$shell" == */nologin || "$shell" == */false ]] && continue
     local ssh_conf="$home/.ssh/config"
     local agent_conf=""
@@ -6005,7 +6080,7 @@ check_keyring_security() {
     local effective="${agent_conf:-$global_agent}"
     if [[ -n "$effective" ]]; then
       ssh_checked=1
-      if echo "$effective" | grep -qi 'confirm\|[0-9]'; then
+      if echo "$effective" | grep -qiE 'confirm|[0-9]'; then
         pass "SSH AddKeysToAgent has timeout/confirm for $user"
       elif echo "$effective" | grep -qi 'yes'; then
         warn "SSH AddKeysToAgent=yes for $user (keys persist until agent dies)"
@@ -6016,7 +6091,7 @@ check_keyring_security() {
 
   local gpg_checked=0
   while IFS=: read -r user _ uid _ _ home shell; do
-    [[ "$uid" -ge 1000 && "$uid" -lt 65534 ]] || continue
+    _is_human_uid "$uid" || continue
     [[ "$shell" == */nologin || "$shell" == */false ]] && continue
     local gpg_conf="$home/.gnupg/gpg-agent.conf"
     [[ -f "$gpg_conf" ]] || continue
@@ -6063,7 +6138,7 @@ check_keyring_security() {
        -o -name ".credentials" -o -name "passwords.txt" -o -name "secrets.txt" \
        -o -name "credentials.json" \))
   while IFS=: read -r user _ uid _ _ home shell; do
-    [[ "$uid" -ge 1000 && "$uid" -lt 65534 ]] || continue
+    _is_human_uid "$uid" || continue
     [[ "$shell" == */nologin || "$shell" == */false ]] && continue
     [[ -d "$home" ]] || continue
     if [[ -f "$home/.netrc" ]]; then
@@ -6132,7 +6207,7 @@ if command -v fwupdmgr &>/dev/null; then
   fw_output=$(timeout 15 fwupdmgr get-updates --no-unreported-check 2>/dev/null)
   fw_exit=$?
   if [[ $fw_exit -eq 0 && -n "$fw_output" ]]; then
-    update_count=$(echo "$fw_output" | grep -c '│\|New version')
+    update_count=$(echo "$fw_output" | grep -cE '│|New version')
     if [[ "$update_count" -gt 0 ]]; then
       warn "Firmware updates available (run: fwupdmgr update)"
     else
@@ -6140,7 +6215,7 @@ if command -v fwupdmgr &>/dev/null; then
     fi
   elif [[ $fw_exit -eq 2 ]]; then
     pass "Firmware is up to date"
-  elif echo "$fw_output" | grep -qi 'no upgrades\|no updates'; then
+  elif echo "$fw_output" | grep -qiE 'no upgrades|no updates'; then
     pass "Firmware is up to date"
   else
     info "Could not check firmware updates"
