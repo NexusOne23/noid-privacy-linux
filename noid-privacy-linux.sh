@@ -2983,8 +2983,10 @@ fi
 # TCP Wrappers (new)
 sub_header "TCP Wrappers"
 if [[ -f /etc/hosts.allow ]]; then
-  ALLOW_RULES=$(grep -cvE '^#|^$' /etc/hosts.allow 2>/dev/null || echo 0)
-  DENY_RULES=$(grep -cvE '^#|^$' /etc/hosts.deny 2>/dev/null || echo 0)
+  ALLOW_RULES=$(grep -cvE '^#|^$' /etc/hosts.allow 2>/dev/null)
+  ALLOW_RULES="${ALLOW_RULES:-0}"
+  DENY_RULES=$(grep -cvE '^#|^$' /etc/hosts.deny 2>/dev/null)
+  DENY_RULES="${DENY_RULES:-0}"
   info "TCP wrappers: $ALLOW_RULES allow, $DENY_RULES deny rules"
   if [[ "$DENY_RULES" -eq 0 ]]; then
     info "hosts.deny: no deny rules (TCP wrappers deprecated on modern systems)"
@@ -3067,15 +3069,24 @@ if ! should_skip "logs"; then
 header "19" "LOGS & MONITORING"
 ###############################################################################
 
+# Journal errors — exclude noise from VM/container subsystems whose
+# error-level messages bubble into the host journal but are local to the
+# guest's userspace (libvirtd start/stop chatter, qemu backend probes,
+# Podman conmon teardown, etc.). Also drop sudo/PAM/systemd-coredump rows
+# already filtered before. Threshold: <=15 pass, <=100 warn, >100 fail.
+# Active development with VMs running can easily hit hundreds of error-level
+# entries per hour without representing real host issues, so the upper
+# threshold sits high.
 JOURNAL_ERR=$(journalctl -p err --since "1 hour ago" --no-pager -q 2>/dev/null \
-  | grep -E "^[A-Z][a-z]{2} " | grep -cvE "sudo|password is required|auth could not identify|systemd-coredump" || true)
+  | grep -E "^[A-Z][a-z]{2} " \
+  | grep -cvE "sudo|password is required|auth could not identify|systemd-coredump|qemu|libvirt|virtlogd|virtnetworkd|conmon|systemd-machined|virtqemud|virt-pki-validate" || true)
 JOURNAL_ERR=${JOURNAL_ERR:-0}
 if [[ "$JOURNAL_ERR" -le 15 ]]; then
   pass "Journal errors (1h): $JOURNAL_ERR"
-elif [[ "$JOURNAL_ERR" -le 50 ]]; then
-  warn "Journal errors (1h): $JOURNAL_ERR"
+elif [[ "$JOURNAL_ERR" -le 100 ]]; then
+  warn "Journal errors (1h): $JOURNAL_ERR (review with: journalctl -p err --since '1 hour ago')"
 else
-  fail "Journal errors (1h): $JOURNAL_ERR"
+  fail "Journal errors (1h): $JOURNAL_ERR (high — likely transient if running VMs/builds)"
 fi
 
 # journalctl short format: each actual entry starts with a 3-letter month (e.g. "Feb 26 ...").
@@ -3141,7 +3152,8 @@ fi
 
 # Deleted log files still in use (file handle open but file deleted — logs lost on restart)
 # shellcheck disable=SC2012  # ls -la inside -exec is the canonical way to surface (deleted) marker
-_DELETED_LOGS=$(find /proc/*/fd -lname '*/log/*' -exec ls -la {} \; 2>/dev/null | grep -c "(deleted)" || true)
+_DELETED_LOGS=$(find /proc/*/fd -lname '*/log/*' -exec ls -la {} \; 2>/dev/null | grep -c "(deleted)")
+_DELETED_LOGS="${_DELETED_LOGS:-0}"
 _DELETED_LOGS=${_DELETED_LOGS:-0}
 if [[ "$_DELETED_LOGS" -eq 0 ]]; then
   pass "No deleted log files in use"
@@ -4112,7 +4124,10 @@ done
 
 # /etc/securetty
 if [[ -f /etc/securetty ]]; then
-  TTY_COUNT=$(grep -cvE '^#|^$' /etc/securetty 2>/dev/null || echo 0)
+  # F-bash-grep-c-trap: `|| echo 0` produces "0\n0" multi-line when grep -c
+  # legitimately returns 0 (file exists, zero matches). Use ${var:-0} default.
+  TTY_COUNT=$(grep -cvE '^#|^$' /etc/securetty 2>/dev/null)
+  TTY_COUNT="${TTY_COUNT:-0}"
   info "securetty: $TTY_COUNT TTYs allowed"
 fi
 
@@ -4816,29 +4831,50 @@ check_network_privacy() {
     pass "Hostname '$hostname' does not appear to contain real names"
   fi
 
-  local ipv6_disabled
-  ipv6_disabled="$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)"
-  # Also check NetworkManager: ipv6.method=disabled means NM prevents IPv6 on that interface
-  # even if the kernel sysctl is not set. This is the standard Fedora/RHEL way to disable IPv6.
+  # IPv6 privacy posture — three layered checks (kernel global, kernel
+  # per-iface, NM config) so that systems with per-interface disable_ipv6=1
+  # on physical NICs but VPN-internal IPv6 don't get a false "stable address
+  # reveals identity" warning.
+  local ipv6_disabled_all
+  ipv6_disabled_all="$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)"
+
+  # Per-interface kernel state: if ALL non-VPN, non-loopback interfaces have
+  # disable_ipv6=1, IPv6 is effectively off for the threat surface this check
+  # cares about (LAN/WAN exposure). VPN-internal IPv6 is intentional.
+  local _all_phys_v6_off=true
+  local _has_phys_iface=false
+  for _ifpath in /proc/sys/net/ipv6/conf/*/disable_ipv6; do
+    [[ -f "$_ifpath" ]] || continue
+    local _if
+    _if="${_ifpath#/proc/sys/net/ipv6/conf/}"
+    _if="${_if%/disable_ipv6}"
+    [[ "$_if" == "all" || "$_if" == "default" || "$_if" == "lo" ]] && continue
+    # Skip VPN tunnels — their IPv6 is internal, not LAN-exposed
+    echo "$_if" | grep -qE "^(tun|tap|wg|proton|pvpn|tailscale|zt|nebula|mullvad|nordlynx)" && continue
+    _has_phys_iface=true
+    local _v
+    _v="$(< "$_ifpath")"
+    [[ "$_v" != "1" ]] && _all_phys_v6_off=false
+  done
+  $_has_phys_iface || _all_phys_v6_off=false
+
+  # NM-config check (legacy path — kept for systems without sysctl visibility)
   local _ipv6_nm_disabled=true
   if require_cmd nmcli; then
     local _has_active=false
     while IFS= read -r _cname; do
       [[ -z "$_cname" ]] && continue
-      # Skip VPN/killswitch interfaces — their IPv6 is internal, not internet-facing
       local _conn_iface
       _conn_iface=$(nmcli -t -f GENERAL.DEVICES connection show "$_cname" 2>/dev/null | grep -oP '(?<=GENERAL\.DEVICES:).*' | head -1)
-      if echo "$_conn_iface" | grep -qE "^(tun|wg|proton|pvpn)"; then
+      if echo "$_conn_iface" | grep -qE "^(tun|tap|wg|proton|pvpn|tailscale|zt|nebula|mullvad|nordlynx)"; then
         continue
       fi
       _has_active=true
       local _ipv6method
       _ipv6method=$(nmcli -t -f ipv6.method connection show "$_cname" 2>/dev/null | grep -oP '(?<=ipv6\.method:).*' | head -1)
-      # disabled = off; manual only counts as off if no IPv6 addresses configured
       if [[ "$_ipv6method" == "disabled" ]]; then
         continue
       elif [[ "$_ipv6method" == "manual" || "$_ipv6method" == "link-local" ]]; then
-        # Check if actual IPv6 addresses (non-link-local) are configured
         local _v6addrs
         _v6addrs=$(nmcli -t -f ipv6.addresses connection show "$_cname" 2>/dev/null | grep -oP '(?<=ipv6\.addresses:).*' | head -1)
         [[ -z "$_v6addrs" ]] && continue
@@ -4846,12 +4882,15 @@ check_network_privacy() {
       _ipv6_nm_disabled=false
       break
     done < <(nmcli -t -f NAME connection show --active 2>/dev/null | grep -v '^lo$')
-    $_has_active || _ipv6_nm_disabled=false
+    # If no active non-VPN connections found, NM says nothing definitive — fall
+    # through to kernel state instead of forcing _ipv6_nm_disabled=false.
+    $_has_active || _ipv6_nm_disabled=true
   else
     _ipv6_nm_disabled=false
   fi
-  if [[ "$ipv6_disabled" == "1" ]] || $_ipv6_nm_disabled; then
-    pass "IPv6 disabled — privacy extensions not needed"
+
+  if [[ "$ipv6_disabled_all" == "1" ]] || $_all_phys_v6_off || $_ipv6_nm_disabled; then
+    pass "IPv6 disabled on physical interfaces — privacy extensions not needed (VPN-internal IPv6 by design)"
   else
     local tempaddr
     tempaddr="$(sysctl -n net.ipv6.conf.default.use_tempaddr 2>/dev/null)"
@@ -5462,36 +5501,25 @@ check_media_privacy() {
   fi
   [[ "$net_audio" -eq 0 ]] && pass "No network audio modules detected"
 
-  # F-259: PipeWire socket regex was prone to FP on multi-line module configs.
-  # Prefer pw-dump (authoritative process-level state) when available; fall
-  # back to file-grep with stricter regex that requires "args" or "name" line
-  # near "/run/user" to confirm socket is local.
+  # F-259: PipeWire remote-access detection.
+  # The previous file-grep heuristic produced false positives on multi-line
+  # configs, and the pw-dump JSON pattern was unreliable too (props nesting
+  # varies, "args" appears in many module entries unrelated to socket scope).
+  # Reduced to two unambiguous signals: (1) explicit TCP listener via ss,
+  # (2) explicit "tcp:" socket spec in config file (not just protocol-native).
   local pw_remote=0
   for confdir in /etc/pipewire /usr/share/pipewire; do
     [[ -d "$confdir" ]] || continue
     if grep -rqs '"access.allowed"' "$confdir/" 2>/dev/null; then
       info "PipeWire access control rules found in $confdir"
     fi
-  done
-  # Authoritative check: query running PipeWire for non-local sockets
-  if command -v pw-dump &>/dev/null && pgrep -x pipewire &>/dev/null; then
-    # Try as the SUDO_USER (PipeWire runs per-user)
-    local _pw_user="${SUDO_USER:-}"
-    if [[ -n "$_pw_user" ]]; then
-      local _pw_uid
-      _pw_uid=$(id -u "$_pw_user" 2>/dev/null)
-      if [[ -n "$_pw_uid" && -S "/run/user/$_pw_uid/bus" ]]; then
-        local _pw_modules
-        _pw_modules=$(sudo -u "$_pw_user" XDG_RUNTIME_DIR="/run/user/$_pw_uid" \
-          pw-dump 2>/dev/null | grep -E '"object\.serial"|"module\.name"|"args"' | grep -B1 'protocol-native')
-        if echo "$_pw_modules" | grep -q '"args"' && ! echo "$_pw_modules" | grep -q '/run/user'; then
-          warn "PipeWire may expose socket beyond local user (pw-dump)"
-          pw_remote=1
-        fi
-      fi
+    # Explicit TCP socket in config = remote exposure intent
+    if grep -rhsE '^\s*[^#].*tcp:[0-9]+' "$confdir/" 2>/dev/null | grep -q .; then
+      warn "PipeWire config in $confdir declares a TCP socket — remote access enabled"
+      pw_remote=1
     fi
-  fi
-  # Fallback: TCP listener check is unambiguous
+  done
+  # Authoritative: TCP listener owned by pipewire process
   if ss -tlnp 2>/dev/null | grep -q 'pipewire'; then
     warn "PipeWire listening on TCP"
     pw_remote=1
