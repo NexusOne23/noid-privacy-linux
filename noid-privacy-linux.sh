@@ -1482,10 +1482,17 @@ if [[ -f /proc/net/if_inet6 ]]; then
   # IPv6 on VPN interfaces is internal to the tunnel and not an internet-facing leak.
   IPV6_GLOBAL=0
   while read -r _v6addr _ _ _ _ _v6iface; do
-    # Skip link-local (fe80), multicast (ff), ULA (fd), loopback (::1)
-    [[ "$_v6addr" =~ ^(fe80|ff|fd|0000000000000000) ]] && continue
-    # Skip VPN interfaces — their IPv6 is tunnel-internal, not a leak
-    echo "$_v6iface" | grep -qE "^(tun|wg|proton|pvpn)" && continue
+    # F-067/068: tighter regex — match prefix exactly via length-aware patterns.
+    # if_inet6 format is 32-hex-char address. Link-local fe80, multicast ff*,
+    # ULA fc/fd, loopback all-zero. Old regex `^(fe80|ff|fd|0000000000000000)`
+    # could match "fe80abc..." (any address starting with fe80) which is
+    # technically correct (fe80::/10), but stricter form anchors the
+    # 16-character first half so we don't accidentally match a global address
+    # that happens to start with "fd" but isn't ULA (very edge but possible).
+    [[ "$_v6addr" =~ ^(fe[89ab][0-9a-f]|f[cd][0-9a-f]{2}|ff[0-9a-f]{2}|0{16}) ]] && continue
+    # Skip VPN interfaces — their IPv6 is tunnel-internal, not a leak.
+    # F-005 regex updated to match all VPN families (tailscale, zt, nebula, mullvad).
+    echo "$_v6iface" | grep -qE "^(tun|tap|wg|proton|pvpn|tailscale|zt|nebula|mullvad|nordlynx)" && continue
     ((IPV6_GLOBAL++))
   done < /proc/net/if_inet6
   IPV6_TOTAL=$(wc -l < /proc/net/if_inet6)
@@ -1618,13 +1625,16 @@ declare -A SYSCTL_STRICT=(
 
 # Params where any value >= expected is acceptable (more = stricter)
 declare -A SYSCTL_MIN_OK=(
-  ["kernel.yama.ptrace_scope"]=1
+  ["kernel.yama.ptrace_scope"]=2
   ["kernel.unprivileged_bpf_disabled"]=1
   ["net.ipv4.conf.all.rp_filter"]=1
   ["net.ipv4.conf.default.rp_filter"]=1
 )
 
-for KEY in "${!SYSCTL_CHECKS[@]}"; do
+# F-074: bash assoc-array iteration is non-deterministic. Sort the keys
+# so output is diff-friendly across runs and consistent in CI logs.
+mapfile -t _SYSCTL_CHECKS_KEYS < <(printf '%s\n' "${!SYSCTL_CHECKS[@]}" | sort)
+for KEY in "${_SYSCTL_CHECKS_KEYS[@]}"; do
   EXPECTED="${SYSCTL_CHECKS[$KEY]}"
   ACTUAL=$(sysctl -n "$KEY" 2>/dev/null || echo "N/A")
   if [[ "$ACTUAL" == "N/A" ]]; then
@@ -1639,7 +1649,8 @@ for KEY in "${!SYSCTL_CHECKS[@]}"; do
 done
 
 sub_header "Strict/Optional"
-for KEY in "${!SYSCTL_STRICT[@]}"; do
+mapfile -t _SYSCTL_STRICT_KEYS < <(printf '%s\n' "${!SYSCTL_STRICT[@]}" | sort)
+for KEY in "${_SYSCTL_STRICT_KEYS[@]}"; do
   EXPECTED="${SYSCTL_STRICT[$KEY]}"
   ACTUAL=$(sysctl -n "$KEY" 2>/dev/null || echo "N/A")
   if [[ "$ACTUAL" == "N/A" ]]; then
@@ -1867,8 +1878,13 @@ done < <(ss -ulnp 2>/dev/null | tail -n+2)
 # Connections to unusual ports
 sub_header "Unusual destination ports"
 UNUSUAL_PORTS=$(while read -r port; do
+  # F-090: extended whitelist covers HTTPS/HTTP, mail (IMAP/IMAPS/POP3/POP3S/
+  # SMTP/Submission/SMTPS), DNS, XMPP/XMPP-S, SSH, alt-HTTPS (8080/8443/4443/
+  # 7443), STUN (3478/3479), TURN-S (5349), SIP/SIPS (5060/5061), MQTT-S
+  # (8883), WebRTC default port range, and IRC-over-TLS (6697).
   case "$port" in
-    80|443|53|993|465|8443|22|587|143|995|5222|5223) ;;
+    80|443|53|993|465|8443|22|587|143|995|5222|5223|\
+    8080|4443|7443|3478|3479|5349|5060|5061|8883|6697) ;;
     *) echo "$port" ;;
   esac
 done < <(ss -tnp state established 2>/dev/null | awk '{print $4}' | grep -oP ':\K\d+$' | sort -n | uniq))
@@ -2800,7 +2816,8 @@ fi
 
 # Flatpaks
 if require_cmd flatpak; then
-  FLATPAK_COUNT=$(flatpak list 2>/dev/null | wc -l)
+  # F-129: --columns=application gives one line per app, no header — exact count
+  FLATPAK_COUNT=$(flatpak list --app --columns=application 2>/dev/null | wc -l)
   info "Flatpaks: $FLATPAK_COUNT"
 fi
 
@@ -3059,8 +3076,19 @@ if require_cmd virsh; then
   info "Running VMs: $VM_COUNT"
 fi
 
+# F-148: severity-tiered classification of user.max_user_namespaces
 USER_NS=$(sysctl -n user.max_user_namespaces 2>/dev/null || echo "N/A")
-info "Max user namespaces: $USER_NS"
+if [[ "$USER_NS" == "N/A" ]]; then
+  info "Max user namespaces: N/A (kernel does not expose this sysctl)"
+elif [[ "$USER_NS" == "0" ]]; then
+  pass "Max user namespaces: 0 (hardened — userns disabled)"
+elif [[ "$USER_NS" -lt 1000 ]]; then
+  pass "Max user namespaces: $USER_NS (restricted)"
+elif [[ "$USER_NS" -lt 10000 ]]; then
+  info "Max user namespaces: $USER_NS (Fedora/RHEL default range)"
+else
+  info "Max user namespaces: $USER_NS (high — typical for Ubuntu/container hosts)"
+fi
 
 fi # end containers
 
@@ -3114,13 +3142,16 @@ fi
 # that are indented with spaces — these are NOT separate events and must not be counted.
 # Filter to timestamp-prefixed lines only, then exclude known-benign sources.
 _JCRIT_LINES=$(journalctl -p crit --since "24 hours ago" --no-pager -q 2>/dev/null)
-# Filter known-benign critical messages:
-#   sudo/auth         — normal sudo operations without TTY
-#   systemd-coredump  — stack traces inflate count (filtered since v3.2.1)
-#   watchdog.*did not stop — Intel iTCO watchdog always logs this at shutdown (harmless hardware quirk)
+# Filter known-benign critical messages (F-156: extend to AMD/SP5100 watchdog
+# variants in addition to Intel iTCO):
+#   sudo/auth                          — normal sudo operations without TTY
+#   systemd-coredump                   — stack traces inflate count (filtered since v3.2.1)
+#   watchdog.*did not stop             — Intel iTCO watchdog harmless shutdown log
+#   sp5100-tco|amd_(pci_pm|nb)         — AMD TCO/NB watchdog variants
+#   pcieport.*AER.*(Corrected|RxErr)   — transient PCIe link noise
 JOURNAL_CRIT=$(echo "$_JCRIT_LINES" \
   | grep -E "^[A-Z][a-z]{2} " \
-  | grep -cvE "sudo|password is required|auth could not identify|systemd-coredump|watchdog.*did not stop" || true)
+  | grep -cvE "sudo|password is required|auth could not identify|systemd-coredump|watchdog.*did not stop|sp5100-tco|amd_pci_pm|amd_nb|pcieport.*AER.*(Corrected|RxErr)" || true)
 JOURNAL_CRIT=${JOURNAL_CRIT:-0}
 if [[ "$JOURNAL_CRIT" -eq 0 ]]; then
   pass "Journal critical (24h): 0"
@@ -3530,7 +3561,9 @@ fi
 
 # Credentials in configs
 CRED_PATTERNS="password|passwd|secret|api_key|token|credential"
-CRED_FOUND=$(find /etc -name "*.conf" -exec grep -liE "$CRED_PATTERNS" {} + 2>/dev/null | wc -l)
+# F-173: `find -exec grep` per-file forks once each. `grep -rli` on /etc is
+# faster (single grep process scans recursively).
+CRED_FOUND=$(grep -rliE "$CRED_PATTERNS" /etc --include='*.conf' 2>/dev/null | wc -l)
 info "Config files with credential patterns: $CRED_FOUND"
 
 fi # end environment
