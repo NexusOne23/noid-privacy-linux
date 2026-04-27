@@ -2547,10 +2547,13 @@ else
   fail "SGID files: $SGID_COUNT (>20)"
 fi
 
-# World-Writable
+# World-Writable — F-110: cache find result so we don't run the same scan
+# twice (counter + display). On big filesystems this halves the time.
 _WW_FIND_ARGS=(-perm -0002 -type f
   ! -path "/proc/*" ! -path "/sys/*" ! -path "/dev/*")
-WW_COUNT=$(_safe_find_root "${_WW_FIND_ARGS[@]}" | wc -l)
+_WW_RESULT=$(_safe_find_root "${_WW_FIND_ARGS[@]}")
+WW_COUNT=$(echo -n "$_WW_RESULT" | grep -c '^' || echo 0)
+WW_COUNT=${WW_COUNT:-0}
 if [[ "$WW_COUNT" -eq 0 ]]; then
   pass "World-writable files: 0"
 else
@@ -2558,9 +2561,10 @@ else
   if ! $JSON_MODE; then
     while read -r f; do
       printf "       %s\n" "$f"
-    done < <(_safe_find_root "${_WW_FIND_ARGS[@]}" | head -5)
+    done < <(echo "$_WW_RESULT" | head -5)
   fi
 fi
+unset _WW_RESULT
 
 # Unowned Files
 UNOWNED=$(_safe_find_root -not -path '/var/lib/gdm/*' \( -nouser -o -nogroup \) | wc -l)
