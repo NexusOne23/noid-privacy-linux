@@ -843,7 +843,9 @@ if [[ -f /sys/kernel/security/lockdown ]]; then
     pass "Kernel Lockdown: $LOCKDOWN"
   fi
 else
-  warn "Kernel Lockdown: not available"
+  # F-019: not all kernels are built with CONFIG_SECURITY_LOCKDOWN_LSM —
+  # absence is informational, not a hardening regression.
+  info "Kernel Lockdown: not available (CONFIG_SECURITY_LOCKDOWN_LSM not built)"
 fi
 
 # Kernel Taint — F-021: decode all 19 bits per Documentation/admin-guide/tainted-kernels.rst
@@ -884,17 +886,25 @@ else
 fi
 
 # Insecure boot parameters check
+# F-023: 'nomodeset' is a troubleshooting flag (NVIDIA/early-boot graphics issues),
+# not a security setting. Distinguish from actual security disablers.
 CMDLINE=$(< /proc/cmdline)
-for PARAM in "nomodeset" "noapic" "acpi=off" "selinux=0" "enforcing=0" "audit=0"; do
+for PARAM in "noapic" "acpi=off" "selinux=0" "enforcing=0" "audit=0"; do
   if echo "$CMDLINE" | grep -qw "$PARAM"; then
     fail "Insecure boot parameter: $PARAM"
   fi
 done
+if echo "$CMDLINE" | grep -qw "nomodeset"; then
+  info "Boot parameter: nomodeset (graphics troubleshooting — not security-relevant)"
+fi
 
-# Secure boot parameters
+# Secure boot parameters — F-024: accept stronger variants ("force" instead of "on")
 for PARAM in "init_on_alloc=1" "init_on_free=1" "slab_nomerge" "pti=on" "vsyscall=none" "debugfs=off" "page_alloc.shuffle=1" "randomize_kstack_offset=on"; do
+  # Match the param literally OR (for pti) accept the stronger pti=force variant
   if echo "$CMDLINE" | grep -qw "$PARAM"; then
     pass "Boot hardening: $PARAM"
+  elif [[ "$PARAM" == "pti=on" ]] && echo "$CMDLINE" | grep -qw "pti=force"; then
+    pass "Boot hardening: pti=force (stronger than pti=on)"
   else
     warn "Boot hardening missing: $PARAM"
   fi
@@ -926,8 +936,9 @@ done
 # LUKS
 if lsblk -o TYPE 2>/dev/null | grep -q crypt; then
   pass "LUKS encryption active"
-  LUKS_DEVS=$(lsblk -o NAME,TYPE 2>/dev/null | grep crypt | awk '{print $1}')
-  info "LUKS devices: $LUKS_DEVS"
+  # F-027: -r (raw) drops tree-art prefix (└─ characters from interactive lsblk)
+  LUKS_DEVS=$(lsblk -rno NAME,TYPE 2>/dev/null | awk '$2=="crypt" {print $1}' | tr '\n' ' ')
+  info "LUKS devices: ${LUKS_DEVS% }"
 else
   fail "No LUKS encryption detected"
 fi
@@ -2000,10 +2011,13 @@ fi
 
 if require_cmd auditctl; then
   AUDIT_RULES=$(auditctl -l 2>/dev/null | grep -cv "^No rules" || true)
-  if [[ "$AUDIT_RULES" -ge 20 ]]; then
-    pass "Audit rules: $AUDIT_RULES"
+  # F-100: CIS Level 2 + STIG expect 38+ rules; 20 is a soft minimum.
+  if [[ "$AUDIT_RULES" -ge 38 ]]; then
+    pass "Audit rules: $AUDIT_RULES (meets CIS Level 2 / STIG ≥38)"
+  elif [[ "$AUDIT_RULES" -ge 20 ]]; then
+    pass "Audit rules: $AUDIT_RULES (consider ≥38 for CIS Level 2)"
   elif [[ "$AUDIT_RULES" -gt 0 ]]; then
-    warn "Audit rules: only $AUDIT_RULES (recommended: >=20)"
+    warn "Audit rules: only $AUDIT_RULES (recommended ≥20; CIS L2 ≥38)"
   else
     fail "Audit rules: 0"
   fi
@@ -2490,7 +2504,9 @@ done
 sub_header "Login Banners"
 for BANNER_FILE in /etc/issue /etc/issue.net /etc/motd; do
   if [[ -f "$BANNER_FILE" ]] && [[ -s "$BANNER_FILE" ]]; then
-    if grep -qiE "(Linux kernel [0-9]|Fedora release|Ubuntu [0-9]|CentOS|Debian GNU|RHEL|Red Hat)" "$BANNER_FILE" 2>/dev/null; then
+    # F-117: extend regex to cover Arch, openSUSE, Manjaro, Mint, Pop!_OS,
+    # Rocky, AlmaLinux, EndeavourOS — the typical default-banner strings.
+    if grep -qiE "(Linux kernel [0-9]|Fedora release|Ubuntu [0-9]|CentOS|Debian GNU|RHEL|Red Hat|Arch Linux|openSUSE|Manjaro Linux|Linux Mint|Pop!_OS|Rocky Linux|AlmaLinux|EndeavourOS)" "$BANNER_FILE" 2>/dev/null; then
       warn "$BANNER_FILE leaks system info"
     else
       pass "$BANNER_FILE: no system info leaked"
