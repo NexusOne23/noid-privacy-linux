@@ -1128,14 +1128,22 @@ fi
 elif $HAS_APPARMOR; then
   header "02" "APPARMOR & MAC"
 
-  AA_ENFORCED=$(aa-status 2>/dev/null | grep -oP '^\s*\K\d+(?=\s+profiles? are in enforce mode)' || echo "0")
+  # F-042/043: report enforcing/complain/unconfined counts (unconfined =
+  # processes running with AA loaded but no profile attached — privilege gap).
+  AA_STATUS_OUT=$(aa-status 2>/dev/null)
+  AA_ENFORCED=$(echo "$AA_STATUS_OUT" | grep -oP '^\s*\K\d+(?=\s+profiles? are in enforce mode)' | head -1 || echo "0")
   AA_ENFORCED=${AA_ENFORCED:-0}
-  AA_COMPLAIN=$(aa-status 2>/dev/null | grep -oP '^\s*\K\d+(?=\s+profiles? are in complain mode)' || echo "0")
+  AA_COMPLAIN=$(echo "$AA_STATUS_OUT" | grep -oP '^\s*\K\d+(?=\s+profiles? are in complain mode)' | head -1 || echo "0")
   AA_COMPLAIN=${AA_COMPLAIN:-0}
+  AA_UNCONFINED=$(echo "$AA_STATUS_OUT" | grep -oP '^\s*\K\d+(?=\s+processes are unconfined)' | head -1 || echo "0")
+  AA_UNCONFINED=${AA_UNCONFINED:-0}
   if [[ "$AA_ENFORCED" -gt 0 ]]; then
     pass "AppArmor: $AA_ENFORCED profiles enforcing, $AA_COMPLAIN complaining"
   else
     warn "AppArmor: no enforcing profiles"
+  fi
+  if [[ "$AA_UNCONFINED" -gt 0 ]]; then
+    info "AppArmor: $AA_UNCONFINED unconfined processes (no profile attached)"
   fi
 
 else
@@ -1270,23 +1278,47 @@ if require_cmd firewall-cmd && systemctl is-active firewalld &>/dev/null; then
     done <<< "$FWD_POLICIES"
   fi
 elif require_cmd ufw; then
-  UFW_STATUS=$(ufw status 2>/dev/null | head -1)
-  if echo "$UFW_STATUS" | grep -qi "active"; then
+  # F-047: also check default policies and rule count (not just active/inactive)
+  UFW_STATUS_VERB=$(ufw status verbose 2>/dev/null)
+  if echo "$UFW_STATUS_VERB" | head -1 | grep -qi "active"; then
     pass "ufw: active"
+    UFW_DEFAULT_IN=$(echo "$UFW_STATUS_VERB" | grep -oP 'Default: \K\S+' | head -1)
+    case "$UFW_DEFAULT_IN" in
+      deny|reject)
+        pass "ufw: default-incoming policy '$UFW_DEFAULT_IN' (secure)"
+        ;;
+      allow)
+        fail "ufw: default-incoming policy 'allow' — blocks nothing"
+        ;;
+    esac
+    UFW_RULES=$(echo "$UFW_STATUS_VERB" | grep -cE "^[0-9.]+:")
+    UFW_RULES=${UFW_RULES:-0}
+    info "ufw: $UFW_RULES configured rules"
   else
     fail "ufw: inactive"
   fi
   info "Firewall: ufw (firewalld not available)"
 elif require_cmd iptables; then
-  # Count actual rules (not chain headers) — subtract header lines and empty lines
+  # F-048: check default policies in addition to rule count.
   IPTABLES_RULES=$(iptables -L -n 2>/dev/null | grep -cvE "^Chain |^target |^$" || true)
   IPTABLES_RULES=${IPTABLES_RULES:-0}
-  if [[ "$IPTABLES_RULES" -gt 0 ]]; then
-    pass "iptables: $IPTABLES_RULES rules"
-  else
-    warn "iptables: minimal rules"
+  IPT_INPUT_POLICY=$(iptables -L INPUT -n 2>/dev/null | head -1 | grep -oP 'policy \K\w+')
+  IPT_FWD_POLICY=$(iptables -L FORWARD -n 2>/dev/null | head -1 | grep -oP 'policy \K\w+')
+  if [[ "$IPT_INPUT_POLICY" == "DROP" || "$IPT_INPUT_POLICY" == "REJECT" ]]; then
+    pass "iptables: INPUT policy '$IPT_INPUT_POLICY' (default-deny)"
+  elif [[ -n "$IPT_INPUT_POLICY" ]]; then
+    if [[ "$IPTABLES_RULES" -gt 0 ]]; then
+      info "iptables: INPUT policy '$IPT_INPUT_POLICY' with $IPTABLES_RULES rules (rule-based filter)"
+    else
+      fail "iptables: INPUT policy '$IPT_INPUT_POLICY' and no rules — wide open"
+    fi
   fi
-  info "Firewall: iptables (firewalld not available)"
+  if [[ "$IPT_FWD_POLICY" == "DROP" || "$IPT_FWD_POLICY" == "REJECT" ]]; then
+    pass "iptables: FORWARD policy '$IPT_FWD_POLICY' (default-deny)"
+  elif [[ -n "$IPT_FWD_POLICY" ]]; then
+    info "iptables: FORWARD policy '$IPT_FWD_POLICY'"
+  fi
+  info "Firewall: iptables (firewalld not available; $IPTABLES_RULES rules)"
 else
   fail "No firewall detected (firewalld/ufw/iptables)"
 fi
@@ -1493,17 +1525,35 @@ else
   fi
 fi
 
-# DNSSEC validation status (systemd-resolved)
+# DNSSEC validation status — systemd-resolved + unbound + dnscrypt-proxy
+# (F-065: extend beyond resolvectl-only).
+_DNSSEC_FOUND=false
 if require_cmd resolvectl; then
   _DNSSEC_STATUS=$(resolvectl status 2>/dev/null | grep -oP 'DNSSEC\s*[=:]\s*\K\S+' | head -1)
   if [[ "$_DNSSEC_STATUS" == "yes" ]]; then
-    pass "DNSSEC validation: enabled"
+    pass "DNSSEC validation: enabled (systemd-resolved)"
+    _DNSSEC_FOUND=true
   elif [[ -n "$_DNSSEC_STATUS" ]]; then
-    info "DNSSEC validation: $_DNSSEC_STATUS"
-  else
-    info "DNSSEC validation: could not determine"
+    info "DNSSEC validation: $_DNSSEC_STATUS (systemd-resolved)"
+    _DNSSEC_FOUND=true
   fi
 fi
+if ! $_DNSSEC_FOUND && systemctl is-active unbound &>/dev/null; then
+  if grep -rqE "^\s*module-config:.*validator" /etc/unbound/ 2>/dev/null; then
+    pass "DNSSEC validation: enabled (unbound with validator module)"
+    _DNSSEC_FOUND=true
+  else
+    info "DNSSEC validation: unbound active but validator module not configured"
+    _DNSSEC_FOUND=true
+  fi
+fi
+if ! $_DNSSEC_FOUND && systemctl is-active dnscrypt-proxy &>/dev/null; then
+  if grep -qE "^\s*require_dnssec\s*=\s*true" /etc/dnscrypt-proxy/dnscrypt-proxy.toml 2>/dev/null; then
+    pass "DNSSEC validation: enabled (dnscrypt-proxy require_dnssec)"
+    _DNSSEC_FOUND=true
+  fi
+fi
+$_DNSSEC_FOUND || info "DNSSEC validation: could not determine (no resolvectl/unbound/dnscrypt-proxy)"
 
 # DNS Leak Test & External IP (makes network requests — skippable with --skip netleaks)
 if ! should_skip "netleaks"; then
@@ -1618,8 +1668,15 @@ else
 fi
 
 # ARP Table
-ARP_COUNT=$(ip neigh show | wc -l)
-info "ARP entries: $ARP_COUNT"
+# F-073: ARP state breakdown — REACHABLE entries are real peers, FAILED
+# entries indicate hosts that don't respond (could be probing/scan attempts),
+# STALE/DELAY/PROBE are transitional. Helps diagnose unusual LAN activity.
+ARP_COUNT=$(ip neigh show 2>/dev/null | wc -l)
+ARP_REACHABLE=$(ip neigh show nud reachable 2>/dev/null | wc -l)
+ARP_FAILED=$(ip neigh show nud failed 2>/dev/null | wc -l)
+ARP_STALE=$(ip neigh show nud stale 2>/dev/null | wc -l)
+info "ARP entries: $ARP_COUNT total ($ARP_REACHABLE reachable, $ARP_STALE stale, $ARP_FAILED failed)"
+[[ "$ARP_FAILED" -gt 5 ]] && warn "ARP: $ARP_FAILED failed entries (possible LAN scanning attempts)"
 
 # Network Namespaces
 NS_COUNT=$(ip netns list 2>/dev/null | wc -l)
@@ -1860,7 +1917,10 @@ for SVC in $SHOULD_BE_ON; do
 done
 
 # Failed Services
-FAILED_SVCS=$(systemctl --failed --no-legend 2>/dev/null | grep -v 'proc-sys-fs-binfmt_misc.mount')
+# F-085: extended whitelist for known-FP failed-services on bootc/Silverblue/
+# minimal systems. binfmt_misc and update-utmp are environment-specific; the
+# tracked-pids-too-old line appears in fresh container boots transiently.
+FAILED_SVCS=$(systemctl --failed --no-legend 2>/dev/null | grep -vE 'proc-sys-fs-binfmt_misc\.mount|systemd-update-utmp\.service|tracked-pids-too-old')
 FAILED=$(echo "$FAILED_SVCS" | grep -c '\S' || true)
 if [[ "$FAILED" -eq 0 ]]; then
   pass "0 failed services"
@@ -3336,8 +3396,9 @@ LOAD_1=$(echo "$LOAD" | awk '{print $1}')
 info "Uptime: $UPTIME"
 info "Load: $LOAD (CPUs: $CPU_COUNT)"
 
-if require_cmd bc; then
-  if (( $(echo "$LOAD_1 > $CPU_COUNT" | bc -l 2>/dev/null || true) )); then
+# F-157: replace bc dependency with awk (POSIX-portable, always available)
+if [[ -n "$LOAD_1" ]]; then
+  if awk -v l="$LOAD_1" -v c="$CPU_COUNT" 'BEGIN { exit !(l > c) }'; then
     warn "Load ($LOAD_1) > CPU count ($CPU_COUNT)"
   else
     pass "Load OK: $LOAD_1 / $CPU_COUNT CPUs"
@@ -3485,16 +3546,29 @@ if [[ -d "$VULN_DIR" ]]; then
   done
 fi
 
-# SMART Health
+# SMART Health — F-164: USB/eSATA disks may need -d sat or -d usbjmicron to
+# pass SMART through the bridge chip. Try with -d sat as fallback when first
+# probe gives empty output.
 if require_cmd smartctl; then
-  for DISK in $(lsblk -dno NAME,TYPE 2>/dev/null | awk '$2=="disk"{print "/dev/"$1}'); do
+  while read -r DISK; do
+    [[ -z "$DISK" ]] && continue
     SMART=$(smartctl -H "$DISK" 2>/dev/null | grep -i "health\|result" | tail -1)
+    if [[ -z "$SMART" ]]; then
+      # Empty output often means USB/eSATA bridge — retry with -d sat
+      SMART=$(smartctl -H -d sat "$DISK" 2>/dev/null | grep -i "health\|result" | tail -1)
+    fi
+    if [[ -z "$SMART" ]]; then
+      # Some USB bridges need the JMicron passthrough
+      SMART=$(smartctl -H -d usbjmicron "$DISK" 2>/dev/null | grep -i "health\|result" | tail -1)
+    fi
     if echo "$SMART" | grep -qi "passed\|ok"; then
       pass "SMART $DISK: OK"
     elif [[ -n "$SMART" ]]; then
       fail "SMART $DISK: $SMART"
+    else
+      info "SMART $DISK: not reportable (USB bridge without SMART passthrough?)"
     fi
-  done
+  done < <(lsblk -dno NAME,TYPE 2>/dev/null | awk '$2=="disk"{print "/dev/"$1}')
 else
   info "smartctl not installed — SMART checks skipped"
 fi
@@ -3941,7 +4015,9 @@ sub_header "USB Guard"
 if require_cmd usbguard; then
   if systemctl is-active usbguard &>/dev/null; then
     pass "USBGuard: active"
-    POLICY_COUNT=$(usbguard list-rules 2>/dev/null | wc -l)
+    # F-188: filter empty trailing line (off-by-one)
+    POLICY_COUNT=$(usbguard list-rules 2>/dev/null | grep -cE '^[0-9]+:')
+    POLICY_COUNT=${POLICY_COUNT:-0}
     info "USBGuard rules: $POLICY_COUNT"
   else
     warn "USBGuard installed but inactive"
@@ -4389,11 +4465,25 @@ if require_cmd rpm; then
     fi
   fi
 elif require_cmd debsums; then
-  DEB_VERIFY=$(debsums -s 2>/dev/null | wc -l)
-  if [[ "$DEB_VERIFY" -eq 0 ]]; then
-    pass "debsums: all package files intact"
+  # F-212: tier debsums output similar to RPM verify — config changes are
+  # routine after hardening, only binary changes warrant escalation.
+  DEB_OUTPUT=$(timeout 90 debsums -c 2>/dev/null || echo "TIMEOUT")
+  if [[ "$DEB_OUTPUT" == "TIMEOUT" ]]; then
+    warn "debsums: timed out after 90s"
   else
-    warn "debsums: $DEB_VERIFY files modified"
+    DEB_VERIFY_TOTAL=$(echo "$DEB_OUTPUT" | grep -c '\S' || echo 0)
+    DEB_VERIFY_TOTAL=${DEB_VERIFY_TOTAL:-0}
+    DEB_VERIFY_BIN=$(echo "$DEB_OUTPUT" | grep -cE '/(s?bin|libexec)/' || echo 0)
+    DEB_VERIFY_BIN=${DEB_VERIFY_BIN:-0}
+    if [[ "$DEB_VERIFY_TOTAL" -eq 0 ]]; then
+      pass "debsums: all package files intact"
+    elif [[ "$DEB_VERIFY_BIN" -eq 0 ]]; then
+      pass "debsums: $DEB_VERIFY_TOTAL config files changed (no binaries — normal after hardening)"
+    elif [[ "$DEB_VERIFY_BIN" -le 5 ]]; then
+      warn "debsums: $DEB_VERIFY_BIN binaries + $((DEB_VERIFY_TOTAL - DEB_VERIFY_BIN)) configs changed"
+    else
+      fail "debsums: $DEB_VERIFY_BIN binaries with changed checksums!"
+    fi
   fi
 elif [[ "$DISTRO_FAMILY" == "debian" ]]; then
   info "Package integrity: install 'debsums' for Debian file verification (apt install debsums)"
@@ -4485,7 +4575,9 @@ if [[ -f /etc/shells ]]; then
   _SHELL_COUNT=$(grep -cv "^#\|^$" /etc/shells 2>/dev/null || true)
   info "Valid shells in /etc/shells: ${_SHELL_COUNT:-0}"
   # Check for insecure shells
-  for _ishell in /bin/csh /bin/tcsh; do
+  # F-217: extended legacy-shell list includes csh/tcsh and bare sh/dash
+  # (non-interactive but listed in /etc/shells).
+  for _ishell in /bin/csh /bin/tcsh /bin/sh /bin/dash; do
     if grep -q "^${_ishell}$" /etc/shells 2>/dev/null; then
       info "Legacy shell available: $_ishell"
     fi
@@ -4605,10 +4697,25 @@ check_browser_privacy() {
 
       local ext_json="$profile_dir/extensions.json"
       if [[ -f "$ext_json" ]]; then
+        # F-221: check if uBlock Origin is BOTH installed AND active. The
+        # extensions.json schema includes "active":true for enabled extensions.
         if grep -q "uBlock0@raymondhill.net" "$ext_json" 2>/dev/null; then
-          pass "uBlock Origin installed [$label]"
+          # Best-effort check for active state — looks for the uBlock entry
+          # with "active":true. The JSON is one line per extension, so we can
+          # match the surrounding context.
+          if grep -oP '\{[^{}]*"id":"uBlock0@raymondhill\.net"[^{}]*\}' "$ext_json" 2>/dev/null \
+             | grep -q '"active":true'; then
+            pass "uBlock Origin installed and enabled [$label]"
+          else
+            warn "uBlock Origin installed but DISABLED [$label]"
+          fi
         else
-          warn "uBlock Origin not found [$label]"
+          # Also check for uBlock Lite (newer Manifest V3 variant)
+          if grep -q "uBOLite@raymondhill.net\|@ublock-origin-lite" "$ext_json" 2>/dev/null; then
+            pass "uBlock Origin Lite installed [$label]"
+          else
+            warn "uBlock Origin not found [$label]"
+          fi
         fi
       else
         info "No extensions data found [$label]"
@@ -5178,7 +5285,8 @@ check_data_privacy() {
     local thumb_dir="$home/.cache/thumbnails"
     if [[ -d "$thumb_dir" ]]; then
       local size
-      size="$(du -sb "$thumb_dir" 2>/dev/null | cut -f1)"
+      # F-241: 5-second timeout in case thumb dir has runaway expansion.
+      size="$(timeout 5 du -sb "$thumb_dir" 2>/dev/null | cut -f1)"
       size="${size:-0}"
       if [[ "$size" -gt 104857600 ]]; then
         warn "Thumbnail cache $(_human_size "$size") [$user] — reveals viewed images"
@@ -6084,6 +6192,10 @@ WARNINGS (${#WARN_MSGS[@]}):"
 No issues found. System is fully hardened."
   fi
   _AI_TEXT="${_AI_TEXT}
+
+NOTE: this prompt lists only FAIL/WARN findings. INFO-level entries
+(VPN status, kernel taint flags, package counts, etc) provide context
+but rarely require action — see the full audit output for those.
 
 For each finding: explain the risk, show the exact fix command,
 warn if it could break anything, and ask before applying.
