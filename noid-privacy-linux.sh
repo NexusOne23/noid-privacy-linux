@@ -3573,11 +3573,19 @@ if [[ -d "$VULN_DIR" ]]; then
 fi
 
 # SMART Health — F-164: USB/eSATA disks may need -d sat or -d usbjmicron to
-# pass SMART through the bridge chip. Try with -d sat as fallback when first
-# probe gives empty output.
+# pass SMART through the bridge chip. Skip virtual/in-memory block devices
+# entirely (zram=RAM-backed swap, loop=file-backed, dm-=device-mapper has
+# its own underlying device, md=RAID member device check, ram=ramdisk, nbd=
+# network block device, sr=optical) — none of these expose SMART data.
 if require_cmd smartctl; then
   while read -r DISK; do
     [[ -z "$DISK" ]] && continue
+    # Skip non-physical block devices
+    case "$DISK" in
+      /dev/zram*|/dev/loop*|/dev/dm-*|/dev/md*|/dev/ram*|/dev/nbd*|/dev/sr*)
+        continue
+        ;;
+    esac
     SMART=$(smartctl -H "$DISK" 2>/dev/null | grep -i "health\|result" | tail -1)
     if [[ -z "$SMART" ]]; then
       # Empty output often means USB/eSATA bridge — retry with -d sat
