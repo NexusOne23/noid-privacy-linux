@@ -7,10 +7,17 @@ branding:
   color: 'green'
 
 inputs:
-  fail-threshold:
+  # F-272 — `min-score` is the canonical input name (matches the actual
+  # semantic). `fail-threshold` is kept as a deprecated alias so existing
+  # workflows continue to work; new users should prefer `min-score`.
+  min-score:
     description: 'Minimum score (0-100) to pass. The action fails if the score is below this value. Set to 0 to never fail.'
     required: false
     default: '0'
+  fail-threshold:
+    description: 'DEPRECATED alias for min-score. Use min-score in new workflows; this name will be removed in v4.0.'
+    required: false
+    default: ''
   ai:
     description: 'Enable --ai flag to generate a structured AI remediation prompt at the end of the audit. Copy-paste it to ChatGPT, Claude, or Gemini for automated fix instructions.'
     required: false
@@ -52,6 +59,7 @@ runs:
     - name: Run NoID Privacy Audit
       shell: bash
       env:
+        INPUT_MIN_SCORE: ${{ inputs.min-score }}
         INPUT_FAIL_THRESHOLD: ${{ inputs.fail-threshold }}
         INPUT_AI: ${{ inputs.ai }}
         INPUT_SKIP: ${{ inputs.skip }}

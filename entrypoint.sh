@@ -36,9 +36,9 @@ if [[ -n "${INPUT_ARGS:-}" ]]; then
   CMD+=("${EXTRA_ARGS[@]}")
 fi
 
-# Variable name clarified: this is the MIN-SCORE threshold, not fail-count.
-# Kept input name 'fail-threshold' for backward compatibility.
-MIN_SCORE_THRESHOLD="${INPUT_FAIL_THRESHOLD:-0}"
+# F-272: min-score is canonical (semantic-correct name); fail-threshold
+# is the deprecated v3.x alias. Either one accepted — new takes priority.
+MIN_SCORE_THRESHOLD="${INPUT_MIN_SCORE:-${INPUT_FAIL_THRESHOLD:-0}}"
 
 # --- Run audit (single JSON run with optional ai_prompt embedded) ---
 echo "::group::Running NoID Privacy Audit"

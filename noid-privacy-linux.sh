@@ -38,6 +38,7 @@ declare -a FAIL_MSGS=()
 declare -a WARN_MSGS=()
 declare -a JSON_FINDINGS=()
 CURRENT_SECTION=""
+CURRENT_SECTION_ID=""
 
 show_help() {
   cat <<EOF
@@ -156,7 +157,7 @@ _json_escape() {
 pass() {
   ((PASS++))
   if $JSON_MODE; then
-    JSON_FINDINGS+=("{\"severity\":\"PASS\",\"section\":\"$(_json_escape "$CURRENT_SECTION")\",\"message\":\"$(_json_escape "$1")\"}")
+    JSON_FINDINGS+=("{\"severity\":\"PASS\",\"section\":\"$(_json_escape "$CURRENT_SECTION")\",\"section_id\":\"$(_json_escape "${CURRENT_SECTION_ID:-unknown}")\",\"message\":\"$(_json_escape "$1")\"}")
   else
     printf "  ${GRN}✅ PASS${RST}  %s\n" "$1"
   fi
@@ -165,7 +166,7 @@ fail() {
   ((FAIL++))
   FAIL_MSGS+=("$1")
   if $JSON_MODE; then
-    JSON_FINDINGS+=("{\"severity\":\"FAIL\",\"section\":\"$(_json_escape "$CURRENT_SECTION")\",\"message\":\"$(_json_escape "$1")\"}")
+    JSON_FINDINGS+=("{\"severity\":\"FAIL\",\"section\":\"$(_json_escape "$CURRENT_SECTION")\",\"section_id\":\"$(_json_escape "${CURRENT_SECTION_ID:-unknown}")\",\"message\":\"$(_json_escape "$1")\"}")
   else
     printf "  ${RED}🔴 FAIL${RST}  %s\n" "$1"
   fi
@@ -174,7 +175,7 @@ warn() {
   ((WARN++))
   WARN_MSGS+=("$1")
   if $JSON_MODE; then
-    JSON_FINDINGS+=("{\"severity\":\"WARN\",\"section\":\"$(_json_escape "$CURRENT_SECTION")\",\"message\":\"$(_json_escape "$1")\"}")
+    JSON_FINDINGS+=("{\"severity\":\"WARN\",\"section\":\"$(_json_escape "$CURRENT_SECTION")\",\"section_id\":\"$(_json_escape "${CURRENT_SECTION_ID:-unknown}")\",\"message\":\"$(_json_escape "$1")\"}")
   else
     printf "  ${YLW}⚠️  WARN${RST}  %s\n" "$1"
   fi
@@ -182,15 +183,26 @@ warn() {
 info() {
   ((INFO++))
   if $JSON_MODE; then
-    JSON_FINDINGS+=("{\"severity\":\"INFO\",\"section\":\"$(_json_escape "$CURRENT_SECTION")\",\"message\":\"$(_json_escape "$1")\"}")
+    JSON_FINDINGS+=("{\"severity\":\"INFO\",\"section\":\"$(_json_escape "$CURRENT_SECTION")\",\"section_id\":\"$(_json_escape "${CURRENT_SECTION_ID:-unknown}")\",\"message\":\"$(_json_escape "$1")\"}")
   else
     printf "  ${CYN}ℹ️  INFO${RST}  %s\n" "$1"
   fi
 }
 header() {
-  CURRENT_SECTION="$2"
+  # F-010: Track stable section ID alongside human-readable name. The
+  # section number ($1, 2-digit) maps to SECTION_KEYS array (0-indexed).
+  # Sections 02 has 3 variants (SELINUX/APPARMOR/MAC) all sharing key
+  # "selinux"; otherwise ${SECTION_KEYS[N-1]} = the canonical key.
+  local _num="$1" _name="$2"
+  local _idx=$((10#$_num - 1))
+  CURRENT_SECTION="$_name"
+  if [[ "$_idx" -ge 0 && "$_idx" -lt "${#SECTION_KEYS[@]}" ]]; then
+    CURRENT_SECTION_ID="${SECTION_KEYS[$_idx]}"
+  else
+    CURRENT_SECTION_ID="unknown"
+  fi
   if ! $JSON_MODE; then
-    printf "\n${BOLD}${MAG}━━━ [%s/%s] %s ━━━${RST}\n" "$1" "$TOTAL_SECTIONS" "$2"
+    printf "\n${BOLD}${MAG}━━━ [%s/%s] %s ━━━${RST}\n" "$_num" "$TOTAL_SECTIONS" "$_name"
   fi
 }
 sub_header() { $JSON_MODE || printf "  ${CYN}--- %s ---${RST}\n" "$1"; }
@@ -215,11 +227,35 @@ sshd_cfg_val() {
   echo "${val:-}"
 }
 
+# F-004: read UID_MIN/UID_MAX from /etc/login.defs to honor distro-specific
+# bounds. Defaults match RHEL/Fedora (1000-60000) but are overridable.
+# Cached at first read into _NOID_UID_MIN / _NOID_UID_MAX globals; the
+# `[[ "$uid" -ge 1000 && "$uid" -lt 65534 ]]` pattern at call sites is
+# preserved as a hardcoded fallback for back-compat — but new code can
+# call `_is_human_uid "$uid"` instead.
+_NOID_UID_MIN=""
+_NOID_UID_MAX=""
+_load_uid_bounds() {
+  [[ -n "$_NOID_UID_MIN" ]] && return  # already loaded
+  if [[ -f /etc/login.defs ]]; then
+    _NOID_UID_MIN=$(awk '$1=="UID_MIN" {print $2; exit}' /etc/login.defs 2>/dev/null)
+    _NOID_UID_MAX=$(awk '$1=="UID_MAX" {print $2; exit}' /etc/login.defs 2>/dev/null)
+  fi
+  _NOID_UID_MIN="${_NOID_UID_MIN:-1000}"
+  _NOID_UID_MAX="${_NOID_UID_MAX:-65533}"  # exclude nobody (65534) by default
+}
+_is_human_uid() {
+  _load_uid_bounds
+  local uid="$1"
+  [[ "$uid" =~ ^[0-9]+$ ]] || return 1
+  [[ "$uid" -ge "$_NOID_UID_MIN" && "$uid" -le "$_NOID_UID_MAX" ]]
+}
+
 # --- Privacy Section Helpers ---
 _for_each_user() {
   local callback="$1"
   while IFS=: read -r user _ uid _ _ home shell; do
-    [[ "$uid" -ge 1000 && "$uid" -lt 65534 ]] || continue
+    _is_human_uid "$uid" || continue
     [[ "$shell" == */nologin || "$shell" == */false ]] && continue
     [[ -d "$home" ]] || continue
     "$callback" "$user" "$uid" "$home"
@@ -805,8 +841,9 @@ if ! $JSON_MODE; then
 fi
 
 ###############################################################################
-if ! should_skip "kernel"; then
-header "01" "KERNEL & BOOT INTEGRITY"
+check_kernel() {
+  should_skip "kernel" && return
+  header "01" "KERNEL & BOOT INTEGRITY"
 ###############################################################################
 
 info "Kernel: $KERNEL"
@@ -1010,7 +1047,7 @@ if [[ -n "$LATEST_KERNEL" ]]; then
   fi
 fi
 
-fi # end kernel
+}
 
 ###############################################################################
 # Initialize MAC detection variables (used in AI output even if section is skipped)
@@ -1022,7 +1059,8 @@ if require_cmd getenforce; then
 fi
 require_cmd aa-status && HAS_APPARMOR=true
 
-if ! should_skip "selinux"; then
+check_selinux() {
+  should_skip "selinux" && return
 
 if $HAS_SELINUX; then
 header "02" "SELINUX & MAC"
@@ -1039,7 +1077,15 @@ fi
 
 # SELinux Booleans (dangerous ones)
 if require_cmd getsebool; then
-  DANGEROUS_BOOLS="httpd_can_network_connect httpd_execmem allow_execheap allow_execmod allow_execstack"
+  # F-038: extend dangerous-bools list with server-relevant entries:
+  # - nfs_export_all_rw / nfs_export_all_ro: world-RW NFS exports
+  # - samba_enable_home_dirs: shares /home over Samba
+  # - cron_userdomain_transition: arbitrary cron user-dom transitions
+  # - secure_mode_insmod: weakens kmod constraints (rare but present)
+  # - allow_*: legacy memory-protection bypasses
+  DANGEROUS_BOOLS="httpd_can_network_connect httpd_execmem allow_execheap allow_execmod allow_execstack \
+    nfs_export_all_rw nfs_export_all_ro samba_enable_home_dirs cron_userdomain_transition \
+    secure_mode_insmod allow_user_exec_content"
   for BOOL in $DANGEROUS_BOOLS; do
     VAL=$(getsebool "$BOOL" 2>/dev/null | awk '{print $3}' || echo "n/a")
     if [[ "$VAL" == "on" ]]; then
@@ -1066,7 +1112,7 @@ if require_cmd ausearch; then
   if [[ "$SE_DENIALS" -gt 0 ]]; then
     _SE_UNEXPECTED=$(echo "$_SE_AVC_RAW" \
       | grep -oP 'comm="\K[^"]+' \
-      | grep -cvE "^(aide|usbguard-daemon|usbguard|systemd-logind|rpm)$" || true)
+      | grep -cvE "^(aide|usbguard-daemon|usbguard|systemd-logind|rpm|gdm|gdm-x-session|fwupd|systemd-update)$" || true)
     _SE_UNEXPECTED=${_SE_UNEXPECTED//[^0-9]/}
     _SE_UNEXPECTED=${_SE_UNEXPECTED:-0}
     if [[ "$_SE_UNEXPECTED" -eq 0 ]]; then
@@ -1100,11 +1146,12 @@ else
     warn "No MAC system (SELinux/AppArmor) detected"
   fi
 fi
-fi # end selinux
+}
 
 ###############################################################################
-if ! should_skip "firewall"; then
-header "03" "FIREWALL"
+check_firewall() {
+  should_skip "firewall" && return
+  header "03" "FIREWALL"
 ###############################################################################
 
 if require_cmd firewall-cmd && systemctl is-active firewalld &>/dev/null; then
@@ -1269,11 +1316,12 @@ elif require_cmd iptables; then
   fi
 fi
 
-fi # end firewall
+}
 
 ###############################################################################
-if ! should_skip "nftables"; then
-header "04" "NFTABLES & KILL-SWITCH"
+check_nftables() {
+  should_skip "nftables" && return
+  header "04" "NFTABLES & KILL-SWITCH"
 ###############################################################################
 
 if require_cmd nft; then
@@ -1354,11 +1402,12 @@ else
   info "nftables not installed — skipped"
 fi
 
-fi # end nftables
+}
 
 ###############################################################################
-if ! should_skip "vpn"; then
-header "05" "VPN & NETWORK"
+check_vpn() {
+  should_skip "vpn" && return
+  header "05" "VPN & NETWORK"
 ###############################################################################
 
 # NOTE: This section makes network requests (ping, dig).
@@ -1580,11 +1629,12 @@ else
   info "Network namespaces: 0"
 fi
 
-fi # end vpn
+}
 
 ###############################################################################
-if ! should_skip "sysctl"; then
-header "06" "KERNEL HARDENING (sysctl)"
+check_sysctl() {
+  should_skip "sysctl" && return
+  header "06" "KERNEL HARDENING (sysctl)"
 ###############################################################################
 
 declare -A SYSCTL_CHECKS=(
@@ -1694,11 +1744,12 @@ else
   pass "ip_forward=0"
 fi
 
-fi # end sysctl
+}
 
 ###############################################################################
-if ! should_skip "services"; then
-header "07" "SERVICES & DAEMONS"
+check_services() {
+  should_skip "services" && return
+  header "07" "SERVICES & DAEMONS"
 ###############################################################################
 
 # Service groups: list of equivalent-name aliases across distros.
@@ -1827,11 +1878,12 @@ fi
 TIMER_COUNT=$(systemctl list-timers --all --no-legend 2>/dev/null | wc -l)
 info "Active timers: $TIMER_COUNT"
 
-fi # end services
+}
 
 ###############################################################################
-if ! should_skip "ports"; then
-header "08" "OPEN PORTS & LISTENERS"
+check_ports() {
+  should_skip "ports" && return
+  header "08" "OPEN PORTS & LISTENERS"
 ###############################################################################
 
 sub_header "TCP"
@@ -1902,15 +1954,16 @@ else
   pass "No raw sockets"
 fi
 
-fi # end ports
+}
 
 ###############################################################################
-if ! should_skip "ssh"; then
-header "09" "SSH HARDENING"
+check_ssh() {
+  should_skip "ssh" && return
+  header "09" "SSH HARDENING"
 ###############################################################################
 
-if { systemctl is-masked sshd &>/dev/null || systemctl is-masked ssh &>/dev/null; } || \
-   [[ "$(systemctl is-enabled sshd 2>&1)" == "masked" ]] || [[ "$(systemctl is-enabled ssh 2>&1)" == "masked" ]]; then
+# F-093: single helper call replaces 4 redundant systemctl variants.
+if _service_masked_any sshd ssh ssh.socket sshd.socket; then
   pass "SSH: masked + inactive — maximum security"
 else
   SSHD_CONFIG="/etc/ssh/sshd_config"
@@ -1997,11 +2050,16 @@ else
         BITS=$(echo "$_KEY_INFO" | awk '{print $1}')
         TYPE=$(echo "$_KEY_INFO" | awk '{print $NF}' | tr -d '()')
         # RSA thresholds: <2048 = insecure (NIST deprecated), <4096 = acceptable but 4096 recommended
-        # Ed25519/ECDSA keys are always considered strong regardless of bit size
-        if [[ "$TYPE" == "RSA" ]] && [[ "${BITS:-0}" -lt 2048 ]]; then
+        # F-097: ECDSA must be >=256 (P-256/P-384/P-521). P-192 is broken.
+        # F-098: DSA is deprecated since OpenSSH 7.0 — explicit fail.
+        if [[ "$TYPE" == "DSA" ]]; then
+          fail "Insecure SSH key: $KEY ($BITS bit DSA — deprecated since OpenSSH 7.0)"
+        elif [[ "$TYPE" == "RSA" ]] && [[ "${BITS:-0}" -lt 2048 ]]; then
           fail "Weak SSH key: $KEY ($BITS bit $TYPE — minimum 2048)"
         elif [[ "$TYPE" == "RSA" ]] && [[ "${BITS:-0}" -lt 4096 ]]; then
           warn "SSH key: $KEY ($BITS bit $TYPE — 4096 recommended)"
+        elif [[ "$TYPE" == "ECDSA" ]] && [[ "${BITS:-0}" -lt 256 ]]; then
+          fail "Weak SSH key: $KEY ($BITS bit $TYPE — minimum P-256)"
         elif [[ -n "$TYPE" ]]; then
           pass "SSH key: $KEY ($BITS bit $TYPE)"
         fi
@@ -2010,11 +2068,12 @@ else
   fi
 fi
 
-fi # end ssh
+}
 
 ###############################################################################
-if ! should_skip "audit"; then
-header "10" "AUDIT SYSTEM"
+check_audit() {
+  should_skip "audit" && return
+  header "10" "AUDIT SYSTEM"
 ###############################################################################
 
 if systemctl is-active auditd &>/dev/null; then
@@ -2050,9 +2109,12 @@ if require_cmd auditctl; then
   CRITICAL_WATCHES="/etc/passwd /etc/shadow /etc/sudoers /etc/ssh /etc/pam.d"
   _AUDIT_RULES_CACHE=$(auditctl -l 2>/dev/null)
   for WATCH in $CRITICAL_WATCHES; do
+    # F-101: escape regex metacharacters in paths (`.` in pam.d, etc) so the
+    # regex doesn't match unintended substrings like "pamXd".
+    _watch_re="${WATCH//./\\.}"
     # Match both short form (-w /path) and long form (-F path=/path, -F dir=/path),
     # including sub-path matches (e.g. -F path=/etc/ssh/sshd_config covers /etc/ssh)
-    if echo "$_AUDIT_RULES_CACHE" | grep -qE -- "(-w ${WATCH}( |$)|-F (path|dir)=${WATCH}(/|\s|$))"; then
+    if echo "$_AUDIT_RULES_CACHE" | grep -qE -- "(-w ${_watch_re}( |$)|-F (path|dir)=${_watch_re}(/|\s|$))"; then
       pass "Audit watch: $WATCH"
     else
       warn "Audit watch missing: $WATCH"
@@ -2061,15 +2123,23 @@ if require_cmd auditctl; then
 fi
 
 if [[ -f /var/log/audit/audit.log ]]; then
-  AUDIT_SIZE=$(du -sh /var/log/audit/audit.log | awk '{print $1}')
-  info "Audit log: $AUDIT_SIZE"
+  # F-102: warn if audit log is huge (>1GiB) — usually means rules are
+  # generating excessive events and rotation isn't keeping up.
+  AUDIT_SIZE_BYTES=$(stat -c%s /var/log/audit/audit.log 2>/dev/null || echo 0)
+  AUDIT_SIZE=$(_human_size "$AUDIT_SIZE_BYTES")
+  if [[ "$AUDIT_SIZE_BYTES" -gt 1073741824 ]]; then
+    warn "Audit log: $AUDIT_SIZE (>1GiB — rules may be too verbose; check rotation)"
+  else
+    info "Audit log: $AUDIT_SIZE"
+  fi
 fi
 
-fi # end audit
+}
 
 ###############################################################################
-if ! should_skip "users"; then
-header "11" "USERS & AUTHENTICATION"
+check_users() {
+  should_skip "users" && return
+  header "11" "USERS & AUTHENTICATION"
 ###############################################################################
 
 # UID-0 Accounts
@@ -2164,25 +2234,36 @@ else
   warn "No password quality enforcement (pam_pwquality/pam_cracklib not in PAM stack)"
 fi
 
-# Accounts without password expiry
+# Accounts without password expiry — F-106: skip on systems using LDAP/SSSD
+# central auth (chage queries the local shadow file which doesn't have the
+# expiry policy when authentication is centralized).
 sub_header "Password Expiry"
 _NO_EXPIRE=0
-while IFS=: read -r _user _ _uid _ _ _ _; do
-  [[ "$_uid" -ge 1000 && "$_uid" -lt 65534 ]] || continue
-  _max_days=$(chage -l "$_user" 2>/dev/null | grep "Maximum" | grep -oP '\d+$' || true)
-  if [[ "${_max_days:-0}" -eq 99999 || "${_max_days:-0}" -eq -1 ]]; then
-    ((_NO_EXPIRE++))
+_CENTRAL_AUTH=false
+if [[ -f /etc/nsswitch.conf ]] && grep -qE '^passwd:.*\b(sss|ldap|winbind)\b' /etc/nsswitch.conf 2>/dev/null; then
+  _CENTRAL_AUTH=true
+  info "Password expiry: skipped (central auth detected via nsswitch — chage queries local shadow only)"
+fi
+if ! $_CENTRAL_AUTH; then
+  while IFS=: read -r _user _ _uid _ _ _ _; do
+    _is_human_uid "$_uid" || continue
+    _max_days=$(chage -l "$_user" 2>/dev/null | grep "Maximum" | grep -oP '\d+$' || true)
+    if [[ "${_max_days:-0}" -eq 99999 || "${_max_days:-0}" -eq -1 ]]; then
+      ((_NO_EXPIRE++))
+    fi
+    # Check for expired passwords
+    _pw_expired=$(chage -l "$_user" 2>/dev/null | grep "Password expires" | grep -ci "password must be changed\|expired" || true)
+    if [[ "${_pw_expired:-0}" -gt 0 ]]; then
+      warn "Password expired for user: $_user"
+    fi
+  done < /etc/passwd
+fi
+if ! $_CENTRAL_AUTH; then
+  if [[ "$_NO_EXPIRE" -gt 0 ]]; then
+    info "$_NO_EXPIRE user account(s) with no password expiry (perpetual passwords)"
+  else
+    pass "All user accounts have password expiry configured"
   fi
-  # Check for expired passwords
-  _pw_expired=$(chage -l "$_user" 2>/dev/null | grep "Password expires" | grep -ci "password must be changed\|expired" || true)
-  if [[ "${_pw_expired:-0}" -gt 0 ]]; then
-    warn "Password expired for user: $_user"
-  fi
-done < /etc/passwd
-if [[ "$_NO_EXPIRE" -gt 0 ]]; then
-  info "$_NO_EXPIRE user account(s) with no password expiry (perpetual passwords)"
-else
-  pass "All user accounts have password expiry configured"
 fi
 
 # Duplicate accounts
@@ -2378,11 +2459,12 @@ for USER_HOME in /home/* /root; do
   done
 done
 
-fi # end users
+}
 
 ###############################################################################
-if ! should_skip "filesystem"; then
-header "12" "FILESYSTEM SECURITY"
+check_filesystem() {
+  should_skip "filesystem" && return
+  header "12" "FILESYSTEM SECURITY"
 ###############################################################################
 
 # SUID Files (uses _safe_find_root which excludes Snapper/Timeshift snapshots)
@@ -2530,15 +2612,18 @@ for BANNER_FILE in /etc/issue /etc/issue.net /etc/motd; do
   fi
 done
 
-fi # end filesystem
+}
 
 ###############################################################################
-if ! should_skip "crypto"; then
-header "13" "ENCRYPTION & CRYPTO"
+check_crypto() {
+  should_skip "crypto" && return
+  header "13" "ENCRYPTION & CRYPTO"
 ###############################################################################
 
 if require_cmd cryptsetup; then
-  for DEV in $(lsblk -rno NAME,TYPE 2>/dev/null | grep crypt | awk '{print $1}'); do
+  # F-118: while-read avoids word-splitting on device names with rare special chars
+  while read -r DEV; do
+    [[ -z "$DEV" ]] && continue
     CIPHER=$(cryptsetup status "$DEV" 2>/dev/null | grep "cipher:" | awk '{print $2}')
     KEYSIZE=$(cryptsetup status "$DEV" 2>/dev/null | grep "keysize:" | awk '{print $2}')
     info "LUKS $DEV: cipher=$CIPHER keysize=$KEYSIZE"
@@ -2549,7 +2634,7 @@ if require_cmd cryptsetup; then
     elif [[ -n "$CIPHER" ]]; then
       warn "LUKS cipher: $CIPHER (unusual)"
     fi
-  done
+  done < <(lsblk -rno NAME,TYPE 2>/dev/null | awk '$2=="crypt" {print $1}')
 else
   info "cryptsetup not installed — LUKS details skipped"
 fi
@@ -2633,11 +2718,12 @@ else
   info "No swap configured"
 fi
 
-fi # end crypto
+}
 
 ###############################################################################
-if ! should_skip "updates"; then
-header "14" "UPDATES & PACKAGES"
+check_updates() {
+  should_skip "updates" && return
+  header "14" "UPDATES & PACKAGES"
 ###############################################################################
 
 UPDATES="?"
@@ -2821,11 +2907,12 @@ if require_cmd flatpak; then
   info "Flatpaks: $FLATPAK_COUNT"
 fi
 
-fi # end updates
+}
 
 ###############################################################################
-if ! should_skip "rootkit"; then
-header "15" "ROOTKIT & MALWARE SCAN"
+check_rootkit() {
+  should_skip "rootkit" && return
+  header "15" "ROOTKIT & MALWARE SCAN"
 ###############################################################################
 
 # rkhunter (deprecated — last release 2018-02-24, signatures don't cover
@@ -2906,11 +2993,12 @@ for CRONDIR in /etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/cron.weekly /et
   fi
 done
 
-fi # end rootkit
+}
 
 ###############################################################################
-if ! should_skip "processes"; then
-header "16" "PROCESS SECURITY"
+check_processes() {
+  should_skip "processes" && return
+  header "16" "PROCESS SECURITY"
 ###############################################################################
 
 # Suspicious processes
@@ -2968,11 +3056,12 @@ else
   fi
 fi
 
-fi # end processes
+}
 
 ###############################################################################
-if ! should_skip "network"; then
-header "17" "NETWORK SECURITY (Advanced)"
+check_network() {
+  should_skip "network" && return
+  header "17" "NETWORK SECURITY (Advanced)"
 ###############################################################################
 
 # Established Connections
@@ -3040,11 +3129,12 @@ if ! $_ARP_MON_FOUND; then
   info "No ARP monitoring software detected (consider arpwatch)"
 fi
 
-fi # end network
+}
 
 ###############################################################################
-if ! should_skip "containers"; then
-header "18" "CONTAINERS & VIRTUALIZATION"
+check_containers() {
+  should_skip "containers" && return
+  header "18" "CONTAINERS & VIRTUALIZATION"
 ###############################################################################
 
 if require_cmd docker; then
@@ -3090,11 +3180,12 @@ else
   info "Max user namespaces: $USER_NS (high — typical for Ubuntu/container hosts)"
 fi
 
-fi # end containers
+}
 
 ###############################################################################
-if ! should_skip "logs"; then
-header "19" "LOGS & MONITORING"
+check_logs() {
+  should_skip "logs" && return
+  header "19" "LOGS & MONITORING"
 ###############################################################################
 
 # Journal errors — separate "host security signal" from "dev workload noise".
@@ -3230,11 +3321,12 @@ else
   info "Syslog implementation not active — using systemd-journald only (modern default)"
 fi
 
-fi # end logs
+}
 
 ###############################################################################
-if ! should_skip "performance"; then
-header "20" "PERFORMANCE & RESOURCES"
+check_performance() {
+  should_skip "performance" && return
+  header "20" "PERFORMANCE & RESOURCES"
 ###############################################################################
 
 UPTIME=$(uptime -p)
@@ -3366,11 +3458,12 @@ if ! $JSON_MODE; then
   done < <(ps -eo user,pcpu,pmem,args --sort=-pmem 2>/dev/null | grep -v 'sort=-pmem' | head -6 | tail -5)
 fi
 
-fi # end performance
+}
 
 ###############################################################################
-if ! should_skip "hardware"; then
-header "21" "HARDWARE & FIRMWARE"
+check_hardware() {
+  should_skip "hardware" && return
+  header "21" "HARDWARE & FIRMWARE"
 ###############################################################################
 
 sub_header "CPU Vulnerabilities"
@@ -3440,11 +3533,12 @@ fi
 USB_COUNT=$(lsusb 2>/dev/null | wc -l)
 info "USB devices: $USB_COUNT"
 
-fi # end hardware
+}
 
 ###############################################################################
-if ! should_skip "interfaces"; then
-header "22" "NETWORK INTERFACES (Detail)"
+check_interfaces() {
+  should_skip "interfaces" && return
+  header "22" "NETWORK INTERFACES (Detail)"
 ###############################################################################
 # NOTE: This section makes network requests (dig).
 # Use --skip interfaces to avoid network traffic from this section.
@@ -3472,11 +3566,12 @@ if require_cmd dig; then
   fi
 fi
 
-fi # end interfaces
+}
 
 ###############################################################################
-if ! should_skip "certificates"; then
-header "23" "CRYPTO & CERTIFICATES"
+check_certificates() {
+  should_skip "certificates" && return
+  header "23" "CRYPTO & CERTIFICATES"
 ###############################################################################
 
 # F-168: Cross-distro CA certificate count (trust is Fedora/RHEL-only)
@@ -3519,11 +3614,12 @@ for USER_HOME in /home/* /root; do
   fi
 done
 
-fi # end certificates
+}
 
 ###############################################################################
-if ! should_skip "environment"; then
-header "24" "ENVIRONMENT & SECRETS"
+check_environment() {
+  should_skip "environment" && return
+  header "24" "ENVIRONMENT & SECRETS"
 ###############################################################################
 
 # World-readable private keys
@@ -3566,11 +3662,12 @@ CRED_PATTERNS="password|passwd|secret|api_key|token|credential"
 CRED_FOUND=$(grep -rliE "$CRED_PATTERNS" /etc --include='*.conf' 2>/dev/null | wc -l)
 info "Config files with credential patterns: $CRED_FOUND"
 
-fi # end environment
+}
 
 ###############################################################################
-if ! should_skip "systemd"; then
-header "25" "SYSTEMD SECURITY"
+check_systemd() {
+  should_skip "systemd" && return
+  header "25" "SYSTEMD SECURITY"
 ###############################################################################
 
 if require_cmd systemd-analyze; then
@@ -3612,11 +3709,12 @@ if require_cmd systemd-analyze; then
   fi
 fi
 
-fi # end systemd
+}
 
 ###############################################################################
-if ! should_skip "desktop"; then
-header "26" "DESKTOP & GUI SECURITY"
+check_desktop() {
+  should_skip "desktop" && return
+  header "26" "DESKTOP & GUI SECURITY"
 ###############################################################################
 
 # Wayland vs X11
@@ -3666,11 +3764,12 @@ if [[ -f /etc/gdm/custom.conf ]] || [[ -f /etc/gdm3/custom.conf ]]; then
   fi
 fi
 
-fi # end desktop
+}
 
 ###############################################################################
-if ! should_skip "ntp"; then
-header "27" "TIME SYNC & NTP"
+check_ntp() {
+  should_skip "ntp" && return
+  header "27" "TIME SYNC & NTP"
 ###############################################################################
 
 if require_cmd timedatectl; then
@@ -3740,11 +3839,12 @@ else
   warn "No NTP service active"
 fi
 
-fi # end ntp
+}
 
 ###############################################################################
-if ! should_skip "fail2ban"; then
-header "28" "FAIL2BAN"
+check_fail2ban() {
+  should_skip "fail2ban" && return
+  header "28" "FAIL2BAN"
 ###############################################################################
 
 if systemctl is-active fail2ban &>/dev/null; then
@@ -3766,11 +3866,12 @@ else
   fail "fail2ban: INACTIVE"
 fi
 
-fi # end fail2ban
+}
 
 ###############################################################################
-if ! should_skip "logins"; then
-header "29" "RECENT LOGINS & ACTIVITY"
+check_logins() {
+  should_skip "logins" && return
+  header "29" "RECENT LOGINS & ACTIVITY"
 ###############################################################################
 
 sub_header "Last 5 logins"
@@ -3810,11 +3911,12 @@ else
   info "Sudo activity (1h): high (100+ commands — heavy automation or scripted use)"
 fi
 
-fi # end logins
+}
 
 ###############################################################################
-if ! should_skip "hardening"; then
-header "30" "ADVANCED HARDENING"
+check_hardening() {
+  should_skip "hardening" && return
+  header "30" "ADVANCED HARDENING"
 ###############################################################################
 
 # Coredump Service Check (new)
@@ -4087,11 +4189,12 @@ if [[ "$_SUSPICIOUS_HIST" -eq 0 ]]; then
   pass "No suspicious shell history entries found"
 fi
 
-fi # end hardening
+}
 
 ###############################################################################
-if ! should_skip "modules"; then
-header "31" "KERNEL MODULES & INTEGRITY"
+check_modules() {
+  should_skip "modules" && return
+  header "31" "KERNEL MODULES & INTEGRITY"
 ###############################################################################
 
 # Suspicious kernel modules (basic heuristic — real rootkits use innocuous names)
@@ -4142,11 +4245,12 @@ if [[ -f /proc/sys/kernel/modules_disabled ]]; then
   fi
 fi
 
-fi # end modules
+}
 
 ###############################################################################
-if ! should_skip "permissions"; then
-header "32" "PERMISSIONS & ACCESS CONTROL"
+check_permissions() {
+  should_skip "permissions" && return
+  header "32" "PERMISSIONS & ACCESS CONTROL"
 ###############################################################################
 
 # Cron permissions
@@ -4184,18 +4288,21 @@ if [[ -f /etc/securetty ]]; then
   info "securetty: $TTY_COUNT TTYs allowed"
 fi
 
-# /etc/security/limits.conf — core dump limits
-if grep -qE "^\s*\*\s+hard\s+core\s+0" /etc/security/limits.conf 2>/dev/null; then
+# /etc/security/limits.conf + drop-ins — core dump limits (F-206: scan
+# /etc/security/limits.d/*.conf as well, modern systems put hardening rules
+# in drop-ins instead of editing the main file)
+if grep -qrhE "^\s*\*\s+hard\s+core\s+0" /etc/security/limits.conf /etc/security/limits.d/ 2>/dev/null; then
   pass "limits.conf: hard core 0 (core dumps disabled)"
 else
   warn "limits.conf: core dumps not disabled via limits"
 fi
 
-fi # end permissions
+}
 
 ###############################################################################
-if ! should_skip "boot"; then
-header "33" "BOOT SECURITY & INTEGRITY"
+check_boot() {
+  should_skip "boot" && return
+  header "33" "BOOT SECURITY & INTEGRITY"
 ###############################################################################
 
 # UEFI vs BIOS
@@ -4249,11 +4356,12 @@ if require_cmd systemd-analyze; then
   done
 fi
 
-fi # end boot
+}
 
 ###############################################################################
-if ! should_skip "integrity"; then
-header "34" "SYSTEM INTEGRITY CHECKS"
+check_integrity() {
+  should_skip "integrity" && return
+  header "34" "SYSTEM INTEGRITY CHECKS"
 ###############################################################################
 
 # File Integrity — key system binaries
@@ -4384,7 +4492,7 @@ if [[ -f /etc/shells ]]; then
   done
 fi
 
-fi # end integrity
+}
 
 ###############################################################################
 # Section 35: Browser Privacy
@@ -4668,7 +4776,10 @@ check_app_telemetry() {
       [[ -z "$app" ]] && continue
       local perms
       perms="$(flatpak info --show-permissions "$app" 2>/dev/null)"
-      if echo "$perms" | grep -qE "filesystems=(host([;,[:space:]]|$)|.*[;,]host([;,[:space:]]|$))|filesystems=(host-os([;,[:space:]]|$)|.*[;,]host-os([;,[:space:]]|$))|filesystems=(home([;,[:space:]]|$)|.*[;,]home([;,[:space:]]|$))|org\.freedesktop\.Flatpak=talk"; then
+      # F-225: extended Flatpak dangerous-permissions check covers host/home
+      # filesystem access plus device=all (raw device), share=network,
+      # socket=x11 (X11 fallback even on Wayland — keylog risk).
+      if echo "$perms" | grep -qE "filesystems=(host([;,[:space:]]|$)|.*[;,]host([;,[:space:]]|$))|filesystems=(host-os([;,[:space:]]|$)|.*[;,]host-os([;,[:space:]]|$))|filesystems=(home([;,[:space:]]|$)|.*[;,]home([;,[:space:]]|$))|org\.freedesktop\.Flatpak=talk|--device=all|devices=all|--share=network|sockets=.*x11"; then
         warn "Flatpak '$app' has dangerous permissions (host/home filesystem or Flatpak portal)"
         ((dangerous++))
       fi
@@ -5643,7 +5754,10 @@ check_bluetooth_privacy() {
 
   if [[ "$pairable" == "yes" ]]; then
     if [[ "$paired_count" -eq 0 ]]; then
-      warn "Bluetooth pairable but no paired devices (unnecessary attack surface)"
+      # F-262: pairable + 0 paired could be temporary setup mode (legitimate)
+      # if discoverable is off. Tighten message to suggest review rather than
+      # warn unconditionally.
+      info "Bluetooth pairable but 0 paired devices (active setup mode? — disable pairable when done)"
     else
       info "Bluetooth pairable with $paired_count paired device(s)"
     fi
@@ -5795,7 +5909,46 @@ check_keyring_security() {
   [[ "$secrets_found" -eq 0 ]] && pass "No obvious plaintext secret files found"
 }
 
-# --- Run Privacy & Desktop Sections ---
+# --- Run Security Sections (01-34) ---
+# F-013: section bodies are now functions for consistency with privacy
+# sections 35-42 (which were always functions). Each function gates on
+# `should_skip "X" && return` and prints its own header.
+check_kernel
+check_selinux
+check_firewall
+check_nftables
+check_vpn
+check_sysctl
+check_services
+check_ports
+check_ssh
+check_audit
+check_users
+check_filesystem
+check_crypto
+check_updates
+check_rootkit
+check_processes
+check_network
+check_containers
+check_logs
+check_performance
+check_hardware
+check_interfaces
+check_certificates
+check_environment
+check_systemd
+check_desktop
+check_ntp
+check_fail2ban
+check_logins
+check_hardening
+check_modules
+check_permissions
+check_boot
+check_integrity
+
+# --- Run Privacy & Desktop Sections (35-42) ---
 check_browser_privacy
 check_app_telemetry
 check_network_privacy
