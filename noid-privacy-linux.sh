@@ -971,7 +971,16 @@ if [[ -n "$_GRUB_CFG" ]]; then
 fi
 
 # Running latest installed kernel?
-LATEST_KERNEL=$(ls -v /boot/vmlinuz-* 2>/dev/null | tail -1 | sed 's|.*/vmlinuz-||')
+# SC2012-clean: shell glob with version-sort instead of `ls -v`
+shopt -s nullglob
+_kernel_files=(/boot/vmlinuz-*)
+shopt -u nullglob
+if [[ "${#_kernel_files[@]}" -gt 0 ]]; then
+  mapfile -t _kernel_sorted < <(printf '%s\n' "${_kernel_files[@]}" | sort -V)
+  LATEST_KERNEL="${_kernel_sorted[-1]##*/vmlinuz-}"
+else
+  LATEST_KERNEL=""
+fi
 if [[ -n "$LATEST_KERNEL" ]]; then
   if [[ "$KERNEL" == "$LATEST_KERNEL" ]]; then
     pass "Running latest installed kernel ($KERNEL)"
@@ -1374,13 +1383,14 @@ info "DNS servers: $DNS_SERVERS"
 # DNS over VPN check
 VPN_DNS=false
 STUB_DNS=false
-for DNS in $(grep nameserver /etc/resolv.conf 2>/dev/null | awk '{print $2}'); do
+while read -r DNS; do
+  [[ -z "$DNS" ]] && continue
   if [[ "$DNS" =~ ^10\. || "$DNS" =~ ^172\.(1[6-9]|2[0-9]|3[01])\. || "$DNS" =~ ^192\.168\. || "$DNS" =~ ^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\. ]]; then
     VPN_DNS=true
   elif [[ "$DNS" == "127.0.0.53" || "$DNS" == "127.0.0.54" ]]; then
     STUB_DNS=true
   fi
-done
+done < <(grep nameserver /etc/resolv.conf 2>/dev/null | awk '{print $2}')
 if $VPN_DNS; then
   pass "DNS via VPN (private/CGNAT range)"
 elif $STUB_DNS && $VPN_UP; then
@@ -2793,7 +2803,7 @@ if require_cmd chkrootkit; then
     warn "chkrootkit: timed out after 120s"
   else
     CHKRK_FP_PATTERN="bindshell|sniffer|chkutmp|w55808|slapper|scalper|wted|Xor\.DDoS|linux_ldiscs|suckit"
-    CHKRK_INFECTED=$(echo "$CHKRK_OUT" | grep "INFECTED" | grep -viE "$CHKRK_FP_PATTERN" | wc -l | ccount)
+    CHKRK_INFECTED=$(echo "$CHKRK_OUT" | grep "INFECTED" | grep -cviE "$CHKRK_FP_PATTERN" | ccount)
     CHKRK_FP=$(echo "$CHKRK_OUT" | grep "INFECTED" | grep -ciE "$CHKRK_FP_PATTERN" | ccount)
     if [[ "$CHKRK_INFECTED" -eq 0 ]]; then
       pass "chkrootkit: clean (0 real INFECTED, $CHKRK_FP known false positives filtered)"
@@ -2844,7 +2854,11 @@ for USER_HOME in /home/* /root; do
 done
 for CRONDIR in /etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/cron.weekly /etc/cron.monthly; do
   if [[ -d "$CRONDIR" ]]; then
-    COUNT=$(ls -1 "$CRONDIR" 2>/dev/null | wc -l)
+    # SC2012-clean: count via shell glob with nullglob
+    shopt -s nullglob
+    _cron_files=("$CRONDIR"/*)
+    shopt -u nullglob
+    COUNT="${#_cron_files[@]}"
     info "$CRONDIR: $COUNT entries"
   fi
 done
@@ -2859,6 +2873,7 @@ header "16" "PROCESS SECURITY"
 # Suspicious processes
 # F-136: Name-pattern matching is heuristic only — real attackers rename
 # binaries. PASS gives false reassurance unless annotated.
+# shellcheck disable=SC2009  # pgrep can't match multi-pattern regex with word boundaries
 SUSPECT_PROCS=$(ps aux 2>/dev/null | grep -iE "\bnc\s+-[a-z]*l|\bncat\s+-[a-z]*l|\bsocat\s+.*EXEC|\bsocat\s+.*TCP-LISTEN|\bmeterpreter\b|\breverse[_.-]shell\b|\bcobalt\s*strike\b|\bmimikatz\b|\blazagne\b|\bkeylog\b" | grep -v grep || true)
 if [[ -z "$SUSPECT_PROCS" ]]; then
   pass "No obvious-named suspicious processes (real malware renames — see AIDE/IMA/chkrootkit for actual integrity)"
@@ -2875,7 +2890,7 @@ info "Root processes (unique): $ROOT_PROCS"
 
 # Hidden Processes
 PS_PIDS=$(ps -eo pid --no-headers | sed 's/ //g' | sort -u)
-PROC_PIDS=$(ls -d /proc/[0-9]* 2>/dev/null | sed 's|/proc/||' | sort -u)
+PROC_PIDS=$(printf '%s\n' /proc/[0-9]*/ 2>/dev/null | sed 's|^/proc/||;s|/$||' | sort -u)
 HIDDEN=$(comm -23 <(echo "$PROC_PIDS") <(echo "$PS_PIDS") | wc -l)
 HIDDEN=${HIDDEN//[^0-9]/}
 HIDDEN=${HIDDEN:-0}
@@ -2896,8 +2911,8 @@ else
 fi
 
 # Deleted Binaries still running
-# shellcheck disable=SC2010  # /proc/*/exe requires ls -l to show symlink targets
-DELETED_BINS=$(ls -l /proc/*/exe 2>/dev/null | grep "(deleted)" | wc -l)
+# shellcheck disable=SC2010,SC2012  # /proc/*/exe requires ls -l to show symlink targets
+DELETED_BINS=$(ls -l /proc/*/exe 2>/dev/null | grep -c "(deleted)")
 if [[ "$DELETED_BINS" -eq 0 ]]; then
   pass "No deleted binaries running"
 else
@@ -2942,8 +2957,8 @@ fi
 # TCP Wrappers (new)
 sub_header "TCP Wrappers"
 if [[ -f /etc/hosts.allow ]]; then
-  ALLOW_RULES=$(grep -v "^#" /etc/hosts.allow 2>/dev/null | grep -v "^$" | wc -l)
-  DENY_RULES=$(grep -v "^#" /etc/hosts.deny 2>/dev/null | grep -v "^$" | wc -l)
+  ALLOW_RULES=$(grep -cvE '^#|^$' /etc/hosts.allow 2>/dev/null || echo 0)
+  DENY_RULES=$(grep -cvE '^#|^$' /etc/hosts.deny 2>/dev/null || echo 0)
   info "TCP wrappers: $ALLOW_RULES allow, $DENY_RULES deny rules"
   if [[ "$DENY_RULES" -eq 0 ]]; then
     info "hosts.deny: no deny rules (TCP wrappers deprecated on modern systems)"
@@ -3099,7 +3114,8 @@ else
 fi
 
 # Deleted log files still in use (file handle open but file deleted — logs lost on restart)
-_DELETED_LOGS=$(find /proc/*/fd -lname '*/log/*' -exec ls -la {} \; 2>/dev/null | grep "(deleted)" | wc -l || true)
+# shellcheck disable=SC2012  # ls -la inside -exec is the canonical way to surface (deleted) marker
+_DELETED_LOGS=$(find /proc/*/fd -lname '*/log/*' -exec ls -la {} \; 2>/dev/null | grep -c "(deleted)" || true)
 _DELETED_LOGS=${_DELETED_LOGS:-0}
 if [[ "$_DELETED_LOGS" -eq 0 ]]; then
   pass "No deleted log files in use"
@@ -3247,6 +3263,7 @@ fi
 
 sub_header "Top 5 CPU"
 if ! $JSON_MODE; then
+  # shellcheck disable=SC2009  # ps -eo + grep filters the sort header line — pgrep can't replace this
   while read -r USER CPU MEM CMD; do
     printf "       %s %s%% %s\n" "$USER" "$CPU" "$(echo "$CMD" | cut -c1-60)"
   done < <(ps -eo user,pcpu,pmem,args --sort=-pcpu 2>/dev/null | grep -v 'sort=-pcpu' | head -6 | tail -5)
@@ -3254,6 +3271,7 @@ fi
 
 sub_header "Top 5 Memory"
 if ! $JSON_MODE; then
+  # shellcheck disable=SC2009
   while read -r USER CPU MEM CMD; do
     printf "       %s %s%% %s\n" "$USER" "$MEM" "$(echo "$CMD" | cut -c1-60)"
   done < <(ps -eo user,pcpu,pmem,args --sort=-pmem 2>/dev/null | grep -v 'sort=-pmem' | head -6 | tail -5)
@@ -3399,7 +3417,11 @@ sub_header "SSH Keys"
 for USER_HOME in /home/* /root; do
   USER=$(basename "$USER_HOME")
   if [[ -d "$USER_HOME/.ssh" ]]; then
-    KEY_COUNT=$(ls "$USER_HOME/.ssh/"*.pub 2>/dev/null | wc -l)
+    # SC2012-clean: count via shell glob with nullglob
+    shopt -s nullglob
+    _ssh_pubkeys=("$USER_HOME/.ssh/"*.pub)
+    shopt -u nullglob
+    KEY_COUNT="${#_ssh_pubkeys[@]}"
     AUTH_KEYS=$(wc -l "$USER_HOME/.ssh/authorized_keys" 2>/dev/null | awk '{print $1}' || true)
     AUTH_KEYS=${AUTH_KEYS:-0}
     if [[ "$KEY_COUNT" -gt 0 ]] || [[ "$AUTH_KEYS" -gt 0 ]]; then
@@ -3450,7 +3472,7 @@ fi
 
 # Credentials in configs
 CRED_PATTERNS="password|passwd|secret|api_key|token|credential"
-CRED_FOUND=$(find /etc -name "*.conf" -exec grep -liE "$CRED_PATTERNS" {} \; 2>/dev/null | wc -l)
+CRED_FOUND=$(find /etc -name "*.conf" -exec grep -liE "$CRED_PATTERNS" {} + 2>/dev/null | wc -l)
 info "Config files with credential patterns: $CRED_FOUND"
 
 fi # end environment
@@ -3673,6 +3695,7 @@ if ! $JSON_MODE; then
   while read -r line; do
     [[ -z "$line" ]] && continue
     # Redact IPv4 addresses (privacy when sharing audit output)
+    # shellcheck disable=SC2001  # bash ${//} can't do \b word boundaries; sed is appropriate
     line_redacted=$(echo "$line" | sed 's/\b[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\b/X.X.X.X/g')
     printf "       %s\n" "$line_redacted"
   done < <(lastb -n 5 2>/dev/null | head -5)
@@ -4063,7 +4086,7 @@ done
 
 # /etc/securetty
 if [[ -f /etc/securetty ]]; then
-  TTY_COUNT=$(grep -v "^#" /etc/securetty 2>/dev/null | grep -v "^$" | wc -l)
+  TTY_COUNT=$(grep -cvE '^#|^$' /etc/securetty 2>/dev/null || echo 0)
   info "securetty: $TTY_COUNT TTYs allowed"
 fi
 
@@ -4113,8 +4136,11 @@ if [[ -f /proc/sys/kernel/tainted ]]; then
   fi
 fi
 
-# Check for multiple kernels
-KERNEL_COUNT=$(ls /boot/vmlinuz-* 2>/dev/null | wc -l)
+# Check for multiple kernels — SC2012-clean: shell glob count
+shopt -s nullglob
+_boot_kernels=(/boot/vmlinuz-*)
+shopt -u nullglob
+KERNEL_COUNT="${#_boot_kernels[@]}"
 info "Installed kernels: $KERNEL_COUNT"
 
 # systemd-analyze blame top 5 (new)
@@ -4218,7 +4244,7 @@ fi
 # Duplicate lines in /etc/hosts
 sub_header "/etc/hosts Integrity"
 if [[ -f /etc/hosts ]]; then
-  _HOSTS_DUPS=$(grep -v "^#" /etc/hosts 2>/dev/null | grep -v "^$" | sort | uniq -d | wc -l)
+  _HOSTS_DUPS=$(grep -vE '^#|^$' /etc/hosts 2>/dev/null | sort | uniq -d | wc -l)
   _HOSTS_DUPS=${_HOSTS_DUPS:-0}
   if [[ "$_HOSTS_DUPS" -eq 0 ]]; then
     pass "/etc/hosts: no duplicate entries"
