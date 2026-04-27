@@ -18,7 +18,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        # Pin to specific version (or full commit SHA for max supply-chain safety).
+        # `@v4` floats to the v4 series; `@v4.2.2` pins minor; `@<full-sha>` pins
+        # to a specific commit. Production workflows should pin tightly.
+        uses: actions/checkout@v4.2.2
 
       - name: Run NoID Privacy Audit
         id: audit
