@@ -222,7 +222,7 @@ by two passes of line-by-line audit on the released v3.5.0.
 
 ---
 
-
+## [3.5.0] - 2026-04-27
 
 ### 🎯 Phase 8 Audit Closure + Post-Audit Polish — DE Dispatcher, Cross-Distro, ShellCheck-Clean, 15 Final Fixes
 
