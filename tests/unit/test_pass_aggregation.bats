@@ -24,7 +24,8 @@ setup() {
     if $VERBOSE || $JSON_MODE; then
       _emit_pass "$_AGG_LABEL: $1"
     else
-      ((PASS++))
+      # Avoid `((PASS++))` — returns 1 when PASS was 0 under set -e.
+      PASS=$((PASS + 1))
       _AGG_ITEMS+=("$1")
     fi
   }

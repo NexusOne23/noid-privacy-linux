@@ -229,7 +229,9 @@ _emit_pass_agg() {
   if $VERBOSE || $JSON_MODE; then
     _emit_pass "$_AGG_LABEL: $1"
   else
-    ((PASS++))                # increment counter, defer message until _end
+    # `((PASS++))` returns 1 when PASS was 0 (post-increment value = old);
+    # under `set -e` (used by BATS) that aborts. Use plain assignment.
+    PASS=$((PASS + 1))         # increment counter, defer message until _end
     _AGG_ITEMS+=("$1")
   fi
 }
