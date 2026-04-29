@@ -1,5 +1,5 @@
 name: 'NoID Privacy for Linux'
-description: 'Privacy & security audit for Linux desktops — 390+ checks, 42 sections, AI-friendly remediation prompts'
+description: 'Hardening posture audit for Linux desktops — 390+ checks, 42 sections, AI-friendly remediation prompts'
 author: 'NexusOne23'
 
 branding:
@@ -33,7 +33,7 @@ inputs:
 
 outputs:
   score:
-    description: 'The privacy & security score (0-100)'
+    description: 'The hardening posture score (0-100)'
   total:
     description: 'Total number of checks performed'
   pass:
@@ -45,7 +45,7 @@ outputs:
   info:
     description: 'Number of informational findings'
   rating:
-    description: 'Score rating (FORTRESS/EXCELLENT/SOLID/NEEDS WORK/CRITICAL)'
+    description: 'Score rating (FULLY HARDENED / WELL-HARDENED / MOSTLY-HARDENED / NEEDS WORK / CRITICAL)'
   badge_color:
     description: 'Shields.io color name for the score (brightgreen/green/yellowgreen/orange/red)'
   badge_url:

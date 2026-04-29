@@ -74,14 +74,15 @@ KERNEL=$(echo "$JSON_OUTPUT" | jq -r '.system.kernel // "unknown"')
 VERSION=$(echo "$JSON_OUTPUT" | jq -r '.version // "unknown"')
 
 # --- Score rating + Shields.io badge color ---
+# Strings must match noid-privacy-linux.sh ratings (v3.6+: Hardening Posture wording)
 if [[ "$SCORE" -ge 95 ]]; then
-  RATING="🏰 FORTRESS"
+  RATING="🏰 FULLY HARDENED"
   BADGE_COLOR="brightgreen"
 elif [[ "$SCORE" -ge 90 ]]; then
-  RATING="🛡️ EXCELLENT"
+  RATING="🛡️ WELL-HARDENED"
   BADGE_COLOR="green"
 elif [[ "$SCORE" -ge 80 ]]; then
-  RATING="🛡️ SOLID"
+  RATING="🛡️ MOSTLY-HARDENED"
   BADGE_COLOR="yellowgreen"
 elif [[ "$SCORE" -ge 70 ]]; then
   RATING="⚠️ NEEDS WORK"
@@ -181,7 +182,7 @@ echo "✅ Audit complete: Score ${SCORE}% (${TOTAL} checks: ${PASS} pass, ${FAIL
 
 # --- Threshold check ---
 if [[ "$MIN_SCORE_THRESHOLD" -gt 0 ]] && [[ "$SCORE" -lt "$MIN_SCORE_THRESHOLD" ]]; then
-  echo "::error::Security score ${SCORE}% is below minimum threshold ${MIN_SCORE_THRESHOLD}%"
+  echo "::error::Hardening posture score ${SCORE}% is below minimum threshold ${MIN_SCORE_THRESHOLD}%"
   exit 1
 fi
 
