@@ -1,0 +1,7 @@
+Letzte Passwortänderung					: Apr 27, 2026
+Passwort läuft ab					: niemals
+Passwort inaktiv					: niemals
+Konto läuft ab						: niemals
+Minimale Anzahl der Tage zwischen Passwortänderungen	: 0
+Maximale Anzahl der Tage zwischen Passwortänderungen	: 99999
+Anzahl Tage Warnung vor Ablauf des Passwortes		: 7

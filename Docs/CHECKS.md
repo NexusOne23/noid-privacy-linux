@@ -2,9 +2,14 @@
 
 Section-by-section overview of what the audit checks and why it matters.
 
-> **Version:** 3.5.0 | **Total Checks:** 390+ | **Sections:** 42
+> **Version:** 3.6.0 | **Total Checks:** 390+ | **Sections:** 42
 
 > **Cross-distro coverage** — Optimized for Fedora 43+ / RHEL 9+. Debian 12+ / Ubuntu 24.04+, Arch, openSUSE Tumbleweed work but some checks may produce false positives (Snapper-aware, GNOME-centric). DE-aware checks cover GNOME, KDE Plasma 5/6, XFCE, MATE, Cinnamon (since v3.5.0). See `--help` for `--skip` options to suppress sections that don't apply.
+
+> **Output mode**: by default, repetitive PASSes (Boot params, sysctl keys)
+> are aggregated into single summary lines (e.g. "Boot hardening: 8/8 params
+> set"). Use `--verbose` for full per-item detail; `--json` always includes
+> all findings.
 
 > **Note**: This is a high-level overview. For the full enumeration of every
 > individual check, severity-trigger conditions, and pass/fail values, read
@@ -87,7 +92,12 @@ Validates journald configuration, log rotation, remote logging setup, and log fi
 Monitors system resource usage that could indicate compromise: unusual CPU usage, memory pressure, disk space, and process counts.
 
 ### Section 21: Hardware & Firmware
-Checks CPU microcode updates, firmware update status (fwupd), CPU vulnerability mitigations (Spectre, Meltdown, etc.), and TPM presence.
+Checks CPU vulnerability mitigations (Spectre, Meltdown, MDS, retbleed, etc.), SMART disk health (with USB-bridge fallback via `-d sat`/`-d usbjmicron`), CPU temperature via lm_sensors when available, and USB device count (excluding host root hubs).
+
+> **Note**: The Firmware update status (fwupd) and **HSI (Host Security ID)
+> firmware trust tier** (HSI:0–5 from `fwupdmgr security`) are checked in the
+> separate "Firmware & Thunderbolt" block at the end of the audit, not in
+> Section 21 itself.
 
 ### Section 22: Network Interfaces (Detail)
 Detailed network interface audit: all interfaces, IP addresses, MTU, promiscuous mode, and unusual configurations.
@@ -119,7 +129,9 @@ Checks if Fail2Ban is installed and running, validates jail configuration, and v
 Audits recent login activity: failed login attempts, unusual login times, and root login history.
 
 ### Section 30: Advanced Hardening
-Checks advanced security features: USBGuard daemon + rules, coredump service state (storage-aware), compiler presence (build-host vs production-server vs desktop), AIDE/Tripwire integrity monitoring, IMA/EVM kernel integrity, FireWire DMA-attack surface, home directory permissions, shell idle TMOUT, AIDE database existence, and shell history sensitive-pattern scan. (Login banner check is in Section 12 / Filesystem.)
+Checks advanced security features: USBGuard daemon + rules, coredump service state (storage-aware), compiler presence (build-host vs production-server vs desktop), AIDE/Tripwire integrity monitoring, **IMA/EVM kernel integrity with runtime measurement count** (>100 measurements = actively measuring; 0 = active but policy too narrow), FireWire DMA-attack surface, home directory permissions, shell idle TMOUT, AIDE database existence, and shell history sensitive-pattern scan. (Login banner check is in Section 12 / Filesystem.)
+
+**AIDE Integrity Status** (since v3.6): reads `journalctl -u aide-check.service` over the last 7 days to classify the most recent scheduled scan as PASS (clean), WARN (drift detected), or INFO (status unclear). Set `NOID_AIDE_LIVE=1` env var to additionally run a fresh `aide --check` (slow, up to 5 min) with bitmask exit-code parsing — the log is preserved on drift, deleted on clean.
 
 ### Section 31: Kernel Modules & Integrity
 Audits loaded kernel modules: heuristic name-pattern scan for suspicious modules, 12 disabled filesystem modules per CIS Level 2 (cramfs, freevxfs, jffs2, hfs, hfsplus, squashfs, udf, affs, befs, sysv, qnx4, qnx6), USB storage module blacklist, and kernel module-loading lockdown state. (Thunderbolt device security and FireWire blacklist are checked in Section 21 / Hardware and Section 30 / Hardening respectively.)
@@ -132,6 +144,14 @@ Validates GRUB configuration, boot password protection, and bootloader integrity
 
 ### Section 34: System Integrity Checks
 Runs package verification (rpm -Va / debsums), checks for modified system binaries, and validates critical file checksums.
+
+**RPM Drift-Detection** (since v3.6, RPM-based distros): set
+`NOID_RPM_BASELINE_INIT=1` once to capture the current modified-file
+list to `/var/lib/noid-privacy/rpm-baseline.txt`. Subsequent runs diff
+against the baseline and alert only on **new** modifications since
+capture. Catches XZ-Backdoor-class drift (modified binary with valid
+signature, drift between runs). `NOID_RPM_BASELINE_UPDATE=1` rewrites
+the baseline.
 
 ---
 
@@ -163,21 +183,42 @@ Checks media device security: webcam device detection and permissions, microphon
 Audits Bluetooth exposure: service status, discoverable mode (visible to nearby devices), pairable mode without paired devices, and active Bluetooth without usage.
 
 ### Section 42: Password & Keyring Security
-Comprehensive credential audit: password manager detection (17 tools — KeePassXC, KeePass2, KeeWeb, Bitwarden + bw-cli, rbw, 1Password + op, pass, gopass, lesspass, NordPass, Buttercup, qtpass, Enpass), **GNOME Keyring AND KDE KWallet** PAM auto-unlock, SSH `AddKeysToAgent` timeout, GPG agent cache TTL, plaintext secret files in home directories (subdirectory-aware via `_safe_find_home`, severity-tiered by permissions: world-readable=FAIL, group-readable=WARN, private=INFO), firmware update status (fwupdmgr), and Thunderbolt security level (DMA attack prevention).
+Comprehensive credential audit: password manager detection (17 tools — KeePassXC, KeePass2, KeeWeb, Bitwarden + bw-cli, rbw, 1Password + op, pass, gopass, lesspass, NordPass, Buttercup, qtpass, Enpass — using `type -P` to avoid shell-function shadow), **GNOME Keyring AND KDE KWallet** PAM auto-unlock, SSH `AddKeysToAgent` timeout, GPG agent cache TTL, plaintext secret files in home directories (subdirectory-aware via `_safe_find_home`, severity-tiered by permissions: world-readable=FAIL, group-readable=WARN, private=INFO).
+
+### Firmware & Thunderbolt (post-section block)
+
+A separate block after Section 42 — independent of `--skip keyring`:
+
+- **Firmware update status** via `fwupdmgr get-updates` (with `LC_ALL=C` for locale-stable parsing)
+- **HSI (Host Security ID) trust tier** via `fwupdmgr security` (since v3.6): HSI:0=FAIL, HSI:1=WARN, HSI:2=PASS (system-protected baseline), HSI:3+=PASS (heavily-hardened)
+- **HSI failing-attestation count** via `✘`-marker in `fwupdmgr security` output
+- **Thunderbolt device security level** (DMA attack prevention via per-device `/sys/bus/thunderbolt/devices/*/security`)
 
 ---
 
 ## 📊 Summary
 
-After all 42 sections, NoID Privacy for Linux calculates a **Security & Privacy Score** based on the ratio of PASS/FAIL/WARN results. The score provides an at-a-glance assessment:
+After all 42 sections, NoID Privacy for Linux calculates a **Hardening Posture Score** based on the ratio of PASS/FAIL/WARN results. The score provides an at-a-glance assessment of how thoroughly the documented hardening recipes have been applied — **not** a measure of compromise resistance.
 
 | Score | Rating | Meaning |
 |-------|--------|---------|
-| 95%+ | 🏰 FORTRESS | Exceptionally hardened system |
-| 90-94% | 🛡️ EXCELLENT | Well-hardened system |
-| 80-89% | 🛡️ SOLID | Good baseline, some improvements possible |
-| 70-79% | ⚠️ NEEDS WORK | Significant gaps in security/privacy |
+| 95%+ | 🏰 FULLY HARDENED | All recipes applied; defense foundation complete |
+| 90-94% | 🛡️ WELL-HARDENED | Strong baseline, minor gaps |
+| 80-89% | 🛡️ MOSTLY-HARDENED | Good baseline, some improvements possible |
+| 70-79% | ⚠️ NEEDS WORK | Significant gaps in hardening |
 | <70% | 🔴 CRITICAL | Immediate attention required |
+
+> **Score interpretation**: The score reflects **applied configuration hardening**, not whether your system is compromised. A 98% score means hardening recipes are well-applied — defense in depth requires complementary tools (AIDE/IMA for integrity monitoring, auditd for behavioral detection, chkrootkit for known-malware scanning). The script's Final Results block surfaces this disclaimer alongside the score.
+
+## 🎯 Compliance Mapping (since v3.6)
+
+Use `--cis-l1`, `--cis-l2`, or `--stig` to append a compliance coverage block at the end of the audit. The flags reference the static doc-based mapping in [`CIS_RHEL9_MAPPING.md`](CIS_RHEL9_MAPPING.md), which currently maps NoID checks to:
+
+- **CIS RHEL 9 Level 1**: ~33 controls
+- **CIS RHEL 9 Level 2**: ~18 controls
+- **DISA STIG RHEL 9**: ~29 controls
+
+> Server-stack benchmarks (databases, mail servers, webservers) are intentionally **out of scope** — that's [Lynis](https://cisofy.com/lynis/) territory. NoID covers the desktop/workstation subset.
 
 ---
 

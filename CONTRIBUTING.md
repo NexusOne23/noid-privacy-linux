@@ -83,8 +83,10 @@ NoID Privacy for Linux is intentionally a **single Bash script** (`noid-privacy-
 noid-privacy-linux.sh
 ├── Header & Version
 ├── Color Definitions & Globals
-├── Helper Functions (pass, fail, warn, info, header, etc.)
-├── CLI Argument Parsing (--ai, --json, --skip, --no-color, --help)
+├── Severity Emitters (_emit_pass / _emit_fail / _emit_warn / _emit_info)
+├── PASS-Aggregator (_emit_pass_agg_start / _emit_pass_agg / _emit_pass_agg_end)
+├── Capability Detection Layer (_detect_capabilities, _CAPS, _fw_get_policies)
+├── CLI Argument Parsing (--ai, --json, --verbose, --cis-l1/-l2, --stig, --skip, --no-color, --help)
 ├── System Detection (distro, desktop, init system)
 │
 ├── Security Sections (01-34)
@@ -105,7 +107,9 @@ noid-privacy-linux.sh
 │   ├── 41: Bluetooth Privacy
 │   └── 42: Password & Keyring Security
 │
+├── Firmware & Thunderbolt block (HSI level + TB device security)
 ├── Summary & Score Calculation
+├── Compliance Coverage block (--cis-l1/-l2/--stig)
 └── AI Prompt Generation (--ai flag)
 ```
 
@@ -113,17 +117,28 @@ noid-privacy-linux.sh
 
 | Function | Purpose | Example |
 |----------|---------|---------|
-| `pass "msg"` | Green ✅ PASS result | `pass "Secure Boot: ENABLED"` |
-| `fail "msg"` | Red ❌ FAIL result | `fail "Root login allowed via SSH"` |
-| `warn "msg"` | Yellow ⚠️ WARN result | `warn "Bluetooth discoverable"` |
-| `info "msg"` | Blue ℹ️ INFO result | `info "Kernel: 6.18.9"` |
+| `_emit_pass "msg"` | Green ✅ PASS result | `_emit_pass "Secure Boot: ENABLED"` |
+| `_emit_fail "msg"` | Red ❌ FAIL result | `_emit_fail "Root login allowed via SSH"` |
+| `_emit_warn "msg"` | Yellow ⚠️ WARN result | `_emit_warn "Bluetooth discoverable"` |
+| `_emit_info "msg"` | Blue ℹ️ INFO result | `_emit_info "Kernel: 6.18.9"` |
+| `_emit_pass_agg_start "Label"` | Begin a PASS-aggregation block | `_emit_pass_agg_start "Boot hardening"` |
+| `_emit_pass_agg "item"` | Emit one item (collapsed in default, detailed in --verbose/--json) | `_emit_pass_agg "init_on_alloc=1"` |
+| `_emit_pass_agg_end N "noun"` | Close block, emit summary | `_emit_pass_agg_end 8 "params set"` |
 | `header "N" "TITLE"` | Section header | `header "01" "KERNEL & BOOT"` |
+| `_fw_get_policies` | Capability-aware firewalld policy lister | `FWD_POLICIES=$(_fw_get_policies)` |
+| `_service_masked_any svc1 svc2` | Returns 0 if any service is masked | `_service_masked_any sshd ssh` |
+
+> **Naming convention** (v3.6+): all emitters are underscore-prefixed
+> (`_emit_*`) to prevent name-collision with CLI tools like `pass`
+> (password-store) or `info` (texinfo). The lint script
+> `scripts/lint-api-usage.sh` rejects bare-name reintroduction.
 
 ### Counters
 
 The script tracks results via global counters:
 - `PASS`, `FAIL`, `WARN`, `INFO`
 - These are used to calculate the final score
+- The PASS-aggregator increments `PASS` per item even when display is collapsed
 
 ---
 
@@ -142,12 +157,12 @@ Look at the existing 42 sections and find where your check fits. For example:
 # Check if something is configured securely
 if [[ -f /etc/some-config ]]; then
     if grep -q "^secure_setting=yes" /etc/some-config; then
-        pass "Some feature is securely configured"
+        _emit_pass "Some feature is securely configured"
     else
-        fail "Some feature is not configured — risk of X"
+        _emit_fail "Some feature is not configured — risk of X"
     fi
 else
-    info "Some feature config not found (not installed)"
+    _emit_info "Some feature config not found (not installed)"
 fi
 ```
 
@@ -158,6 +173,13 @@ fi
 - **Support both distro families** — Fedora/RHEL and Debian/Ubuntu
 - **Use clear, actionable messages** — tell the user what's wrong AND why it matters
 - **Don't modify the system** — read-only checks only!
+- **Force `LC_ALL=C`** when grepping translatable command output (`chage -l`,
+  `bluetoothctl`, `fwupdmgr`, `journalctl --disk-usage`). The lint script
+  enforces this for known offenders.
+- **Use `$_VPN_IFACE_REGEX`** for VPN-interface detection — never hand-write
+  the family list. New VPN tools propagate via the global definition.
+- **Use `_fw_get_policies` / `_service_masked_any`** instead of raw API calls
+  when the capability layer covers the operation. Direct calls trip the lint.
 
 ### 4. Example: Complete Check
 
@@ -166,12 +188,12 @@ fi
 if command -v nmcli &>/dev/null; then
     wifi_rand=$(nmcli -t -f wifi.scan-rand-mac-address connection show 2>/dev/null | head -1)
     if [[ "$wifi_rand" == *"yes"* ]]; then
-        pass "WiFi scan MAC randomization enabled"
+        _emit_pass "WiFi scan MAC randomization enabled"
     else
-        warn "WiFi scan MAC randomization disabled — device trackable across networks"
+        _emit_warn "WiFi scan MAC randomization disabled — device trackable across networks"
     fi
 else
-    info "NetworkManager not found — skipping MAC randomization check"
+    _emit_info "NetworkManager not found — skipping MAC randomization check"
 fi
 ```
 
@@ -181,18 +203,25 @@ fi
 
 If your checks don't fit any existing section, you can propose a new one:
 
-1. **Increment the section count** in the header
-2. **Add the section function:**
+1. **Add the section function with skip-gate and header:**
    ```bash
    check_your_section() {
+       should_skip "yourkey" && return
        header "43" "YOUR SECTION NAME"
        # ... your checks ...
    }
    ```
-3. **Add the `--skip` keyword** in the argument parser
-4. **Call the function** in the execution flow
-5. **Update `TOTAL_SECTIONS`** constant
-6. **Update documentation** (README, Docs/CHECKS.md)
+2. **Append the skip-keyword to `SECTION_KEYS` array** (single source of
+   truth — `TOTAL_SECTIONS` is now derived from `${#SECTION_KEYS[@]}`,
+   no separate constant to update)
+3. **Call the function** in the execution flow at the bottom of the script
+4. **Update documentation** (`README.md` skip-list, `Docs/CHECKS.md`,
+   `Docs/CIS_RHEL9_MAPPING.md` if compliance-relevant)
+5. **Add a BATS regression test** under `tests/unit/` if the check
+   matches one of the 5 bug-pattern classes (locale/name-shadow/
+   grep-r/API-version/regex-globals)
+6. **Update `--help`** skip-keyword list (alphabetical inside its tier
+   — see existing format)
 
 ---
 
@@ -245,10 +274,10 @@ some_command | while read -r line; do
 done
 
 # ✅ DO: Clear, actionable messages
-fail "SSH root login enabled — disable with 'PermitRootLogin no' in /etc/ssh/sshd_config"
+_emit_fail "SSH root login enabled — disable with 'PermitRootLogin no' in /etc/ssh/sshd_config"
 
 # ❌ DON'T: Vague messages
-fail "SSH config insecure"
+_emit_fail "SSH config insecure"
 ```
 
 ---
@@ -272,10 +301,16 @@ sudo bash noid-privacy-linux.sh --ai
 # 4. JSON output
 sudo bash noid-privacy-linux.sh --json | python3 -m json.tool > /dev/null
 
-# 5. Skip your section
+# 5. Verbose mode (per-item PASS detail)
+sudo bash noid-privacy-linux.sh --verbose
+
+# 6. Compliance flag (Coverage block at end)
+sudo bash noid-privacy-linux.sh --cis-l1
+
+# 7. Skip your section
 sudo bash noid-privacy-linux.sh --skip YOUR_SECTION
 
-# 6. No-color mode
+# 8. No-color mode
 sudo bash noid-privacy-linux.sh --no-color
 ```
 
@@ -285,16 +320,49 @@ If you can, test on both families:
 - **Fedora/RHEL**: Different package manager (dnf), SELinux, firewalld
 - **Ubuntu/Debian**: Different package manager (apt), AppArmor, ufw
 
-### ShellCheck
+CI covers Fedora 42/43/44, Ubuntu 22.04/24.04, Debian 12, and Arch
+Linux for syntax compatibility, plus a 3-locale matrix (en_US, de_DE,
+fr_FR) for the audit-locale regression test.
+
+### ShellCheck + API-Lint
 
 ```bash
-# Install
+# Install ShellCheck
 sudo dnf install ShellCheck     # Fedora
 sudo apt install shellcheck     # Ubuntu/Debian
 
 # Run
 shellcheck --severity=warning noid-privacy-linux.sh
+
+# Run the API-layer / bug-pattern lint (CI gate)
+bash scripts/lint-api-usage.sh noid-privacy-linux.sh
 ```
+
+The 8-pattern lint enforces:
+
+1. No direct firewalld policy API calls (use `_fw_get_policies`)
+2. No `systemctl is-masked` (use `_service_masked_any`)
+3. No `grep -r` on `/etc/pam.d` (use `-R` for symlinks)
+4. No bare `pass()/fail()/warn()/info()` definitions
+5. No `chage -l` without `LC_ALL=C`
+6. No hardcoded VPN-iface regex (use `$_VPN_IFACE_REGEX`)
+7. No `df -T … awk NR==2` (use `findmnt -no FSTYPE`)
+8. No `fwupdmgr`/`bluetoothctl` invocation without `LC_ALL=C`
+
+### BATS Unit Tests
+
+Install bats and run:
+
+```bash
+sudo dnf install bats           # Fedora
+sudo apt install bats           # Ubuntu/Debian
+
+bats tests/unit/
+```
+
+When fixing a bug-class regression, add a fixture under
+`tests/fixtures/` and a `.bats` test under `tests/unit/`. See
+`tests/README.md` for the layout convention.
 
 ---
 

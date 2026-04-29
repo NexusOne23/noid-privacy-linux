@@ -108,14 +108,25 @@ jobs:
         include:
           - distro: ubuntu:22.04
             name: Ubuntu 22.04
+            install: 'apt-get update && apt-get install -y bash'
           - distro: ubuntu:24.04
             name: Ubuntu 24.04
+            install: 'apt-get update && apt-get install -y bash'
           - distro: fedora:42
             name: Fedora 42
+            install: 'true'
           - distro: fedora:43
             name: Fedora 43
+            install: 'true'
+          - distro: fedora:44
+            name: Fedora 44
+            install: 'true'
           - distro: debian:12
             name: Debian 12
+            install: 'apt-get update && apt-get install -y bash'
+          - distro: archlinux:latest
+            name: Arch Linux
+            install: 'true'
 
     steps:
       - name: Checkout repository
@@ -124,7 +135,7 @@ jobs:
       - name: Test syntax on ${{ matrix.name }}
         run: |
           docker run --rm -v "$PWD:/audit:ro" "${{ matrix.distro }}" \
-            bash -n /audit/noid-privacy-linux.sh
+            bash -c "${{ matrix.install }} && bash -n /audit/noid-privacy-linux.sh"
           echo "✅ Bash syntax compatible on ${{ matrix.name }}"
 
   audit-smoke:
@@ -167,4 +178,90 @@ jobs:
           esac
           jq . /tmp/audit.json > /dev/null
           echo "✅ Audit produces valid JSON"
+          jq -r '.summary | "Score: \(.score)% — \(.pass) pass, \(.fail) fail, \(.warn) warn"' /tmp/audit.json
+
+  api-lint:
+    name: API Layer Lint
+    # v3.8: enforce capability-layer usage. Catches direct API calls
+    # bypassing _fw_get_policies / _service_masked_any and the 5
+    # bug-pattern classes (locale, name-shadow, grep-r, API-version,
+    # regex-globals — see feedback memory).
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4.2.2
+
+      - name: Run API-layer lint
+        run: bash scripts/lint-api-usage.sh noid-privacy-linux.sh
+
+  bats-tests:
+    name: BATS Unit Tests
+    # v3.8: BATS test-suite preventing regressions of the 5 bug-pattern
+    # classes documented in feedback_noid_audit_bug_patterns.md.
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4.2.2
+
+      - name: Install BATS
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bats
+
+      - name: Run BATS unit tests
+        run: |
+          echo "BATS version: $(bats --version)"
+          echo ""
+          bats tests/unit/
+          echo ""
+          echo "✅ BATS tests passed"
+
+  audit-locale:
+    name: Audit Locale Test (${{ matrix.locale }})
+    # v3.6: locale-aware regression test.
+    # Catches the chage-locale bug class — `grep "Maximum"` fails on German
+    # `chage -l` output ("Maximale Anzahl..."), causing silent FALSE PASSes
+    # on non-English systems. Pattern documented in feedback memory.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        locale: [en_US.UTF-8, de_DE.UTF-8, fr_FR.UTF-8]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4.2.2
+
+      - name: Install dependencies + locale
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc curl iproute2 jq net-tools locales
+          sudo locale-gen "${{ matrix.locale }}"
+          sudo update-locale LANG="${{ matrix.locale }}"
+
+      - name: Run audit under ${{ matrix.locale }}
+        env:
+          LANG: ${{ matrix.locale }}
+          LC_ALL: ${{ matrix.locale }}
+        run: |
+          # Same exit-code logic as audit-smoke — any non-{0,1,2,130,143}
+          # under a non-English locale indicates a locale-parsing regression.
+          set +e
+          sudo -E bash noid-privacy-linux.sh --json --offline \
+            --skip rootkit --skip audit --skip integrity \
+            > /tmp/audit.json
+          AUDIT_RC=$?
+          set -e
+          echo "Audit exit code under ${{ matrix.locale }}: $AUDIT_RC"
+          case "$AUDIT_RC" in
+            0|1|2) ;;
+            130|143) ;;
+            *) echo "::error::Audit failed under ${{ matrix.locale }} with rc=$AUDIT_RC"
+               head -50 /tmp/audit.json
+               exit 1 ;;
+          esac
+          jq . /tmp/audit.json > /dev/null
+          echo "✅ Audit valid JSON under ${{ matrix.locale }}"
           jq -r '.summary | "Score: \(.score)% — \(.pass) pass, \(.fail) fail, \(.warn) warn"' /tmp/audit.json

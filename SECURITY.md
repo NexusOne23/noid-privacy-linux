@@ -78,11 +78,12 @@ NoID Privacy for Linux is designed with security in mind:
 
 | Version | Supported          | Notes |
 | ------- | ------------------ | ----- |
-| 3.5.x   | ✅ Fully Supported | Current release — DE dispatcher (KDE/XFCE/MATE/Cinnamon), exit codes, signal handling, ShellCheck-clean |
-| 3.4.x   | ⚠️ Limited Support  | Upgrade to 3.5.x recommended |
-| 3.3.x   | ⚠️ Limited Support  | Upgrade to 3.5.x recommended |
-| 3.1.x   | ❌ End of Life     | Upgrade to 3.5.x |
-| 2.0.x   | ❌ End of Life     | Upgrade to 3.5.x |
+| 3.6.x   | ✅ Fully Supported | Current release — Hardening Posture rebrand, capability layer, BATS test-suite, 8-pattern API-lint, CIS L1/L2/STIG mapping, HSI integration |
+| 3.5.x   | ✅ Supported       | DE dispatcher (KDE/XFCE/MATE/Cinnamon), exit codes, signal handling, ShellCheck-clean — upgrade to 3.6.x recommended |
+| 3.4.x   | ⚠️ Limited Support  | Upgrade to 3.6.x recommended |
+| 3.3.x   | ⚠️ Limited Support  | Upgrade to 3.6.x recommended |
+| 3.1.x   | ❌ End of Life     | Upgrade to 3.6.x |
+| 2.0.x   | ❌ End of Life     | Upgrade to 3.6.x |
 | 1.x     | ❌ Not Supported   | Legacy version |
 
 **Recommendation:** Always use the latest v3.x release.
@@ -157,9 +158,22 @@ NoID Privacy for Linux is designed with security in mind:
   strings) and SC2329 (callback dispatch / signal traps). The CI gate
   enforces `--severity=warning`; style-level cleanliness is a v3.5.0
   improvement.
-- **bash -n**: Syntax validation in CI across Ubuntu 22.04/24.04, Fedora 42/43,
-  Debian 12. Plus a real audit-smoke test job that runs the audit on Ubuntu
-  with `--offline` and validates JSON output parses.
+- **API-Layer Lint** (since v3.6): `scripts/lint-api-usage.sh` enforces
+  8 anti-regression patterns covering the bug classes documented in
+  `feedback_noid_audit_bug_patterns.md` — direct firewalld API bypassing
+  capability layer, `systemctl is-masked` (non-existent verb), `grep -r`
+  on symlinked dirs, bare `pass()/fail()/warn()/info()` reintroductions,
+  `chage -l` without `LC_ALL=C`, hardcoded VPN-iface regex, `df -T NR==2`
+  wrap-vulnerable patterns, and `fwupdmgr`/`bluetoothctl` without `LC_ALL=C`.
+- **BATS unit tests** (since v3.6): `tests/unit/` covers the bug-pattern
+  classes via `bats` runner against `tests/fixtures/`.
+- **bash -n**: Syntax validation in CI across Ubuntu 22.04/24.04,
+  Fedora 42/43/**44**, Debian 12, and **Arch Linux** (7-distro matrix
+  since v3.6). Plus a real audit-smoke test job that runs the audit on
+  Ubuntu with `--offline` and validates JSON output parses.
+- **Audit-Locale Matrix** (since v3.6): runs the audit under `en_US`,
+  `de_DE`, `fr_FR` locales to catch the locale-bug class
+  (`chage`/`fwupdmgr`/`bluetoothctl` translatable labels).
 - **Manual Review**: Every PR is reviewed for security implications.
 
 ### Verification
@@ -171,6 +185,12 @@ bash -n noid-privacy-linux.sh
 
 # ShellCheck (if installed)
 shellcheck noid-privacy-linux.sh
+
+# API-layer lint (since v3.6)
+bash scripts/lint-api-usage.sh noid-privacy-linux.sh
+
+# BATS unit tests (since v3.6)
+bats tests/unit/
 ```
 
 ### Vulnerability Disclosures
@@ -194,5 +214,5 @@ For licensing questions, see [LICENSE](LICENSE) or open a [Discussion](https://g
 
 ---
 
-**Last Updated**: April 27, 2026
-**Policy Version**: 1.5
+**Last Updated**: April 30, 2026
+**Policy Version**: 1.6

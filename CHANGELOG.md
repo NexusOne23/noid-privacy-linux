@@ -7,7 +7,222 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [3.5.0] - 2026-04-27
+## [3.6.0] - 2026-04-30
+
+### 🎯 Posture-Communication, Detection-Depth, Engineering-Discipline & Compliance — Four-Tier Sprint
+
+A four-themed sprint compressed into one release: honest score communication
+(v3.6 theme), real detection depth via journalctl/HSI/baseline-diff (v3.7),
+engineering rigor through capability layer + BATS tests + 8-pattern lint
+(v3.8), and CIS Level 1/Level 2/STIG mapping (v3.9). Plus 13 bugs surfaced
+by two passes of line-by-line audit on the released v3.5.0.
+
+#### Added — Posture-Communication (v3.6 tier)
+
+- **Tagline rename**: "Privacy & Security Audit" → "Hardening Posture Audit"
+  (banner, README, help, header comment, GitHub Action description). The
+  word "Audit" suggested compromise-detection, which the script doesn't do.
+  "Hardening Posture" matches what it actually verifies: configuration state.
+- **Score-Disclaimer block** (Final Results layout): Defense-Foundation
+  framing between Total-checks and Score lines:
+  ```
+  ║  Hardening posture is your defense foundation — the layer
+  ║  attackers must defeat first. Complement with:
+  ║    ✓ AIDE / IMA   — file & kernel integrity
+  ║    ✓ auditd       — behavioral monitoring
+  ║    ✓ chkrootkit   — known-malware scanner
+  ```
+  Replaces silent "98% FORTRESS" framing that invited "I'm unhackable" misread.
+- **Rating wording renames**: `FORTRESS` → `FULLY HARDENED`, `EXCELLENT` →
+  `WELL-HARDENED`, `SOLID` → `MOSTLY-HARDENED` for ≥95/≥90/≥80 scores.
+  Lower thresholds (NEEDS WORK / CRITICAL) unchanged — they correctly
+  describe incomplete hardening.
+- **Score label rename**: `SECURITY & PRIVACY SCORE` → `HARDENING POSTURE
+  SCORE` matches the new tagline.
+- **README "Scope — What this IS / NOT" section**: Defense-in-Depth-Layers
+  table making explicit that NoID is Layer 1 (Configuration Hardening),
+  with Layers 2/3 (Integrity/Behavioral) listed as complementary — not
+  replacements.
+- **PASS-Aggregation**: Boot hardening (8 params) + Sysctl basic (~25 keys)
+  + Sysctl strict (5 keys) collapse to 3 summary lines in default output
+  (e.g. "Boot hardening: 8/8 params set"). `--verbose` flag opt-in for full
+  per-item detail. JSON mode always emits per-item findings (consumers
+  need detail). Reduces "439 inflated checks" to ~150 unique signals
+  visible by default while preserving the score counter.
+- **`--verbose` / `-v` flag**: full PASS detail (boot params + sysctl keys
+  individually). Explicit short flag for quick toggle.
+
+#### Added — Detection-Depth (v3.7 tier)
+
+- **AIDE actual integrity-check status** (Section 30): reads last
+  `aide-check.service` run from `journalctl -u aide-check.service` (last
+  7 days), classifies as PASS (0 changes) / WARN (drift detected) / INFO
+  (status unclear). Regex covers both Fedora's notify-send wrapper output
+  ("Changes Detected"/"new files"/"files modified") and raw AIDE log
+  vocabulary ("added"/"removed"/"changed"/"mismatch").
+- **`NOID_AIDE_LIVE=1`** env var: opt-in fresh `aide --check` run with
+  bitmask exit-code parsing (1=new, 2=removed, 4=changed, ≥14=errors).
+  Slow (up to 5min); cleans up tmp log on success, keeps it on drift for
+  user review.
+- **IMA runtime measurement count**: reads
+  `/sys/kernel/security/integrity/ima/runtime_measurements_count` to
+  distinguish "IMA active and measuring" (>100 measurements) from
+  "IMA active but policy too narrow" (1–100) and "IMA loaded but not
+  measuring" (0). Was previously only "IMA: active" without a load signal.
+- **HSI (Host Security ID) firmware trust tier** (FIRMWARE & THUNDERBOLT
+  block): parses `fwupdmgr security` output for HSI:0–5 level. Tier
+  classification: HSI:0 = FAIL, HSI:1 = WARN, HSI:2 = PASS, HSI:3 = PASS,
+  HSI:4–5 = PASS. Plus failing-attestation count via `✘`-marker grep.
+  Adds concrete hardware-trust signal beyond "fwupd installed?".
+- **RPM `-V` baseline diff** (Section 34): on first run with
+  `NOID_RPM_BASELINE_INIT=1` captures current modified-file list to
+  `/var/lib/noid-privacy/rpm-baseline.txt`. Subsequent runs `comm -13`
+  the baseline against current state and alert on **new** modifications
+  only. Catches XZ-Backdoor-class drift (modified binary, valid
+  signature, new since baseline). `NOID_RPM_BASELINE_UPDATE=1` rewrites
+  the baseline.
+
+#### Added — Engineering-Discipline (v3.8 tier)
+
+- **Capability detection layer** (`_detect_capabilities()` + `_CAPS[]`
+  associative array): runs once at script startup. Detects firewalld
+  policies API (`--get-policies` 0.9+ vs `--list-policies` 0.8-),
+  systemd version, nft version, systemd-masked-method (always
+  `is-enabled-output` since `is-masked` is not a valid systemctl verb).
+  Section code calls `_fw_get_policies()` helper that queries `_CAPS`
+  instead of hardcoding the API flag.
+- **BATS test-suite** (`tests/`): 5 unit tests + 7 fixtures covering
+  the 5 bug-pattern classes from the audit:
+  - `test_emit_functions.bats` — verifies `_emit_*` definitions exist,
+    no bare `pass()/fail()/warn()/info()` re-introduced
+  - `test_chage_locale.bats` — locale-bug-class regression test
+  - `test_pass_aggregation.bats` — aggregator helpers (default vs
+    verbose vs JSON modes)
+  - `test_systemctl_masked.bats` — `is-masked` verb non-existence
+  - `test_vpn_regex_consistency.bats` — `$_VPN_IFACE_REGEX` global
+    vs hand-written subsets (Bug Pattern #5)
+  Plus `tests/README.md` and `tests/fixtures/` with German/English
+  chage outputs, systemctl is-enabled outputs, firewall-cmd output.
+- **`scripts/lint-api-usage.sh`**: 8-pattern static analysis catching
+  re-introduction of any of the 5 + 3 bug-pattern classes. Run as a
+  standalone CI job (`api-lint`):
+  1. Direct firewalld policy API calls bypassing `_fw_get_policies`
+  2. `systemctl is-masked` (verb does not exist)
+  3. `grep -r` on `/etc/pam.d` (must be `-R` for symlink-following)
+  4. Bare `pass/fail/warn/info()` definitions
+  5. `chage -l` without `LC_ALL=C` (locale-bug class)
+  6. Hardcoded VPN-iface regex (must use `$_VPN_IFACE_REGEX`)
+  7. `df -T … awk NR==2` (wrap-vulnerable on long device names)
+  8. `fwupdmgr`/`bluetoothctl` invocation without `LC_ALL=C`
+- **CI workflow `bats-tests` job**: runs `bats tests/unit/` on Ubuntu
+  with `bats` from package repo.
+- **CI workflow `audit-locale` job**: matrix over `en_US.UTF-8`,
+  `de_DE.UTF-8`, `fr_FR.UTF-8` running the audit under each locale via
+  `locale-gen` + `LC_ALL=$locale sudo -E` invocation. Catches the
+  chage-locale-bug class automatically.
+- **CI `syntax-compat` matrix expanded**: now covers Fedora 42/43/44,
+  Ubuntu 22.04/24.04, Debian 12, **Arch Linux** (was 5 distros, now 7).
+- **`# CAP-LINT-EXEMPT` marker**: inline comment to whitelist the
+  `_detect_capabilities()` body itself from Pattern 1 (it must use the
+  raw API to discover whether the API exists).
+
+#### Added — Compliance (v3.9 tier)
+
+- **`Docs/CIS_RHEL9_MAPPING.md`**: 52-row mapping table from NoID checks
+  to CIS RHEL 9 Level 1 / Level 2 / DISA STIG control IDs. Covers
+  `~33 L1 / 18 L2 / 29 STIG` controls with explicit out-of-scope notes
+  for server-stack benchmarks (databases, mail, webservers — that's
+  Lynis territory).
+- **`--cis-l1` / `--cis-l2` / `--stig` flags**: when set, append a
+  Compliance Coverage block at the end of the audit summarizing how
+  many controls of the chosen tier are mapped (parsed from the doc).
+  Static doc-based summary for v3.6.0 — runtime per-finding tagging
+  is v3.10 backlog.
+- **`scripts/coverage-report.sh`**: standalone parser for
+  `Docs/CIS_RHEL9_MAPPING.md` that emits coverage statistics. Used by
+  the main script when compliance flags are set; also runnable
+  manually for cross-reference.
+
+#### Changed — Function-Naming Refactor
+
+- **`pass()/fail()/warn()/info()` → `_emit_pass()/_emit_fail()/_emit_warn()
+  /_emit_info()`**: 4 definitions + 838 call sites renamed. Eliminates
+  the function-shadow class permanently — `command -v pass` would have
+  found the script's `pass()` formatter instead of the `pass` CLI tool
+  (password-store), which was the actual bug behind Section 42's
+  "Password manager installed: pass" false positive on systems without
+  pass installed. Underscore prefix prevents future collisions with
+  `info` (texinfo), `warn`, etc. Migration via word-boundary-safe
+  `sed -E` against character-class lookbehind to avoid substring
+  matches like `flatpak info "$app"`.
+
+#### Changed — `--verbose` flag added to argument parser
+
+- New flag `--verbose` / `-v` complements `--ai`, `--json`, `--skip`,
+  `--offline`, `--cis-l1/-l2`, `--stig` in the help text. ENV-vars block
+  added documenting `NOID_AIDE_LIVE`, `NOID_RPM_BASELINE_INIT`,
+  `NOID_RPM_BASELINE_UPDATE`.
+
+#### Fixed — Bug Pattern #5 reintroductions (5 sites, found by audit re-pass)
+
+- **Line 924-927** (`LAN_GW` awk filter): hardcoded VPN-iface regex
+  `^(tun|tap|wg|proton|pvpn|tailscale|zt|nebula|mullvad|nordlynx)`
+  replaced with `awk -v vpn_re="$_VPN_IFACE_REGEX"` so new families
+  added to the global propagate.
+- **Line 1803** (IPv6 leak check): hardcoded subset → `$_VPN_IFACE_REGEX`.
+- **Line 2175** (`_VPN_TUNNEL_ADDRS` awk in port-classify): hardcoded
+  subset → `awk -v vpn_re=...`.
+- **Line 5632** (IPv6 phys-iface scan): hardcoded subset → global.
+- **Line 5648** (nmcli active-connection loop): hardcoded subset → global.
+
+#### Fixed — Other audit findings
+
+- **`fwupdmgr security --no-history-check` flag does not exist** for
+  the `security` subcommand (only for `get-updates`). Removed; HSI
+  detection now works on Fedora 43 (live-test caught this).
+- **AIDE journal regex too narrow**: Fedora's `aide-check.service`
+  notify-send output uses "Changes Detected"/"new files"/"files
+  modified" — the previous "added/removed/changed" regex missed it,
+  classifying real drift as INFO instead of WARN. Regex extended to
+  cover both notify and raw-log vocabulary.
+- **`df -T / | awk 'NR==2{print $2}'` wraps on long device names**:
+  3 sites (Section 12 ACL, Section 20 inode, Section 38 /tmp fs)
+  switched to `findmnt -no FSTYPE /` (or `df -PT … | tail -1` fallback
+  when findmnt absent).
+- **HSI `'✘|FAIL'` regex over-counts**: "FAIL" as a substring also
+  matches benign body text. Now `grep -c '✘'` only — the cross marker
+  is the unambiguous failure indicator.
+- **`bluetoothctl show` locale-translation**: BlueZ translates body
+  labels on de_DE/fr_FR even though the prefix is stable. `LC_ALL=C`
+  prepended defensively for both `show` and `devices Paired` calls.
+- **`fwupdmgr get-updates` translates "New version"/"No upgrades"**:
+  `LC_ALL=C` prepended (the body is locale-aware even though the HSI:N
+  prefix is not).
+- **`journalctl --disk-usage` regex `\d+\.?\d*[GMKT]`**: misses comma
+  decimals on de_DE/fr_FR (`280,0M`). `LC_ALL=C journalctl` prepended.
+- **`chage -l` extracting `\d+$` matched negative-`-1` as `1`**: edge
+  case where `chage -M -1` (never expire) was returned as positive.
+  Switched to awk extracting the value after `:`, then case-match on
+  `never|-1|99999` for unambiguous detection.
+- **`should_skip()` loop variable `s` not declared `local`**: silently
+  polluted global scope. Added `local … s`.
+- **AIDE on-demand check log**: tmp file was never deleted on rc=0
+  ("0 changes"). Now `rm -f` on success; preserved on drift for review.
+
+#### Internal — Engineering Discipline
+
+- The 5 bug-pattern classes documented in
+  `feedback_noid_audit_bug_patterns.md` are now anti-regression-checked
+  by `scripts/lint-api-usage.sh` in CI. New classes (df-wrap, locale-tools,
+  hardcoded-VPN-regex) added to lint as Patterns 6–8.
+- Live-host test on Fedora 43 (NoID author's workstation) revealed the
+  `--no-history-check` and AIDE-regex bugs that static audit missed —
+  reinforces the principle that integration tests catch what unit tests
+  don't. Both fixes plus 11 other audit findings shipped in this release.
+
+---
+
+
 
 ### 🎯 Phase 8 Audit Closure + Post-Audit Polish — DE Dispatcher, Cross-Distro, ShellCheck-Clean, 15 Final Fixes
 

@@ -30,8 +30,9 @@ A clear description of what actually happened. Include the relevant output.
 - **Kernel**: [e.g., 6.18.9-200.fc43.x86_64]
 - **Bash Version**: [e.g., 5.2.37]
 - **Desktop Environment**: [e.g., GNOME 48, KDE Plasma 6]
-- **Script Version**: [e.g., v3.0.0]
-- **Flags Used**: [e.g., --ai, --json, --skip bluetooth]
+- **Script Version**: [e.g., v3.6.0]
+- **Flags Used**: [e.g., --ai, --json, --verbose, --cis-l1, --skip bluetooth]
+- **ENV Vars**: [e.g., NOID_AIDE_LIVE=1, NOID_RPM_BASELINE_INIT=1]
 
 **Get system info:**
 ```bash

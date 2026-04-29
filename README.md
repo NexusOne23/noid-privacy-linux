@@ -2,10 +2,10 @@
 
 # 🛡️ NoID Privacy for Linux
 
-### Privacy & Security Audit for Linux Desktops
+### Hardening Posture Audit for Linux Desktops
 
 [![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](https://github.com/NexusOne23/noid-privacy-linux/blob/main/LICENSE)
-[![Version](https://img.shields.io/badge/version-3.5.0-green.svg)](https://github.com/NexusOne23/noid-privacy-linux/releases)
+[![Version](https://img.shields.io/badge/version-3.6.0-green.svg)](https://github.com/NexusOne23/noid-privacy-linux/releases)
 [![Pure Bash](https://img.shields.io/badge/pure-bash-4EAA25.svg?logo=gnu-bash&logoColor=white)](https://github.com/NexusOne23/noid-privacy-linux)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen.svg)](https://github.com/NexusOne23/noid-privacy-linux)
 [![Checks](https://img.shields.io/badge/checks-390%2B-orange.svg)](https://github.com/NexusOne23/noid-privacy-linux)
@@ -35,6 +35,28 @@ sudo bash noid-privacy-linux.sh --ai
 > **This tool is read-only.** It does not modify your system. No files changed, no configs touched, no services restarted.
 
 > **🪟 Running Windows too?** [NoID Privacy for Windows](https://noid-privacy.com) hardens **630+ settings** with full Backup → Apply → Verify → Restore. One-time purchase, no subscription.
+
+---
+
+## 🎯 Scope — What this IS / NOT
+
+NoID is a **hardening posture audit** — it verifies your defense foundation is properly applied. The score reflects configuration state, not compromise resistance.
+
+| ✅ This tool **does** | ❌ This tool does **not** |
+|---|---|
+| Verify hardening recipes are applied | Replace an Intrusion Detection System |
+| Detect privacy misconfigurations | Scan for active rootkits (use AIDE/IMA/chkrootkit) |
+| Report drift from secure baselines | Find vulnerabilities (use OSV/Lynis-CVE) |
+| Generate AI-ready remediation prompts | Perform penetration testing (use OpenVAS/Nessus) |
+| Audit 42 desktop-specific surfaces | Behavioral / memory-only malware detection |
+
+**A 98% score means hardening recipes are well-applied — not that the system is unhackable.** Defense in depth requires complementary layers:
+
+- **Layer 1** ✅ Configuration Hardening *(this tool)*
+- **Layer 2** ➕ Integrity Detection *(AIDE, IMA, chkrootkit)*
+- **Layer 3** ➕ Behavioral Monitoring *(auditd, EDR)*
+
+Configuration is the foundation. The other layers detect what hardening cannot prevent.
 
 ---
 
@@ -120,7 +142,7 @@ sudo bash noid-privacy-linux.sh --json
 ```
 $ sudo bash noid-privacy-linux.sh --ai
 
-  NoID Privacy for Linux v3.5.0 — Privacy & Security Audit for Linux Desktops
+  NoID Privacy for Linux v3.6.0 — Hardening Posture Audit for Linux Desktops
   YYYY-MM-DD HH:MM:SS | mydesktop | 6.19.x-200.fc43.x86_64
   Arch: x86_64 | Distro: Fedora Linux 43 (Workstation Edition)
   Checks: 390+ across 42 sections
@@ -142,7 +164,14 @@ $ sudo bash noid-privacy-linux.sh --ai
 
 ━━━ SUMMARY ━━━
   Total checks:      460 (298 pass, 0 fail, 5 warn, 157 info)
-  SECURITY & PRIVACY SCORE:    98% 🏰 FORTRESS
+
+  Hardening posture is your defense foundation — the layer
+  attackers must defeat first. Complement with:
+    ✓ AIDE / IMA   — file & kernel integrity
+    ✓ auditd       — behavioral monitoring
+    ✓ chkrootkit   — known-malware scanner
+
+  HARDENING POSTURE SCORE:    98% 🏰 FULLY HARDENED
 
 Score formula: PASS×100 / (PASS + FAIL×2 + WARN)
 Exit codes:    0 = clean · 1 = FAIL present · 2 = WARN-only · 130/143 = interrupted
@@ -214,9 +243,9 @@ sudo bash noid-privacy-linux.sh --ai
 Use NoID Privacy for Linux in your CI/CD pipeline to enforce privacy & security baselines:
 
 ```yaml
-- name: Privacy & Security Audit
+- name: Hardening Posture Audit
   # SECURITY: Pin to specific version, never @main (supply chain risk)
-  uses: NexusOne23/noid-privacy-linux@v3.5.0
+  uses: NexusOne23/noid-privacy-linux@v3.6.0
   id: audit
   with:
     min-score: '70'   # Fail if score < 70%
@@ -236,7 +265,7 @@ Use NoID Privacy for Linux in your CI/CD pipeline to enforce privacy & security 
 
 | Output | Description |
 |--------|-------------|
-| `score` | Privacy & security score (0-100) |
+| `score` | Hardening posture score (0-100) |
 | `total` | Total checks performed |
 | `pass` / `fail` / `warn` / `info` | Check counts by severity |
 | `json` | Full JSON output |
@@ -251,7 +280,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4.2.2
-      - uses: NexusOne23/noid-privacy-linux@v3.5.0  # Pin to version, not @main
+      - uses: NexusOne23/noid-privacy-linux@v3.6.0  # Pin to version, not @main
         with:
           min-score: '70'
 ```

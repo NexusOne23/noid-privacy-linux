@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 ###############################################################################
-#  NoID Privacy for Linux v3.5.0 — Privacy & Security Audit
+#  NoID Privacy for Linux v3.6.0 — Hardening Posture Audit
 #  Copyright (C) 2026 Fabio Mantegna (NexusOne23)
 #
 #  This program is free software: you can redistribute it and/or modify
@@ -21,7 +21,7 @@
 #  390+ checks across 42 sections
 #  Requires: root
 ###############################################################################
-NOID_PRIVACY_VERSION="3.5.0"
+NOID_PRIVACY_VERSION="3.6.0"
 set +e          # Don't exit on errors — we handle them ourselves
 
 # Bash 4+ required for associative arrays and other features
@@ -33,6 +33,8 @@ fi
 NO_COLOR=false
 AI_MODE=false
 JSON_MODE=false
+VERBOSE=false
+COMPLIANCE_MODE=""    # v3.9: cis-l1 / cis-l2 / stig — emits coverage report
 declare -a SKIP_SECTIONS=()
 declare -a FAIL_MSGS=()
 declare -a WARN_MSGS=()
@@ -44,15 +46,22 @@ show_help() {
   cat <<EOF
 Usage: noid-privacy-linux.sh [OPTIONS]
 
-🛡️  NoID Privacy for Linux v${NOID_PRIVACY_VERSION} — Privacy & Security Audit
+🛡️  NoID Privacy for Linux v${NOID_PRIVACY_VERSION} — Hardening Posture Audit
 
 Options:
   --help          Show this help message
   --no-color      Disable color output (for logs/pipes)
   --ai            Generate AI assistant prompt with findings at the end
   --json          Output results as JSON only (no normal output)
+  --verbose, -v   Show every individual PASS (boot params, sysctl).
+                  Default: aggregate PASSes into summaries for cleaner output.
+                  --json always includes full detail regardless of this flag.
   --offline       Skip all sections that make network requests
                   (equivalent to --skip vpn --skip interfaces --skip netleaks)
+  --cis-l1        Append CIS RHEL 9 Level 1 coverage report at end.
+                  See Docs/CIS_RHEL9_MAPPING.md for the mapping table.
+  --cis-l2        Append CIS RHEL 9 Level 2 coverage report at end.
+  --stig          Append DISA STIG coverage report at end.
   --skip SECTION  Skip a section (can be repeated)
                   Sections (in display order): kernel, selinux, firewall,
                   nftables, vpn, sysctl, services, ports, ssh, audit,
@@ -66,12 +75,20 @@ Options:
                   netleaks (network-side leak tests in vpn section),
                   summary (final results block)
 
+Environment variables (v3.7+ opt-in detection-depth features):
+  NOID_AIDE_LIVE=1            Run actual aide --check (slow: up to 5min)
+  NOID_RPM_BASELINE_INIT=1    Capture current rpm -V state as baseline
+  NOID_RPM_BASELINE_UPDATE=1  Update existing baseline with current state
+
 Examples:
   sudo bash noid-privacy-linux.sh
   sudo bash noid-privacy-linux.sh --no-color > report.txt
   sudo bash noid-privacy-linux.sh --skip rootkit --skip containers
   sudo bash noid-privacy-linux.sh --ai
   sudo bash noid-privacy-linux.sh --json | jq .
+  sudo NOID_AIDE_LIVE=1 bash noid-privacy-linux.sh --skip rootkit
+  sudo NOID_RPM_BASELINE_INIT=1 bash noid-privacy-linux.sh
+  sudo bash noid-privacy-linux.sh --verbose            # full PASS detail
 
 390+ checks. Requires root. Tested on Fedora 43, RHEL 9, Debian 12, Ubuntu 24.04.
 EOF
@@ -84,6 +101,10 @@ while [[ $# -gt 0 ]]; do
     --no-color) NO_COLOR=true; shift ;;
     --ai) AI_MODE=true; shift ;;
     --json) JSON_MODE=true; NO_COLOR=true; shift ;;
+    --verbose|-v) VERBOSE=true; shift ;;
+    --cis-l1) COMPLIANCE_MODE="cis-l1"; shift ;;
+    --cis-l2) COMPLIANCE_MODE="cis-l2"; shift ;;
+    --stig) COMPLIANCE_MODE="stig"; shift ;;
     --skip) [[ -z "${2:-}" ]] && { echo "Error: --skip requires a section name"; exit 1; }; SKIP_SECTIONS+=("$2"); shift 2 ;;
     --offline) SKIP_SECTIONS+=("vpn" "interfaces" "netleaks"); shift ;;
     *) echo "Unknown option: $1 (try --help)"; exit 1 ;;
@@ -94,7 +115,7 @@ done
 # (eliminates the entrypoint.sh double-run problem, F-273)
 
 should_skip() {
-  local section="$1"
+  local section="$1" s
   for s in "${SKIP_SECTIONS[@]}"; do
     [[ "$s" == "$section" ]] && return 0
   done
@@ -157,7 +178,10 @@ _json_escape() {
   printf '%s' "$s"
 }
 
-pass() {
+# Severity emitters — underscore-prefix prevents name collision with CLI tools
+# (e.g. `pass` from password-store, `info` from texinfo) when scanning $PATH
+# via `command -v`. v3.6 refactor of pass()/fail()/warn()/info().
+_emit_pass() {
   ((PASS++))
   if $JSON_MODE; then
     JSON_FINDINGS+=("{\"severity\":\"PASS\",\"section\":\"$(_json_escape "$CURRENT_SECTION")\",\"section_id\":\"$(_json_escape "${CURRENT_SECTION_ID:-unknown}")\",\"message\":\"$(_json_escape "$1")\"}")
@@ -165,7 +189,7 @@ pass() {
     printf "  ${GRN}✅ PASS${RST}  %s\n" "$1"
   fi
 }
-fail() {
+_emit_fail() {
   ((FAIL++))
   FAIL_MSGS+=("$1")
   if $JSON_MODE; then
@@ -174,7 +198,7 @@ fail() {
     printf "  ${RED}🔴 FAIL${RST}  %s\n" "$1"
   fi
 }
-warn() {
+_emit_warn() {
   ((WARN++))
   WARN_MSGS+=("$1")
   if $JSON_MODE; then
@@ -183,13 +207,43 @@ warn() {
     printf "  ${YLW}⚠️  WARN${RST}  %s\n" "$1"
   fi
 }
-info() {
+_emit_info() {
   ((INFO++))
   if $JSON_MODE; then
     JSON_FINDINGS+=("{\"severity\":\"INFO\",\"section\":\"$(_json_escape "$CURRENT_SECTION")\",\"section_id\":\"$(_json_escape "${CURRENT_SECTION_ID:-unknown}")\",\"message\":\"$(_json_escape "$1")\"}")
   else
     printf "  ${CYN}ℹ️  INFO${RST}  %s\n" "$1"
   fi
+}
+
+# PASS-aggregation helpers — collapse N individual PASSes into one summary
+# unless --verbose or --json (JSON consumers always need detail).
+# Score-impact preserved: each aggregated item still increments PASS counter.
+_AGG_LABEL=""
+declare -a _AGG_ITEMS=()
+_emit_pass_agg_start() {
+  _AGG_LABEL="$1"
+  _AGG_ITEMS=()
+}
+_emit_pass_agg() {
+  if $VERBOSE || $JSON_MODE; then
+    _emit_pass "$_AGG_LABEL: $1"
+  else
+    ((PASS++))                # increment counter, defer message until _end
+    _AGG_ITEMS+=("$1")
+  fi
+}
+_emit_pass_agg_end() {
+  local _total="$1" _suffix="${2:-set}"
+  if ! $VERBOSE && ! $JSON_MODE; then
+    local _count="${#_AGG_ITEMS[@]}"
+    if [[ "$_count" -gt 0 ]]; then
+      printf "  ${GRN}✅ PASS${RST}  %s: %d/%d %s\n" \
+        "$_AGG_LABEL" "$_count" "$_total" "$_suffix"
+    fi
+  fi
+  _AGG_ITEMS=()
+  _AGG_LABEL=""
 }
 header() {
   # F-010: Track stable section ID alongside human-readable name. The
@@ -215,6 +269,51 @@ txt() { $JSON_MODE || printf "%s\n" "$1"; }
 require_cmd() {
   command -v "$1" &>/dev/null
 }
+
+# --- Capability Detection Layer (v3.8) ---
+# Eliminates the bug class where API-version differences across distros
+# silently break checks. Section code uses _fw_*, _systemd_* helpers
+# instead of raw command invocations.
+#
+# Detected capabilities populate $_CAPS[]. Call _detect_capabilities once
+# at startup; helpers below consult the array.
+declare -A _CAPS=()
+_detect_capabilities() {
+  # firewalld: --get-policies replaced --list-policies in 0.9+
+  if command -v firewall-cmd &>/dev/null; then
+    if firewall-cmd --get-policies &>/dev/null; then  # CAP-LINT-EXEMPT
+      _CAPS[firewalld_policies]="--get-policies"
+    elif firewall-cmd --list-policies &>/dev/null; then  # CAP-LINT-EXEMPT
+      _CAPS[firewalld_policies]="--list-policies"
+    else
+      _CAPS[firewalld_policies]=""
+    fi
+    _CAPS[firewalld_version]=$(firewall-cmd --version 2>/dev/null | head -1)
+  fi
+  # systemctl: `is-masked` verb does NOT exist (Bug Pattern #4).
+  # Always use is-enabled and parse output.
+  _CAPS[systemd_masked_method]="is-enabled-output"
+  if command -v systemctl &>/dev/null; then
+    _CAPS[systemd_version]=$(systemctl --version 2>/dev/null \
+      | head -1 | grep -oP 'systemd \K[0-9]+')
+  fi
+  # nftables version (informational)
+  if command -v nft &>/dev/null; then
+    _CAPS[nft_version]=$(nft --version 2>/dev/null \
+      | grep -oP 'v\K[0-9.]+' | head -1)
+  fi
+}
+# Helper: list firewalld policies via the detected flag (or empty if N/A)
+_fw_get_policies() {
+  local _flag="${_CAPS[firewalld_policies]:-}"
+  [[ -z "$_flag" ]] && return 1
+  firewall-cmd "$_flag" 2>/dev/null
+}
+# Note: a functionally identical _service_masked_any() helper already exists
+# in the script body (around line 800) — kept there for backwards-compat with
+# existing callers; capability layer documents the method via _CAPS.
+# Run capability detection once at startup
+_detect_capabilities
 
 # --- SSH config helper: read effective value from sshd_config + includes ---
 sshd_cfg_val() {
@@ -702,9 +801,12 @@ _service_active_any() {
 }
 
 _service_masked_any() {
+  # systemctl has no `is-masked` verb (it's only valid in unit-internal API).
+  # Detect masked status by parsing `is-enabled` output, which returns the
+  # literal string "masked" when the unit is masked.
   local s
   for s in "$@"; do
-    systemctl is-masked "$s" &>/dev/null && return 0
+    [[ "$(systemctl is-enabled "$s" 2>/dev/null)" == "masked" ]] && return 0
   done
   return 1
 }
@@ -816,12 +918,13 @@ PRIMARY_IFACE="${PRIMARY_IFACE:-eth0}"
 
 # F-070: when VPN is up, lowest-metric default gateway is the VPN gateway,
 # not the physical LAN gateway. Find physical LAN gateway by filtering routes
-# whose interface matches a VPN pattern.
+# whose interface matches a VPN pattern. Pass $_VPN_IFACE_REGEX into awk to
+# stay in sync with the global definition (Bug Pattern #5: hand-written subset).
 ACTUAL_GW=$(ip route show default 2>/dev/null | grep -oP 'via \K\S+' | head -1)
-LAN_GW=$(ip route show default 2>/dev/null | awk '{
+LAN_GW=$(ip route show default 2>/dev/null | awk -v vpn_re="$_VPN_IFACE_REGEX" '{
   for (i=1; i<=NF; i++) if ($i=="via") via=$(i+1)
   for (i=1; i<=NF; i++) if ($i=="dev") dev=$(i+1)
-  if (dev !~ /^(tun|tap|wg|proton|pvpn|tailscale|zt|nebula|mullvad|nordlynx)/) print via
+  if (dev !~ vpn_re) print via
 }' | head -1)
 LAN_GW="${LAN_GW:-$ACTUAL_GW}"
 
@@ -856,7 +959,7 @@ get_killswitch_tables() {
 if ! $JSON_MODE; then
 printf "${BOLD}${WHT}\n"
 echo "╔══════════════════════════════════════════════════════════════════════╗"
-echo "║  🛡️ NoID Privacy for Linux v${NOID_PRIVACY_VERSION} — Privacy & Security Audit"
+echo "║  🛡️ NoID Privacy for Linux v${NOID_PRIVACY_VERSION} — Hardening Posture Audit"
 echo "║  $NOW | $HOSTNAME | $KERNEL"
 echo "║  Arch: $ARCH | Distro: $DISTRO_PRETTY"
 echo "║  Checks: 390+ across $TOTAL_SECTIONS sections"
@@ -879,43 +982,43 @@ check_kernel() {
   header "01" "KERNEL & BOOT INTEGRITY"
 ###############################################################################
 
-info "Kernel: $KERNEL"
+_emit_info "Kernel: $KERNEL"
 
 # Secure Boot — only relevant on UEFI systems (F-018: legacy BIOS misclassified)
 if [[ ! -d /sys/firmware/efi ]]; then
-  info "Secure Boot: N/A (legacy BIOS, no UEFI firmware)"
+  _emit_info "Secure Boot: N/A (legacy BIOS, no UEFI firmware)"
 elif require_cmd mokutil; then
   if mokutil --sb-state 2>/dev/null | grep -q "enabled"; then
-    pass "Secure Boot: ENABLED"
+    _emit_pass "Secure Boot: ENABLED"
   else
-    fail "Secure Boot: DISABLED"
+    _emit_fail "Secure Boot: DISABLED"
   fi
 elif [[ -d /sys/firmware/efi/efivars ]]; then
   # Fallback: read EFI variable directly when mokutil missing
   _SB_VAR=$(find /sys/firmware/efi/efivars -name "SecureBoot-*" 2>/dev/null | head -1)
   if [[ -n "$_SB_VAR" ]] && [[ "$(od -An -t u1 -N1 -j4 "$_SB_VAR" 2>/dev/null | tr -d ' ')" == "1" ]]; then
-    pass "Secure Boot: ENABLED (via efivars)"
+    _emit_pass "Secure Boot: ENABLED (via efivars)"
   else
-    info "Secure Boot: cannot determine without mokutil"
+    _emit_info "Secure Boot: cannot determine without mokutil"
   fi
 else
-  info "Secure Boot: cannot determine (mokutil missing, efivars unreadable)"
+  _emit_info "Secure Boot: cannot determine (mokutil missing, efivars unreadable)"
 fi
 
 # Kernel Lockdown
 if [[ -f /sys/kernel/security/lockdown ]]; then
   LOCKDOWN=$(grep -oP '\[\K[^\]]+' /sys/kernel/security/lockdown 2>/dev/null)
   if [[ -z "$LOCKDOWN" ]]; then
-    warn "Kernel Lockdown: could not parse status"
+    _emit_warn "Kernel Lockdown: could not parse status"
   elif [[ "$LOCKDOWN" == "none" ]]; then
-    warn "Kernel Lockdown: none (despite Secure Boot)"
+    _emit_warn "Kernel Lockdown: none (despite Secure Boot)"
   else
-    pass "Kernel Lockdown: $LOCKDOWN"
+    _emit_pass "Kernel Lockdown: $LOCKDOWN"
   fi
 else
   # F-019: not all kernels are built with CONFIG_SECURITY_LOCKDOWN_LSM —
   # absence is informational, not a hardening regression.
-  info "Kernel Lockdown: not available (CONFIG_SECURITY_LOCKDOWN_LSM not built)"
+  _emit_info "Kernel Lockdown: not available (CONFIG_SECURITY_LOCKDOWN_LSM not built)"
 fi
 
 # Kernel Taint — F-021: decode all 19 bits per Documentation/admin-guide/tainted-kernels.rst
@@ -923,7 +1026,7 @@ fi
 # (legitimate use), all others (DIE/FORCED_MODULE/OVERRIDDEN/WARNING/MACHINE_CHECK/etc) = warn
 TAINT=$(< /proc/sys/kernel/tainted)
 if [[ "$TAINT" -eq 0 ]]; then
-  pass "Kernel Taint: 0 (clean)"
+  _emit_pass "Kernel Taint: 0 (clean)"
 else
   declare -A _TAINT_FLAGS=(
     [1]="PROPRIETARY"      [2]="FORCED_MODULE"      [4]="UNSAFE_SMP"
@@ -949,9 +1052,9 @@ else
   done
   _decoded="${_decoded%+}"
   if $_all_benign; then
-    info "Kernel Taint: $TAINT ($_decoded — known-benign flags)"
+    _emit_info "Kernel Taint: $TAINT ($_decoded — known-benign flags)"
   else
-    warn "Kernel Taint: $TAINT ($_decoded — review flags)"
+    _emit_warn "Kernel Taint: $TAINT ($_decoded — review flags)"
   fi
 fi
 
@@ -961,24 +1064,27 @@ fi
 CMDLINE=$(< /proc/cmdline)
 for PARAM in "noapic" "acpi=off" "selinux=0" "enforcing=0" "audit=0"; do
   if echo "$CMDLINE" | grep -qw "$PARAM"; then
-    fail "Insecure boot parameter: $PARAM"
+    _emit_fail "Insecure boot parameter: $PARAM"
   fi
 done
 if echo "$CMDLINE" | grep -qw "nomodeset"; then
-  info "Boot parameter: nomodeset (graphics troubleshooting — not security-relevant)"
+  _emit_info "Boot parameter: nomodeset (graphics troubleshooting — not security-relevant)"
 fi
 
 # Secure boot parameters — F-024: accept stronger variants ("force" instead of "on")
+# v3.6: aggregated PASSes (use --verbose for per-param detail)
+_emit_pass_agg_start "Boot hardening"
 for PARAM in "init_on_alloc=1" "init_on_free=1" "slab_nomerge" "pti=on" "vsyscall=none" "debugfs=off" "page_alloc.shuffle=1" "randomize_kstack_offset=on"; do
   # Match the param literally OR (for pti) accept the stronger pti=force variant
   if echo "$CMDLINE" | grep -qw "$PARAM"; then
-    pass "Boot hardening: $PARAM"
+    _emit_pass_agg "$PARAM"
   elif [[ "$PARAM" == "pti=on" ]] && echo "$CMDLINE" | grep -qw "pti=force"; then
-    pass "Boot hardening: pti=force (stronger than pti=on)"
+    _emit_pass_agg "pti=force (stronger than pti=on)"
   else
-    warn "Boot hardening missing: $PARAM"
+    _emit_warn "Boot hardening missing: $PARAM"
   fi
 done
+_emit_pass_agg_end 8 "params set"
 
 # F-026: spec_store_bypass_disable=on is only required on CPUs vulnerable to
 # Spectre v4. Modern Intel (Alder Lake+) and AMD Zen3+ have hardware mitigation
@@ -986,37 +1092,37 @@ done
 PARAM="spec_store_bypass_disable=on"
 _SSB_STATE=$(cat /sys/devices/system/cpu/vulnerabilities/spec_store_bypass 2>/dev/null)
 if echo "$CMDLINE" | grep -qw "$PARAM"; then
-  pass "Boot security param: $PARAM"
+  _emit_pass "Boot security param: $PARAM"
 elif [[ "$_SSB_STATE" == "Not affected" ]]; then
-  info "Boot security param '$PARAM' not set — CPU not affected by Spectre v4 (HW mitigation)"
+  _emit_info "Boot security param '$PARAM' not set — CPU not affected by Spectre v4 (HW mitigation)"
 elif [[ "$_SSB_STATE" =~ Mitigation ]]; then
-  info "Boot security param '$PARAM' not set — CPU already mitigated ($_SSB_STATE)"
+  _emit_info "Boot security param '$PARAM' not set — CPU already mitigated ($_SSB_STATE)"
 else
-  warn "Boot security param missing: $PARAM (CPU state: ${_SSB_STATE:-unknown})"
+  _emit_warn "Boot security param missing: $PARAM (CPU state: ${_SSB_STATE:-unknown})"
 fi
 # Optional params (can break NVIDIA/hardware on desktop systems)
 for PARAM in "iommu=force" "lockdown=confidentiality"; do
   if echo "$CMDLINE" | grep -qw "$PARAM"; then
-    pass "Boot security param: $PARAM"
+    _emit_pass "Boot security param: $PARAM"
   else
-    info "Boot security param not set: $PARAM (optional — may break NVIDIA/hardware)"
+    _emit_info "Boot security param not set: $PARAM (optional — may break NVIDIA/hardware)"
   fi
 done
 
 # LUKS
 if lsblk -o TYPE 2>/dev/null | grep -q crypt; then
-  pass "LUKS encryption active"
+  _emit_pass "LUKS encryption active"
   # F-027: -r (raw) drops tree-art prefix (└─ characters from interactive lsblk)
   LUKS_DEVS=$(lsblk -rno NAME,TYPE 2>/dev/null | awk '$2=="crypt" {print $1}' | tr '\n' ' ')
-  info "LUKS devices: ${LUKS_DEVS% }"
+  _emit_info "LUKS devices: ${LUKS_DEVS% }"
 else
-  fail "No LUKS encryption detected"
+  _emit_fail "No LUKS encryption detected"
 fi
 
 # Boot Performance
 if require_cmd systemd-analyze; then
   BOOT_TIME=$(systemd-analyze 2>/dev/null | head -1)
-  info "Boot: $BOOT_TIME"
+  _emit_info "Boot: $BOOT_TIME"
 
   # Top 5 slowest boot services
   sub_header "Top 5 slowest boot services"
@@ -1030,33 +1136,44 @@ fi
 # GRUB Password — F-031: cross-distro detection (Fedora/RHEL: /boot/grub2/,
 # Debian/Ubuntu/Arch: /boot/grub/) plus direct grub.cfg content scan as
 # authoritative fallback (catches all generation paths).
+# F-031b: exclude Fedora's default /etc/grub.d/01_users template which contains
+# `password_pbkdf2 root ${GRUB2_PASSWORD}` as a placeholder — the variable is
+# only populated when /boot/grub2/user.cfg exists with a real GRUB2_PASSWORD=
+# entry. Same exclusion for generated grub.cfg (the conditional block embeds
+# the literal placeholder when user.cfg is missing).
 _GRUB_CFG=$(_grub_main_cfg)
 if [[ -n "$_GRUB_CFG" ]]; then
   _grub_pwd_found=false
-  # 1. user.cfg (Fedora's grub-setpassword convention)
+  # 1. user.cfg with non-empty GRUB2_PASSWORD= (authoritative for Fedora/RHEL)
   for _gucfg in /boot/grub2/user.cfg /boot/grub/user.cfg; do
-    [[ -f "$_gucfg" ]] && _grub_pwd_found=true
+    if [[ -f "$_gucfg" ]] && grep -qE '^\s*GRUB2_PASSWORD=\S' "$_gucfg" 2>/dev/null; then
+      _grub_pwd_found=true
+    fi
   done
   # 2. grub.d snippets (Debian convention via 40_password.conf or similar)
+  #    Exclude lines referencing ${GRUB2_PASSWORD} variable — those are templates.
   if ! $_grub_pwd_found; then
-    if grep -rqE '^\s*(password_pbkdf2|password)\s+' /etc/grub.d/ 2>/dev/null; then
+    if grep -rE '^\s*(password_pbkdf2|password)\s+' /etc/grub.d/ 2>/dev/null \
+       | grep -vqE '\$\{?GRUB2_PASSWORD\}?'; then
       _grub_pwd_found=true
     fi
   fi
   # 3. Authoritative: scan generated grub.cfg directly — works on any distro
   #    regardless of how the password was inserted (Anaconda, debconf, manual)
+  #    Same template-exclusion as pfad 2.
   if ! $_grub_pwd_found; then
-    if grep -qE '^\s*(password_pbkdf2|password)\s+' "$_GRUB_CFG" 2>/dev/null; then
+    if grep -E '^\s*(password_pbkdf2|password)\s+' "$_GRUB_CFG" 2>/dev/null \
+       | grep -vqE '\$\{?GRUB2_PASSWORD\}?'; then
       _grub_pwd_found=true
     fi
   fi
   if $_grub_pwd_found; then
-    pass "GRUB password set"
+    _emit_pass "GRUB password set"
   else
     if lsblk -o TYPE 2>/dev/null | grep -q crypt; then
-      info "GRUB no password (LUKS encryption protects)"
+      _emit_info "GRUB no password (LUKS encryption protects)"
     else
-      warn "GRUB no password (physical access = root)"
+      _emit_warn "GRUB no password (physical access = root)"
     fi
   fi
 fi
@@ -1079,9 +1196,9 @@ if [[ "${#_kernel_files[@]}" -gt 0 ]]; then
 fi
 if [[ -n "$LATEST_KERNEL" ]]; then
   if [[ "$KERNEL" == "$LATEST_KERNEL" ]]; then
-    pass "Running latest installed kernel ($KERNEL)"
+    _emit_pass "Running latest installed kernel ($KERNEL)"
   else
-    warn "Running kernel $KERNEL but $LATEST_KERNEL is installed — reboot recommended"
+    _emit_warn "Running kernel $KERNEL but $LATEST_KERNEL is installed — reboot recommended"
   fi
 fi
 
@@ -1106,11 +1223,11 @@ header "02" "SELINUX & MAC"
 
 SE_STATUS=$(getenforce)
 if [[ "$SE_STATUS" == "Enforcing" ]]; then
-  pass "SELinux: Enforcing"
+  _emit_pass "SELinux: Enforcing"
 elif [[ "$SE_STATUS" == "Permissive" ]]; then
-  fail "SELinux: Permissive (logging only, not blocking!)"
+  _emit_fail "SELinux: Permissive (logging only, not blocking!)"
 else
-  fail "SELinux: Disabled"
+  _emit_fail "SELinux: Disabled"
 fi
 
 # SELinux Booleans (dangerous ones)
@@ -1134,9 +1251,9 @@ if require_cmd getsebool; then
     VAL=$(getsebool "$BOOL" 2>/dev/null | awk '{print $3}' || echo "n/a")
     if [[ "$VAL" == "on" ]]; then
       if [[ "$BOOL" == "allow_execmod" || "$BOOL" == "allow_execstack" ]] && lsmod | grep -q nvidia; then
-        info "SELinux bool active: $BOOL = on (NVIDIA dependency)"
+        _emit_info "SELinux bool active: $BOOL = on (NVIDIA dependency)"
       else
-        warn "SELinux bool active: $BOOL = on"
+        _emit_warn "SELinux bool active: $BOOL = on"
       fi
     fi
   done
@@ -1144,12 +1261,12 @@ if require_cmd getsebool; then
   if _service_active_any nfs-server nfsd nfs-kernel-server; then
     for BOOL in nfs_export_all_rw nfs_export_all_ro; do
       VAL=$(getsebool "$BOOL" 2>/dev/null | awk '{print $3}' || echo "n/a")
-      [[ "$VAL" == "on" ]] && warn "SELinux bool active: $BOOL = on (NFS server running)"
+      [[ "$VAL" == "on" ]] && _emit_warn "SELinux bool active: $BOOL = on (NFS server running)"
     done
   fi
   if _service_active_any smb smbd samba; then
     VAL=$(getsebool samba_enable_home_dirs 2>/dev/null | awk '{print $3}' || echo "n/a")
-    [[ "$VAL" == "on" ]] && warn "SELinux bool active: samba_enable_home_dirs = on (Samba shares /home)"
+    [[ "$VAL" == "on" ]] && _emit_warn "SELinux bool active: samba_enable_home_dirs = on (Samba shares /home)"
   fi
 fi
 
@@ -1171,12 +1288,12 @@ if require_cmd ausearch; then
     _SE_UNEXPECTED=${_SE_UNEXPECTED//[^0-9]/}
     _SE_UNEXPECTED=${_SE_UNEXPECTED:-0}
     if [[ "$_SE_UNEXPECTED" -eq 0 ]]; then
-      info "SELinux: $SE_DENIALS AVC denials (recent) — aide/usbguard/logind only (MAC working correctly)"
+      _emit_info "SELinux: $SE_DENIALS AVC denials (recent) — aide/usbguard/logind only (MAC working correctly)"
     else
-      warn "SELinux: $SE_DENIALS AVC denials ($_SE_UNEXPECTED from unexpected processes)"
+      _emit_warn "SELinux: $SE_DENIALS AVC denials ($_SE_UNEXPECTED from unexpected processes)"
     fi
   else
-    pass "SELinux: 0 AVC denials (recent)"
+    _emit_pass "SELinux: 0 AVC denials (recent)"
   fi
 fi
 
@@ -1193,20 +1310,20 @@ elif $HAS_APPARMOR; then
   AA_UNCONFINED=$(echo "$AA_STATUS_OUT" | grep -oP '^\s*\K\d+(?=\s+processes are unconfined)' | head -1 || echo "0")
   AA_UNCONFINED=${AA_UNCONFINED:-0}
   if [[ "$AA_ENFORCED" -gt 0 ]]; then
-    pass "AppArmor: $AA_ENFORCED profiles enforcing, $AA_COMPLAIN complaining"
+    _emit_pass "AppArmor: $AA_ENFORCED profiles enforcing, $AA_COMPLAIN complaining"
   else
-    warn "AppArmor: no enforcing profiles"
+    _emit_warn "AppArmor: no enforcing profiles"
   fi
   if [[ "$AA_UNCONFINED" -gt 0 ]]; then
-    info "AppArmor: $AA_UNCONFINED unconfined processes (no profile attached)"
+    _emit_info "AppArmor: $AA_UNCONFINED unconfined processes (no profile attached)"
   fi
 
 else
   header "02" "MANDATORY ACCESS CONTROL"
   if require_cmd getenforce && [[ "$(getenforce 2>/dev/null)" == "Disabled" ]]; then
-    fail "SELinux: Disabled (getenforce present but SELinux is off)"
+    _emit_fail "SELinux: Disabled (getenforce present but SELinux is off)"
   else
-    warn "No MAC system (SELinux/AppArmor) detected"
+    _emit_warn "No MAC system (SELinux/AppArmor) detected"
   fi
 fi
 }
@@ -1218,16 +1335,21 @@ check_firewall() {
 ###############################################################################
 
 if require_cmd firewall-cmd && systemctl is-active firewalld &>/dev/null; then
-  pass "firewalld: active"
+  _emit_pass "firewalld: active"
 
-  # Check zones (permanent config only — runtime overrides are not checked)
+  # Check zones — F-046b: combine permanent AND runtime interface assignments.
+  # NM/libvirt assign interfaces dynamically at runtime, so permanent-only
+  # iteration misses live attached zones (libvirt→virbr0, NM-managed VPN, etc.)
   _DEFAULT_ZONE=$(firewall-cmd --get-default-zone 2>/dev/null || echo "")
   for ZONE in $(firewall-cmd --get-zones 2>/dev/null); do
     TARGET=$(firewall-cmd --zone="$ZONE" --get-target --permanent 2>/dev/null || echo "")
     [[ -z "$TARGET" ]] && continue  # zone doesn't exist
     SERVICES=$(firewall-cmd --zone="$ZONE" --list-services --permanent 2>/dev/null || echo "")
     PORTS=$(firewall-cmd --zone="$ZONE" --list-ports --permanent 2>/dev/null || echo "")
-    IFACES=$(firewall-cmd --zone="$ZONE" --list-interfaces --permanent 2>/dev/null || echo "")
+    _IFACES_PERM=$(firewall-cmd --zone="$ZONE" --list-interfaces --permanent 2>/dev/null || echo "")
+    _IFACES_RUN=$(firewall-cmd --zone="$ZONE" --list-interfaces 2>/dev/null || echo "")
+    IFACES=$(echo "$_IFACES_PERM $_IFACES_RUN" | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' ')
+    IFACES="${IFACES% }"
 
     # Only evaluate zones that are actively in use:
     # - Zones with interfaces explicitly assigned, OR
@@ -1238,9 +1360,12 @@ if require_cmd firewall-cmd && systemctl is-active firewalld &>/dev/null; then
 
     if [[ -n "$IFACES" ]] || $_ZONE_IS_DEFAULT; then
       # Check if all assigned interfaces are VPN/virtual (not physical internet-facing)
+      # F-046d: use the global $_VPN_IFACE_REGEX (covers all VPN families) instead
+      # of the original 4-name subset — Tailscale/ZeroTier/Mullvad zones were
+      # incorrectly classified as physical-exposed.
       _ALL_VPN=true
       for _iface in $IFACES; do
-        if ! echo "$_iface" | grep -qE "^(tun|wg|proton|pvpn|lo)"; then
+        if [[ "$_iface" != "lo" ]] && ! echo "$_iface" | grep -qE "$_VPN_IFACE_REGEX"; then
           _ALL_VPN=false
           break
         fi
@@ -1249,44 +1374,44 @@ if require_cmd firewall-cmd && systemctl is-active firewalld &>/dev/null; then
       if [[ -z "$IFACES" ]] && $_ZONE_IS_DEFAULT; then
         # Default zone applies to all unassigned interfaces — evaluate as exposed
         if [[ "$TARGET" == "DROP" || "$TARGET" == "REJECT" || "$TARGET" == "%%REJECT%%" ]]; then
-          pass "Zone $ZONE (default): target=$TARGET"
+          _emit_pass "Zone $ZONE (default): target=$TARGET"
         else
-          warn "Zone $ZONE (default): target=$TARGET (not DROP/REJECT — applies to unassigned interfaces)"
+          _emit_warn "Zone $ZONE (default): target=$TARGET (not DROP/REJECT — applies to unassigned interfaces)"
         fi
         if [[ -n "$SERVICES" ]]; then
-          warn "Zone $ZONE (default) open services: $SERVICES"
+          _emit_warn "Zone $ZONE (default) open services: $SERVICES"
         fi
         if [[ -n "$PORTS" ]]; then
-          warn "Zone $ZONE (default) open ports: $PORTS"
+          _emit_warn "Zone $ZONE (default) open ports: $PORTS"
         fi
       elif $_ALL_VPN && [[ -n "$IFACES" ]]; then
-        info "Zone $ZONE: target=$TARGET (VPN-only interfaces: $IFACES)"
+        _emit_info "Zone $ZONE: target=$TARGET (VPN-only interfaces: $IFACES)"
       elif [[ "$TARGET" == "DROP" || "$TARGET" == "REJECT" || "$TARGET" == "%%REJECT%%" ]]; then
-        pass "Zone $ZONE: target=$TARGET"
+        _emit_pass "Zone $ZONE: target=$TARGET"
       else
-        warn "Zone $ZONE: target=$TARGET (not DROP/REJECT)"
+        _emit_warn "Zone $ZONE: target=$TARGET (not DROP/REJECT)"
       fi
       if [[ -n "$SERVICES" ]] && ! $_ALL_VPN && [[ -n "$IFACES" ]]; then
-        warn "Zone $ZONE open services: $SERVICES"
+        _emit_warn "Zone $ZONE open services: $SERVICES"
       elif [[ -n "$SERVICES" ]] && [[ -n "$IFACES" ]]; then
-        info "Zone $ZONE services: $SERVICES (VPN-only)"
+        _emit_info "Zone $ZONE services: $SERVICES (VPN-only)"
       fi
       if [[ -n "$PORTS" ]] && ! $_ALL_VPN && [[ -n "$IFACES" ]]; then
-        warn "Zone $ZONE open ports: $PORTS"
+        _emit_warn "Zone $ZONE open ports: $PORTS"
       fi
       if [[ -n "$IFACES" ]]; then
-        info "Zone $ZONE interfaces: $IFACES"
+        _emit_info "Zone $ZONE interfaces: $IFACES"
       fi
     fi
   done
 
   # Default Zone
   DEF_ZONE=$(firewall-cmd --get-default-zone 2>/dev/null || echo "unknown")
-  info "Default zone: $DEF_ZONE"
+  _emit_info "Default zone: $DEF_ZONE"
 
   # Active Zones
   ACTIVE_ZONES=$(firewall-cmd --get-active-zones 2>/dev/null)
-  info "Active zones:"
+  _emit_info "Active zones:"
   if ! $JSON_MODE; then
     while IFS= read -r zline; do
       [[ -n "$zline" ]] && printf "  %s\n" "$zline"
@@ -1297,7 +1422,7 @@ if require_cmd firewall-cmd && systemctl is-active firewalld &>/dev/null; then
   RICH_RULES=$(firewall-cmd --list-rich-rules 2>/dev/null || echo "")
   if [[ -n "$RICH_RULES" ]]; then
     RICH_COUNT=$(echo "$RICH_RULES" | wc -l)
-    info "Rich rules: $RICH_COUNT"
+    _emit_info "Rich rules: $RICH_COUNT"
     if ! $JSON_MODE; then
       while read -r rule; do
         printf "       %s\n" "$rule"
@@ -1308,27 +1433,32 @@ if require_cmd firewall-cmd && systemctl is-active firewalld &>/dev/null; then
   # Forward Ports
   FWD=$(firewall-cmd --list-forward-ports 2>/dev/null || echo "")
   if [[ -n "$FWD" ]]; then
-    warn "Forward ports active: $FWD"
+    _emit_warn "Forward ports active: $FWD"
   fi
 
   # Masquerading
   if firewall-cmd --query-masquerade &>/dev/null; then
-    warn "Masquerading active"
+    _emit_warn "Masquerading active"
   fi
 
   # Firewall Policies (firewalld 0.9+: inter-zone traffic control)
-  FWD_POLICIES=$(firewall-cmd --list-policies 2>/dev/null || true)
+  # v3.8: query via capability layer — automatically uses --get-policies
+  # (0.9+) or falls back to --list-policies (0.8-) based on _CAPS detection.
+  FWD_POLICIES=$(_fw_get_policies || true)
+  # Normalize: --get-policies returns single line space-separated, normalize to
+  # newline-separated so the existing while-read loop works unchanged.
+  FWD_POLICIES=$(echo "$FWD_POLICIES" | tr ' ' '\n' | grep -v '^$' || true)
   if [[ -n "$FWD_POLICIES" ]]; then
     sub_header "Firewall Policies"
     while IFS= read -r policy; do
       [[ -z "$policy" ]] && continue
-      PTARGET=$(firewall-cmd --policy="$policy" --get-target 2>/dev/null || echo "unknown")
+      PTARGET=$(firewall-cmd --policy="$policy" --get-target --permanent 2>/dev/null || echo "unknown")
       if [[ "$PTARGET" == "DROP" || "$PTARGET" == "REJECT" ]]; then
-        pass "Policy '$policy': target=$PTARGET (blocks inter-zone traffic)"
+        _emit_pass "Policy '$policy': target=$PTARGET (blocks inter-zone traffic)"
       elif [[ "$PTARGET" == "CONTINUE" || "$PTARGET" == "ACCEPT" ]]; then
-        info "Policy '$policy': target=$PTARGET"
+        _emit_info "Policy '$policy': target=$PTARGET"
       else
-        info "Policy '$policy': target=$PTARGET"
+        _emit_info "Policy '$policy': target=$PTARGET"
       fi
     done <<< "$FWD_POLICIES"
   fi
@@ -1336,14 +1466,14 @@ elif require_cmd ufw; then
   # F-047: also check default policies and rule count (not just active/inactive)
   UFW_STATUS_VERB=$(ufw status verbose 2>/dev/null)
   if echo "$UFW_STATUS_VERB" | head -1 | grep -qi "active"; then
-    pass "ufw: active"
+    _emit_pass "ufw: active"
     UFW_DEFAULT_IN=$(echo "$UFW_STATUS_VERB" | grep -oP 'Default: \K\S+' | head -1)
     case "$UFW_DEFAULT_IN" in
       deny|reject)
-        pass "ufw: default-incoming policy '$UFW_DEFAULT_IN' (secure)"
+        _emit_pass "ufw: default-incoming policy '$UFW_DEFAULT_IN' (secure)"
         ;;
       allow)
-        fail "ufw: default-incoming policy 'allow' — blocks nothing"
+        _emit_fail "ufw: default-incoming policy 'allow' — blocks nothing"
         ;;
     esac
     # F-bug: previous regex `^[0-9.]+:` matched IP:PORT format which UFW
@@ -1352,11 +1482,11 @@ elif require_cmd ufw; then
     # per rule line in `ufw status verbose` output.
     UFW_RULES=$(echo "$UFW_STATUS_VERB" | grep -cE '\b(ALLOW|DENY|REJECT|LIMIT)\b')
     UFW_RULES=${UFW_RULES:-0}
-    info "ufw: $UFW_RULES configured rules"
+    _emit_info "ufw: $UFW_RULES configured rules"
   else
-    fail "ufw: inactive"
+    _emit_fail "ufw: inactive"
   fi
-  info "Firewall: ufw (firewalld not available)"
+  _emit_info "Firewall: ufw (firewalld not available)"
 elif require_cmd iptables; then
   # F-048: check default policies in addition to rule count.
   IPTABLES_RULES=$(iptables -L -n 2>/dev/null | grep -cvE "^Chain |^target |^$" || true)
@@ -1364,22 +1494,22 @@ elif require_cmd iptables; then
   IPT_INPUT_POLICY=$(iptables -L INPUT -n 2>/dev/null | head -1 | grep -oP 'policy \K\w+')
   IPT_FWD_POLICY=$(iptables -L FORWARD -n 2>/dev/null | head -1 | grep -oP 'policy \K\w+')
   if [[ "$IPT_INPUT_POLICY" == "DROP" || "$IPT_INPUT_POLICY" == "REJECT" ]]; then
-    pass "iptables: INPUT policy '$IPT_INPUT_POLICY' (default-deny)"
+    _emit_pass "iptables: INPUT policy '$IPT_INPUT_POLICY' (default-deny)"
   elif [[ -n "$IPT_INPUT_POLICY" ]]; then
     if [[ "$IPTABLES_RULES" -gt 0 ]]; then
-      info "iptables: INPUT policy '$IPT_INPUT_POLICY' with $IPTABLES_RULES rules (rule-based filter)"
+      _emit_info "iptables: INPUT policy '$IPT_INPUT_POLICY' with $IPTABLES_RULES rules (rule-based filter)"
     else
-      fail "iptables: INPUT policy '$IPT_INPUT_POLICY' and no rules — wide open"
+      _emit_fail "iptables: INPUT policy '$IPT_INPUT_POLICY' and no rules — wide open"
     fi
   fi
   if [[ "$IPT_FWD_POLICY" == "DROP" || "$IPT_FWD_POLICY" == "REJECT" ]]; then
-    pass "iptables: FORWARD policy '$IPT_FWD_POLICY' (default-deny)"
+    _emit_pass "iptables: FORWARD policy '$IPT_FWD_POLICY' (default-deny)"
   elif [[ -n "$IPT_FWD_POLICY" ]]; then
-    info "iptables: FORWARD policy '$IPT_FWD_POLICY'"
+    _emit_info "iptables: FORWARD policy '$IPT_FWD_POLICY'"
   fi
-  info "Firewall: iptables (firewalld not available; $IPTABLES_RULES rules)"
+  _emit_info "Firewall: iptables (firewalld not available; $IPTABLES_RULES rules)"
 else
-  fail "No firewall detected (firewalld/ufw/iptables)"
+  _emit_fail "No firewall detected (firewalld/ufw/iptables)"
 fi
 
 # Firewall Logging
@@ -1387,23 +1517,23 @@ sub_header "Firewall Logging"
 if require_cmd firewall-cmd && systemctl is-active firewalld &>/dev/null; then
   _FW_LOG_DENIED=$(firewall-cmd --get-log-denied 2>/dev/null || echo "off")
   if [[ "$_FW_LOG_DENIED" == "off" ]]; then
-    warn "Firewall logging: denied packets NOT logged (firewall-cmd --get-log-denied=off)"
+    _emit_warn "Firewall logging: denied packets NOT logged (firewall-cmd --get-log-denied=off)"
   else
-    pass "Firewall logging: denied packets logged (mode: $_FW_LOG_DENIED)"
+    _emit_pass "Firewall logging: denied packets logged (mode: $_FW_LOG_DENIED)"
   fi
 elif require_cmd ufw; then
   _UFW_LOG=$(ufw status verbose 2>/dev/null | grep -i "^Logging:" | awk '{print $2}')
   if [[ "${_UFW_LOG,,}" == "off" || -z "$_UFW_LOG" ]]; then
-    warn "UFW logging disabled"
+    _emit_warn "UFW logging disabled"
   else
-    pass "UFW logging: $_UFW_LOG"
+    _emit_pass "UFW logging: $_UFW_LOG"
   fi
 elif require_cmd iptables; then
   _IPT_LOG=$(iptables -L -n 2>/dev/null | grep -c "LOG" || true)
   if [[ "${_IPT_LOG:-0}" -gt 0 ]]; then
-    pass "iptables: $_IPT_LOG LOG rules"
+    _emit_pass "iptables: $_IPT_LOG LOG rules"
   else
-    info "iptables: no LOG rules detected"
+    _emit_info "iptables: no LOG rules detected"
   fi
 fi
 
@@ -1427,31 +1557,31 @@ if require_cmd nft; then
   fi
 
   if systemctl is-active nftables &>/dev/null; then
-    pass "nftables: active (standalone)"
+    _emit_pass "nftables: active (standalone)"
   elif $_NFTABLES_BACKEND; then
-    pass "nftables: active via firewalld backend"
+    _emit_pass "nftables: active via firewalld backend"
   else
-    warn "nftables: inactive"
+    _emit_warn "nftables: inactive"
   fi
 
   if systemctl is-enabled nftables &>/dev/null; then
-    pass "nftables: boot-persistent (standalone)"
+    _emit_pass "nftables: boot-persistent (standalone)"
   elif $_NFTABLES_BACKEND; then
-    pass "nftables: boot-persistent via firewalld"
+    _emit_pass "nftables: boot-persistent via firewalld"
   else
-    warn "nftables: not boot-persistent"
+    _emit_warn "nftables: not boot-persistent"
   fi
 
   # Kill-Switch detection
   KS_TABLES=$(get_killswitch_tables)
   if [[ -n "$KS_TABLES" ]]; then
     KS_COUNT=$(echo "$KS_TABLES" | wc -l)
-    pass "VPN kill-switch detected ($KS_COUNT table(s) dropping on $PRIMARY_IFACE)"
+    _emit_pass "VPN kill-switch detected ($KS_COUNT table(s) dropping on $PRIMARY_IFACE)"
 
     if has_nft_drop_on_phys; then
-      pass "Kill-switch: $PRIMARY_IFACE drop active"
+      _emit_pass "Kill-switch: $PRIMARY_IFACE drop active"
     else
-      fail "Kill-switch: $PRIMARY_IFACE drop MISSING"
+      _emit_fail "Kill-switch: $PRIMARY_IFACE drop MISSING"
     fi
 
     # Duplicate rule check
@@ -1465,9 +1595,9 @@ if require_cmd nft; then
     RULE_COUNT=${RULE_COUNT:-0}
     UNIQUE_RULES=$(echo "$ALL_RULES" | grep "oifname" | sort -u | wc -l)
     if [[ "$RULE_COUNT" -ne "$UNIQUE_RULES" ]]; then
-      info "Kill-switch: $RULE_COUNT rules ($UNIQUE_RULES unique) — duplicates from VPN management"
+      _emit_info "Kill-switch: $RULE_COUNT rules ($UNIQUE_RULES unique) — duplicates from VPN management"
     else
-      pass "Kill-switch: $RULE_COUNT rules (no duplicates)"
+      _emit_pass "Kill-switch: $RULE_COUNT rules (no duplicates)"
     fi
   else
     # Also check for WireGuard/ProtonVPN-style killswitch via ip routing rules
@@ -1484,13 +1614,13 @@ if require_cmd nft; then
       fi
     fi
     if $_IP_RULE_KS; then
-      pass "VPN kill-switch detected via ip routing rules (WireGuard/policy routing)"
+      _emit_pass "VPN kill-switch detected via ip routing rules (WireGuard/policy routing)"
     else
-      warn "No VPN kill-switch found (no nftables drop on $PRIMARY_IFACE, no ip rule killswitch)"
+      _emit_warn "No VPN kill-switch found (no nftables drop on $PRIMARY_IFACE, no ip rule killswitch)"
     fi
   fi
 else
-  info "nftables not installed — skipped"
+  _emit_info "nftables not installed — skipped"
 fi
 
 }
@@ -1508,38 +1638,42 @@ check_vpn() {
 # Try ping first (no third-party logs); fall back to Cloudflare's
 # generate_204 endpoint (less identifiable than detectportal.firefox.com).
 if ping -c1 -W2 1.1.1.1 &>/dev/null; then
-  pass "Internet connectivity: OK (ICMP)"
+  _emit_pass "Internet connectivity: OK (ICMP)"
 elif ping -c1 -W2 9.9.9.9 &>/dev/null; then
-  pass "Internet connectivity: OK (ICMP fallback)"
+  _emit_pass "Internet connectivity: OK (ICMP fallback)"
 elif curl -fsS --max-time 5 http://cp.cloudflare.com/generate_204 &>/dev/null; then
-  pass "Internet connectivity: OK (HTTP)"
+  _emit_pass "Internet connectivity: OK (HTTP)"
 else
-  warn "Internet connectivity: FAIL (ICMP + HTTP timeout)"
+  _emit_warn "Internet connectivity: FAIL (ICMP + HTTP timeout)"
 fi
 
-# VPN Interface
+# VPN Interface — F-061b: use the global $_VPN_IFACE_REGEX so Tailscale,
+# ZeroTier, Mullvad, Nebula, and Nordlynx tunnels are detected like Proton.
 VPN_UP=false
-for IFACE in $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep -E '^(proton|tun|wg|pvpn)'); do
+for IFACE in $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep -E "$_VPN_IFACE_REGEX"); do
   STATE=$(ip link show "$IFACE" 2>/dev/null | grep -oP 'state \K\w+')
   # WireGuard/tun interfaces report UNKNOWN state — that's normal (they have no carrier detection)
-  pass "VPN interface $IFACE: active${STATE:+ (state: $STATE)}"
+  _emit_pass "VPN interface $IFACE: active${STATE:+ (state: $STATE)}"
   VPN_UP=true
 done
-$VPN_UP || warn "No VPN interface active"
+$VPN_UP || _emit_warn "No VPN interface active"
 
-# Default Route
+# Default Route — F-061b: extract iface and check against full VPN regex
+# (anchored), not unanchored substring match which could false-positive on
+# unrelated text containing "tun" or "wg".
 DEF_ROUTE=$(ip route show default 2>/dev/null | head -1)
-if echo "$DEF_ROUTE" | grep -qE "proton|tun|wg|pvpn"; then
-  pass "Default route via VPN: $DEF_ROUTE"
+_DEF_IFACE=$(echo "$DEF_ROUTE" | grep -oP 'dev \K\S+' | head -1)
+if [[ -n "$_DEF_IFACE" ]] && echo "$_DEF_IFACE" | grep -qE "$_VPN_IFACE_REGEX"; then
+  _emit_pass "Default route via VPN: $DEF_ROUTE"
 elif $VPN_UP; then
-  fail "Default route NOT via VPN: $DEF_ROUTE"
+  _emit_fail "Default route NOT via VPN: $DEF_ROUTE"
 else
-  info "Default route: $DEF_ROUTE (no VPN active)"
+  _emit_info "Default route: $DEF_ROUTE (no VPN active)"
 fi
 
 # DNS
 DNS_SERVERS=$(grep nameserver /etc/resolv.conf 2>/dev/null | awk '{print $2}' | tr '\n' ' ')
-info "DNS servers: $DNS_SERVERS"
+_emit_info "DNS servers: $DNS_SERVERS"
 
 # DNS over VPN check
 VPN_DNS=false
@@ -1553,34 +1687,51 @@ while read -r DNS; do
   fi
 done < <(grep nameserver /etc/resolv.conf 2>/dev/null | awk '{print $2}')
 if $VPN_DNS; then
-  pass "DNS via VPN (private/CGNAT range)"
+  _emit_pass "DNS via VPN (private/CGNAT range)"
 elif $STUB_DNS && $VPN_UP; then
   # F-062: stub resolver alone doesn't prove VPN routing — query upstream via
   # resolvectl to verify the actual DNS server falls into a VPN range.
+  # F-062b: also accept global IPv6 DNS servers (e.g. ProtonVPN's
+  # 2a07:b944::2:1) when resolvectl reports them on a VPN interface.
   if require_cmd resolvectl; then
     _UPSTREAM_DNS=$(resolvectl status 2>/dev/null | awk '/Current DNS Server/ {print $4; exit}')
     if [[ -z "$_UPSTREAM_DNS" ]]; then
       _UPSTREAM_DNS=$(resolvectl status 2>/dev/null | grep -A1 "DNS Servers" | tail -1 | awk '{print $1}')
     fi
-    if [[ -n "$_UPSTREAM_DNS" ]] && \
-       [[ "$_UPSTREAM_DNS" =~ ^10\. || \
+    _DNS_VIA_VPN=false
+    # 1. IPv4 private/CGNAT ranges (covers OpenVPN/WireGuard internal nets)
+    if [[ "$_UPSTREAM_DNS" =~ ^10\. || \
           "$_UPSTREAM_DNS" =~ ^172\.(1[6-9]|2[0-9]|3[01])\. || \
           "$_UPSTREAM_DNS" =~ ^192\.168\. || \
           "$_UPSTREAM_DNS" =~ ^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\. ]]; then
-      pass "DNS via systemd-resolved (upstream $_UPSTREAM_DNS in VPN range)"
+      _DNS_VIA_VPN=true
+    fi
+    # 2. Any address family: check which link owns this DNS — covers global
+    #    IPv6 addresses that are still tunnel-routed (Proton 2a07:b944::2:1)
+    if ! $_DNS_VIA_VPN && [[ -n "$_UPSTREAM_DNS" ]]; then
+      _DNS_LINK=$(resolvectl status 2>/dev/null | awk -v dns="$_UPSTREAM_DNS" '
+        /^Link [0-9]+ \(/ { iface=$3; gsub(/[()]/, "", iface) }
+        ($0 ~ "Current DNS Server: " dns "$") || ($0 ~ "DNS Servers:.*" dns) { print iface; exit }
+      ')
+      if echo "$_DNS_LINK" | grep -qE "$_VPN_IFACE_REGEX"; then
+        _DNS_VIA_VPN=true
+      fi
+    fi
+    if $_DNS_VIA_VPN; then
+      _emit_pass "DNS via systemd-resolved (upstream $_UPSTREAM_DNS — VPN-routed)"
     elif [[ -n "$_UPSTREAM_DNS" ]]; then
-      info "DNS via systemd-resolved (upstream: $_UPSTREAM_DNS — verify it routes via VPN)"
+      _emit_info "DNS via systemd-resolved (upstream: $_UPSTREAM_DNS — verify it routes via VPN)"
     else
-      pass "DNS via systemd-resolved (stub resolver — VPN routes DNS)"
+      _emit_pass "DNS via systemd-resolved (stub resolver — VPN routes DNS)"
     fi
   else
-    pass "DNS via systemd-resolved (stub resolver — VPN routes DNS)"
+    _emit_pass "DNS via systemd-resolved (stub resolver — VPN routes DNS)"
   fi
 else
   if $VPN_UP; then
-    warn "DNS servers not on VPN network (potential DNS leak)"
+    _emit_warn "DNS servers not on VPN network (potential DNS leak)"
   else
-    info "DNS not via VPN (no VPN active)"
+    _emit_info "DNS not via VPN (no VPN active)"
   fi
 fi
 
@@ -1590,45 +1741,45 @@ _DNSSEC_FOUND=false
 if require_cmd resolvectl; then
   _DNSSEC_STATUS=$(resolvectl status 2>/dev/null | grep -oP 'DNSSEC\s*[=:]\s*\K\S+' | head -1)
   if [[ "$_DNSSEC_STATUS" == "yes" ]]; then
-    pass "DNSSEC validation: enabled (systemd-resolved)"
+    _emit_pass "DNSSEC validation: enabled (systemd-resolved)"
     _DNSSEC_FOUND=true
   elif [[ -n "$_DNSSEC_STATUS" ]]; then
-    info "DNSSEC validation: $_DNSSEC_STATUS (systemd-resolved)"
+    _emit_info "DNSSEC validation: $_DNSSEC_STATUS (systemd-resolved)"
     _DNSSEC_FOUND=true
   fi
 fi
 if ! $_DNSSEC_FOUND && systemctl is-active unbound &>/dev/null; then
   if grep -rqE "^\s*module-config:.*validator" /etc/unbound/ 2>/dev/null; then
-    pass "DNSSEC validation: enabled (unbound with validator module)"
+    _emit_pass "DNSSEC validation: enabled (unbound with validator module)"
     _DNSSEC_FOUND=true
   else
-    info "DNSSEC validation: unbound active but validator module not configured"
+    _emit_info "DNSSEC validation: unbound active but validator module not configured"
     _DNSSEC_FOUND=true
   fi
 fi
 if ! $_DNSSEC_FOUND && systemctl is-active dnscrypt-proxy &>/dev/null; then
   if grep -qE "^\s*require_dnssec\s*=\s*true" /etc/dnscrypt-proxy/dnscrypt-proxy.toml 2>/dev/null; then
-    pass "DNSSEC validation: enabled (dnscrypt-proxy require_dnssec)"
+    _emit_pass "DNSSEC validation: enabled (dnscrypt-proxy require_dnssec)"
     _DNSSEC_FOUND=true
   fi
 fi
-$_DNSSEC_FOUND || info "DNSSEC validation: could not determine (no resolvectl/unbound/dnscrypt-proxy)"
+$_DNSSEC_FOUND || _emit_info "DNSSEC validation: could not determine (no resolvectl/unbound/dnscrypt-proxy)"
 
 # DNS Leak Test & External IP (makes network requests — skippable with --skip netleaks)
 if ! should_skip "netleaks"; then
   if require_cmd dig; then
     RESOLVED_IP=$(dig +short +time=5 whoami.akamai.net @ns1-1.akamaitech.net 2>/dev/null || echo "timeout")
     if [[ "$RESOLVED_IP" != "timeout" && -n "$RESOLVED_IP" ]]; then
-      info "DNS leak test (public IP via DNS): $RESOLVED_IP"
+      _emit_info "DNS leak test (public IP via DNS): $RESOLVED_IP"
     fi
   fi
 
   if require_cmd curl; then
     EXT_IP=$(curl -s --max-time 5 ifconfig.me 2>/dev/null || echo "timeout")
     if [[ "$EXT_IP" != "timeout" ]]; then
-      info "Public IP (HTTP): $EXT_IP"
+      _emit_info "Public IP (HTTP): $EXT_IP"
       if [[ "$EXT_IP" =~ ^192\.168\. ]] || [[ "$EXT_IP" =~ ^10\. ]] || [[ "$EXT_IP" =~ ^172\.(1[6-9]|2[0-9]|3[01])\. ]]; then
-        fail "Public IP is private — VPN leak?"
+        _emit_fail "Public IP is private — VPN leak?"
       fi
     fi
   fi
@@ -1649,25 +1800,25 @@ if [[ -f /proc/net/if_inet6 ]]; then
     # that happens to start with "fd" but isn't ULA (very edge but possible).
     [[ "$_v6addr" =~ ^(fe[89ab][0-9a-f]|f[cd][0-9a-f]{2}|ff[0-9a-f]{2}|0{16}) ]] && continue
     # Skip VPN interfaces — their IPv6 is tunnel-internal, not a leak.
-    # F-005 regex updated to match all VPN families (tailscale, zt, nebula, mullvad).
-    echo "$_v6iface" | grep -qE "^(tun|tap|wg|proton|pvpn|tailscale|zt|nebula|mullvad|nordlynx)" && continue
+    # Use the global $_VPN_IFACE_REGEX so new families auto-propagate here.
+    echo "$_v6iface" | grep -qE "$_VPN_IFACE_REGEX" && continue
     ((IPV6_GLOBAL++))
   done < /proc/net/if_inet6
   IPV6_TOTAL=$(wc -l < /proc/net/if_inet6)
   if [[ "$IPV6_GLOBAL" -gt 0 ]]; then
-    warn "IPv6 active ($IPV6_GLOBAL global addresses on physical interfaces, $IPV6_TOTAL total) — leak risk"
+    _emit_warn "IPv6 active ($IPV6_GLOBAL global addresses on physical interfaces, $IPV6_TOTAL total) — leak risk"
   else
     # Remaining addresses may be link-local (fe80), ULA (fd), or loopback (::1)
     IPV6_ULA=$(grep -c '^fd' /proc/net/if_inet6 2>/dev/null || true)
     IPV6_ULA=${IPV6_ULA:-0}
     if [[ "$IPV6_ULA" -gt 0 ]]; then
-      pass "IPv6: disabled/minimal ($IPV6_TOTAL addresses: link-local + $IPV6_ULA ULA)"
+      _emit_pass "IPv6: disabled/minimal ($IPV6_TOTAL addresses: link-local + $IPV6_ULA ULA)"
     else
-      pass "IPv6: disabled/minimal ($IPV6_TOTAL link-local only)"
+      _emit_pass "IPv6: disabled/minimal ($IPV6_TOTAL link-local only)"
     fi
   fi
 else
-  pass "IPv6: completely disabled"
+  _emit_pass "IPv6: completely disabled"
 fi
 
 # LAN Isolation — F-069: extend gateway list with common defaults beyond
@@ -1689,28 +1840,30 @@ for GW in $LAN_GW_LIST; do
   echo "$TESTED_GWS" | grep -qwF "$GW" && continue
   TESTED_GWS="$TESTED_GWS $GW"
   if ! ping -c1 -W1 "$GW" &>/dev/null; then
-    pass "LAN blocked: $GW"
+    _emit_pass "LAN blocked: $GW"
   else
     # Check if this gateway belongs to a VPN interface (e.g. WireGuard killswitch dummy)
     # These are intentionally reachable — they are the VPN's own internal addresses
+    # F-071b: use $_VPN_IFACE_REGEX (covers Tailscale/ZeroTier/Mullvad/etc)
+    # — old 4-name regex misclassified non-Proton VPN gateways as physical LAN.
     _GW_IS_VPN=false
     if require_cmd ip; then
       _GW_IFACE=$(ip route get "$GW" 2>/dev/null | grep -oP 'dev \K\S+' | head -1)
-      if echo "$_GW_IFACE" | grep -qE "^(tun|wg|proton|pvpn)"; then
+      if echo "$_GW_IFACE" | grep -qE "$_VPN_IFACE_REGEX"; then
         _GW_IS_VPN=true
       fi
       # Also check if the GW IP is assigned to a VPN interface itself
       if ip addr show 2>/dev/null | grep -qP "inet\s+${GW//./\\.}/"; then
         _VPN_IFACE_OF_IP=$(ip addr show 2>/dev/null | grep -B3 "inet ${GW//./\\.}/" | grep -oP "^\d+:\s*\K\S+" | head -1)
-        echo "$_VPN_IFACE_OF_IP" | grep -qE "^(tun|wg|proton|pvpn)" && _GW_IS_VPN=true
+        echo "$_VPN_IFACE_OF_IP" | grep -qE "$_VPN_IFACE_REGEX" && _GW_IS_VPN=true
       fi
     fi
     if $_GW_IS_VPN; then
-      pass "LAN gateway $GW: VPN internal address (expected — WireGuard/killswitch interface)"
+      _emit_pass "LAN gateway $GW: VPN internal address (expected — WireGuard/killswitch interface)"
     elif [[ "$GW" == "$ACTUAL_GW" ]]; then
-      warn "LAN gateway reachable: $GW (kill-switch?)"
+      _emit_warn "LAN gateway reachable: $GW (kill-switch?)"
     else
-      warn "LAN reachable: $GW (kill-switch?)"
+      _emit_warn "LAN reachable: $GW (kill-switch?)"
     fi
   fi
 done
@@ -1721,9 +1874,9 @@ done
 PROMISC=$(ip -o link show | grep -i promisc | \
   grep -vE '^[0-9]+: (virbr|docker[0-9]|br-|veth|lxcbr|cni-|podman[0-9]+|tap)' || true)
 if [[ -z "$PROMISC" ]]; then
-  pass "No promiscuous mode (virt bridges excluded)"
+  _emit_pass "No promiscuous mode (virt bridges excluded)"
 else
-  fail "Promiscuous mode active: $PROMISC"
+  _emit_fail "Promiscuous mode active: $PROMISC"
 fi
 
 # ARP Table
@@ -1734,15 +1887,15 @@ ARP_COUNT=$(ip neigh show 2>/dev/null | wc -l)
 ARP_REACHABLE=$(ip neigh show nud reachable 2>/dev/null | wc -l)
 ARP_FAILED=$(ip neigh show nud failed 2>/dev/null | wc -l)
 ARP_STALE=$(ip neigh show nud stale 2>/dev/null | wc -l)
-info "ARP entries: $ARP_COUNT total ($ARP_REACHABLE reachable, $ARP_STALE stale, $ARP_FAILED failed)"
-[[ "$ARP_FAILED" -gt 5 ]] && warn "ARP: $ARP_FAILED failed entries (possible LAN scanning attempts)"
+_emit_info "ARP entries: $ARP_COUNT total ($ARP_REACHABLE reachable, $ARP_STALE stale, $ARP_FAILED failed)"
+[[ "$ARP_FAILED" -gt 5 ]] && _emit_warn "ARP: $ARP_FAILED failed entries (possible LAN scanning attempts)"
 
 # Network Namespaces
 NS_COUNT=$(ip netns list 2>/dev/null | wc -l)
 if [[ "$NS_COUNT" -gt 0 ]]; then
-  info "Network namespaces: $NS_COUNT"
+  _emit_info "Network namespaces: $NS_COUNT"
 else
-  info "Network namespaces: 0"
+  _emit_info "Network namespaces: 0"
 fi
 
 }
@@ -1799,34 +1952,39 @@ declare -A SYSCTL_MIN_OK=(
 
 # F-074: bash assoc-array iteration is non-deterministic. Sort the keys
 # so output is diff-friendly across runs and consistent in CI logs.
+# v3.6: aggregated PASSes (use --verbose for per-key detail)
 mapfile -t _SYSCTL_CHECKS_KEYS < <(printf '%s\n' "${!SYSCTL_CHECKS[@]}" | sort)
+_emit_pass_agg_start "Sysctl basic"
 for KEY in "${_SYSCTL_CHECKS_KEYS[@]}"; do
   EXPECTED="${SYSCTL_CHECKS[$KEY]}"
   ACTUAL=$(sysctl -n "$KEY" 2>/dev/null || echo "N/A")
   if [[ "$ACTUAL" == "N/A" ]]; then
-    warn "sysctl $KEY: not available"
+    _emit_warn "sysctl $KEY: not available"
   elif [[ "$ACTUAL" -eq "$EXPECTED" ]]; then
-    pass "sysctl $KEY = $ACTUAL"
+    _emit_pass_agg "$KEY = $ACTUAL"
   elif [[ -n "${SYSCTL_MIN_OK[$KEY]+x}" ]] && [[ "$ACTUAL" -ge "${SYSCTL_MIN_OK[$KEY]}" ]]; then
-    pass "sysctl $KEY = $ACTUAL (>=${SYSCTL_MIN_OK[$KEY]} — hardened)"
+    _emit_pass_agg "$KEY = $ACTUAL (>=${SYSCTL_MIN_OK[$KEY]} — hardened)"
   else
-    fail "sysctl $KEY = $ACTUAL (expected: $EXPECTED)"
+    _emit_fail "sysctl $KEY = $ACTUAL (expected: $EXPECTED)"
   fi
 done
+_emit_pass_agg_end "${#_SYSCTL_CHECKS_KEYS[@]}" "hardened"
 
 sub_header "Strict/Optional"
 mapfile -t _SYSCTL_STRICT_KEYS < <(printf '%s\n' "${!SYSCTL_STRICT[@]}" | sort)
+_emit_pass_agg_start "Sysctl strict"
 for KEY in "${_SYSCTL_STRICT_KEYS[@]}"; do
   EXPECTED="${SYSCTL_STRICT[$KEY]}"
   ACTUAL=$(sysctl -n "$KEY" 2>/dev/null || echo "N/A")
   if [[ "$ACTUAL" == "N/A" ]]; then
-    info "sysctl $KEY: not available"
+    _emit_info "sysctl $KEY: not available"
   elif [[ "$ACTUAL" -eq "$EXPECTED" ]]; then
-    pass "sysctl $KEY = $ACTUAL (strict)"
+    _emit_pass_agg "$KEY = $ACTUAL"
   else
-    info "sysctl $KEY = $ACTUAL (strict would be: $EXPECTED)"
+    _emit_info "sysctl $KEY = $ACTUAL (strict would be: $EXPECTED)"
   fi
 done
+_emit_pass_agg_end "${#_SYSCTL_STRICT_KEYS[@]}" "strict-hardened"
 
 # Magic SysRq Deep Check
 SYSRQ_VAL=$(sysctl -n kernel.sysrq 2>/dev/null || echo "N/A")
@@ -1842,9 +2000,9 @@ if [[ "$SYSRQ_VAL" != "N/A" ]] && [[ "$SYSRQ_VAL" -ne 0 ]]; then
   [[ $((SYSRQ_VAL & 128)) -ne 0 ]] && SYSRQ_BITS+="reboot "
   [[ $((SYSRQ_VAL & 256)) -ne 0 ]] && SYSRQ_BITS+="nice-all-RT "
   if [[ "$SYSRQ_VAL" -eq 1 ]]; then
-    info "Magic SysRq: ALL functions enabled (value=1)"
+    _emit_info "Magic SysRq: ALL functions enabled (value=1)"
   else
-    info "Magic SysRq: value=$SYSRQ_VAL bits: $SYSRQ_BITS"
+    _emit_info "Magic SysRq: value=$SYSRQ_VAL bits: $SYSRQ_BITS"
   fi
 fi
 
@@ -1852,12 +2010,12 @@ fi
 IP_FWD=$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo "0")
 if [[ "${IP_FWD:-0}" -eq 1 ]]; then
   if [[ -n "$VPN_IFACES" ]]; then
-    pass "ip_forward=1 (VPN active — expected)"
+    _emit_pass "ip_forward=1 (VPN active — expected)"
   else
-    fail "ip_forward=1 WITHOUT active VPN!"
+    _emit_fail "ip_forward=1 WITHOUT active VPN!"
   fi
 else
-  pass "ip_forward=0"
+  _emit_pass "ip_forward=0"
 fi
 
 }
@@ -1901,13 +2059,13 @@ for _grp in "${_SVC_GROUPS_OFF[@]}"; do
   _canonical="${_grp%% *}"
   # shellcheck disable=SC2086  # intentional word-split on space-separated group
   if _service_active_any $_grp; then
-    fail "Service running: $_canonical"
+    _emit_fail "Service running: $_canonical"
   elif _service_masked_any $_grp; then
-    pass "Service masked: $_canonical"
+    _emit_pass "Service masked: $_canonical"
   elif _service_enabled_any $_grp; then
-    warn "Service enabled but inactive: $_canonical"
+    _emit_warn "Service enabled but inactive: $_canonical"
   else
-    pass "Service off: $_canonical"
+    _emit_pass "Service off: $_canonical"
   fi
 done
 
@@ -1917,14 +2075,14 @@ for _entry in "${_SVC_GROUPS_DESKTOP[@]}"; do
   _ctx="${_entry##*:}"
   if systemctl is-active "$_svc" &>/dev/null; then
     if $_IS_DESKTOP; then
-      info "Service running: $_svc (desktop default — $_ctx)"
+      _emit_info "Service running: $_svc (desktop default — $_ctx)"
     else
-      warn "Service running: $_svc (consider disabling on server — $_ctx)"
+      _emit_warn "Service running: $_svc (consider disabling on server — $_ctx)"
     fi
-  elif systemctl is-masked "$_svc" &>/dev/null; then
-    pass "Service masked: $_svc"
+  elif [[ "$(systemctl is-enabled "$_svc" 2>/dev/null)" == "masked" ]]; then
+    _emit_pass "Service masked: $_svc"
   else
-    pass "Service off: $_svc"
+    _emit_pass "Service off: $_svc"
   fi
 done
 
@@ -1946,20 +2104,20 @@ while IFS= read -r _wpid; do
 done < <(pgrep -x wsdd 2>/dev/null)
 
 if $_WSDD_SVC_ACTIVE; then
-  warn "wsdd.service active — WS-Discovery broadcasts hostname on local network"
+  _emit_warn "wsdd.service active — WS-Discovery broadcasts hostname on local network"
 elif $_WSDD_STANDALONE_PROC; then
-  warn "wsdd process running (not via systemd service)"
+  _emit_warn "wsdd process running (not via systemd service)"
 else
-  pass "wsdd (standalone): not running"
+  _emit_pass "wsdd (standalone): not running"
 fi
 
 # gvfsd-wsdd is part of GNOME's gvfs — started on-demand for network browsing.
 # It is firewall-protected on hardened systems. Warn only if firewall is absent.
 if pgrep -x gvfsd-wsdd &>/dev/null; then
   if systemctl is-active firewalld &>/dev/null || systemctl is-active ufw &>/dev/null; then
-    info "gvfsd-wsdd (GNOME network browsing): running — firewall-protected"
+    _emit_info "gvfsd-wsdd (GNOME network browsing): running — firewall-protected"
   else
-    warn "gvfsd-wsdd running without active firewall — WS-Discovery exposed on LAN"
+    _emit_warn "gvfsd-wsdd running without active firewall — WS-Discovery exposed on LAN"
   fi
 fi
 
@@ -1967,11 +2125,11 @@ fi
 SHOULD_BE_ON="firewalld auditd fail2ban"
 for SVC in $SHOULD_BE_ON; do
   if systemctl is-active "$SVC" &>/dev/null; then
-    pass "Service active: $SVC"
+    _emit_pass "Service active: $SVC"
   elif ! require_cmd "$SVC" && ! systemctl cat "$SVC" &>/dev/null; then
-    info "Service $SVC: not installed — skipped"
+    _emit_info "Service $SVC: not installed — skipped"
   else
-    fail "Service INACTIVE: $SVC"
+    _emit_fail "Service INACTIVE: $SVC"
   fi
 done
 
@@ -1979,13 +2137,13 @@ done
 # F-085: extended whitelist for known-FP failed-services on bootc/Silverblue/
 # minimal systems. binfmt_misc and update-utmp are environment-specific; the
 # tracked-pids-too-old line appears in fresh container boots transiently.
-FAILED_SVCS=$(systemctl --failed --no-legend 2>/dev/null | grep -vE 'proc-sys-fs-binfmt_misc\.mount|systemd-update-utmp\.service|tracked-pids-too-old')
+FAILED_SVCS=$(systemctl --failed --no-legend 2>/dev/null | grep -vE 'proc-sys-fs-binfmt_misc\.(mount|automount)|systemd-update-utmp\.service|tracked-pids-too-old')
 FAILED=$(echo "$FAILED_SVCS" | grep -c '\S' || true)
 if [[ "$FAILED" -eq 0 ]]; then
-  pass "0 failed services"
+  _emit_pass "0 failed services"
 else
   svc_names=$(echo "$FAILED_SVCS" | awk '{print ($1 == "●" || $1 == "×") ? $2 : $1}' | tr '\n' ', ' | sed 's/,$//')
-  fail "$FAILED failed services: $svc_names"
+  _emit_fail "$FAILED failed services: $svc_names"
   if ! $JSON_MODE; then
     while read -r line; do
       printf "       %s\n" "$line"
@@ -1995,7 +2153,7 @@ fi
 
 # Timer Units
 TIMER_COUNT=$(systemctl list-timers --all --no-legend 2>/dev/null | wc -l)
-info "Active timers: $TIMER_COUNT"
+_emit_info "Active timers: $TIMER_COUNT"
 
 }
 
@@ -2005,20 +2163,81 @@ check_ports() {
   header "08" "OPEN PORTS & LISTENERS"
 ###############################################################################
 
+# F-088b: pre-compute address sets bound to VM/container bridges and VPN
+# tunnels. A listener on these is not "internet-exposed" — virbr0/docker0/
+# podman bridges are intra-host VM/container traffic; tun/wg/proton tunnels
+# are encrypted point-to-point links. Reduces FP noise on virtualization +
+# VPN hosts (e.g., wsdd announcing on tunnel addresses).
+_VM_BRIDGE_ADDRS=$(ip -o addr show 2>/dev/null | awk '
+  $2 ~ /^(virbr|docker|podman|cni-|lxcbr|br-)/ {
+    split($4, a, "/"); print a[1]
+  }' | tr '\n' '|' | sed 's/|$//')
+_VPN_TUNNEL_ADDRS=$(ip -o addr show 2>/dev/null | awk -v vpn_re="$_VPN_IFACE_REGEX" '
+  $2 ~ vpn_re {
+    split($4, a, "/"); print a[1]
+  }' | tr '\n' '|' | sed 's/|$//')
+
+# Helper: extract IP portion (no port, no [] brackets, no %iface scope) from
+# an ss `Local Address:Port` field. ss output forms:
+#   192.168.122.1:53           → 192.168.122.1
+#   [::1]:53                   → ::1
+#   0.0.0.0%virbr0:67          → 0.0.0.0
+#   [fe80::xx]%proton0:3702    → fe80::xx
+_extract_ip() {
+  local addr="$1"
+  # Strip %iface scope first (between IP and port, can confuse port-strip)
+  addr="${addr%%\%*}"
+  # Strip trailing :port
+  if [[ "$addr" =~ ^\[(.+)\]:[0-9]+$ ]]; then
+    echo "${BASH_REMATCH[1]}"
+  else
+    echo "${addr%:*}"
+  fi
+}
+
+_classify_listener() {
+  local addr_field="$1"
+  local ip
+  ip=$(_extract_ip "$addr_field")
+  # Localhost/loopback
+  if [[ "$ip" == "127.0.0.1" ]] || [[ "$ip" =~ ^127\. ]] || \
+     [[ "$ip" == "::1" ]] || [[ "$ip" =~ ^::ffff:127\. ]]; then
+    echo "loopback"
+    return
+  fi
+  # VM/container bridge
+  if [[ -n "$_VM_BRIDGE_ADDRS" ]] && echo "$ip" | grep -qE "^($_VM_BRIDGE_ADDRS)$"; then
+    echo "bridge"
+    return
+  fi
+  # VPN tunnel
+  if [[ -n "$_VPN_TUNNEL_ADDRS" ]] && echo "$ip" | grep -qE "^($_VPN_TUNNEL_ADDRS)$"; then
+    echo "vpn"
+    return
+  fi
+  echo "external"
+}
+
 sub_header "TCP"
 while read -r line; do
   [[ -z "$line" ]] && continue
   ADDR=$(echo "$line" | awk '{print $4}')
   PROC=$(echo "$line" | grep -oP 'users:\(\("\K[^"]+' || echo "unknown")
-  if echo "$ADDR" | grep -qE "^(127\.|::1|\[::1\]|\[?::ffff:127\.)"; then
-    pass "TCP $ADDR ($PROC) — localhost only"
-  else
-    if has_firewall_block_on_phys; then
-      warn "TCP $ADDR ($PROC) — externally bound, but firewall/kill-switch blocks"
-    else
-      fail "TCP $ADDR ($PROC) — EXTERNALLY REACHABLE"
-    fi
-  fi
+  case "$(_classify_listener "$ADDR")" in
+    loopback)
+      _emit_pass "TCP $ADDR ($PROC) — localhost only" ;;
+    bridge)
+      _emit_info "TCP $ADDR ($PROC) — VM/container bridge (intra-host)" ;;
+    vpn)
+      _emit_info "TCP $ADDR ($PROC) — VPN tunnel address" ;;
+    *)
+      if has_firewall_block_on_phys; then
+        _emit_warn "TCP $ADDR ($PROC) — externally bound, but firewall/kill-switch blocks"
+      else
+        _emit_fail "TCP $ADDR ($PROC) — EXTERNALLY REACHABLE"
+      fi
+      ;;
+  esac
 done < <(ss -tlnp 2>/dev/null | tail -n+2)
 
 sub_header "UDP"
@@ -2026,24 +2245,30 @@ while read -r line; do
   [[ -z "$line" ]] && continue
   ADDR=$(echo "$line" | awk '{print $4}')
   PROC=$(echo "$line" | grep -oP 'users:\(\("\K[^"]+' || echo "kernel")
-  if echo "$ADDR" | grep -qE "^(127\.|::1|\[::1\]|\[?::ffff:127\.)"; then
-    pass "UDP $ADDR ($PROC) — localhost only"
-  elif echo "$PROC" | grep -qiE "wireguard|wg|vpn"; then
-    pass "UDP $ADDR (VPN/WireGuard)"
-  elif [[ "$PROC" == "kernel" ]]; then
-    # Kernel-owned UDP sockets can be WireGuard, IPVS, conntrack, etc.
-    if ip link show type wireguard 2>/dev/null | grep -q .; then
-      info "UDP $ADDR (kernel — likely WireGuard)"
-    else
-      info "UDP $ADDR (kernel — no WireGuard interfaces found)"
-    fi
-  else
-    if has_firewall_block_on_phys; then
-      info "UDP $ADDR ($PROC) — externally bound, but firewall/kill-switch blocks"
-    else
-      warn "UDP $ADDR ($PROC) — external"
-    fi
-  fi
+  case "$(_classify_listener "$ADDR")" in
+    loopback)
+      _emit_pass "UDP $ADDR ($PROC) — localhost only" ;;
+    bridge)
+      _emit_info "UDP $ADDR ($PROC) — VM/container bridge (intra-host)" ;;
+    vpn)
+      _emit_info "UDP $ADDR ($PROC) — VPN tunnel address" ;;
+    *)
+      if echo "$PROC" | grep -qiE "wireguard|wg|vpn"; then
+        _emit_pass "UDP $ADDR (VPN/WireGuard)"
+      elif [[ "$PROC" == "kernel" ]]; then
+        # Kernel-owned UDP sockets can be WireGuard, IPVS, conntrack, etc.
+        if ip link show type wireguard 2>/dev/null | grep -q .; then
+          _emit_info "UDP $ADDR (kernel — likely WireGuard)"
+        else
+          _emit_info "UDP $ADDR (kernel — no WireGuard interfaces found)"
+        fi
+      elif has_firewall_block_on_phys; then
+        _emit_info "UDP $ADDR ($PROC) — externally bound, but firewall/kill-switch blocks"
+      else
+        _emit_warn "UDP $ADDR ($PROC) — external"
+      fi
+      ;;
+  esac
 done < <(ss -ulnp 2>/dev/null | tail -n+2)
 
 # Connections to unusual ports
@@ -2060,17 +2285,17 @@ UNUSUAL_PORTS=$(while read -r port; do
   esac
 done < <(ss -tnp state established 2>/dev/null | awk '{print $4}' | grep -oP ':\K\d+$' | sort -n | uniq))
 if [[ -n "$UNUSUAL_PORTS" ]]; then
-  info "Connections to non-standard ports: $(echo "$UNUSUAL_PORTS" | tr '\n' ' ')"
+  _emit_info "Connections to non-standard ports: $(echo "$UNUSUAL_PORTS" | tr '\n' ' ')"
 else
-  pass "All connections on standard ports"
+  _emit_pass "All connections on standard ports"
 fi
 
 # Raw Sockets
 RAW=$(ss -wnp 2>/dev/null | tail -n+2 | wc -l)
 if [[ "$RAW" -gt 0 ]]; then
-  warn "Raw sockets: $RAW"
+  _emit_warn "Raw sockets: $RAW"
 else
-  pass "No raw sockets"
+  _emit_pass "No raw sockets"
 fi
 
 }
@@ -2081,61 +2306,77 @@ check_ssh() {
   header "09" "SSH HARDENING"
 ###############################################################################
 
-# F-093: single helper call replaces 4 redundant systemctl variants.
-if _service_masked_any sshd ssh ssh.socket sshd.socket; then
-  pass "SSH: masked + inactive — maximum security"
+# F-093: SSH off when masked OR disabled+inactive — both states deliver
+# "SSH not reachable", so accept either as maximum security. Previous logic
+# only matched masked, false-flagging users who keep sshd installed but
+# disabled (Fedora default).
+_SSH_OFF=true
+for _ssh_unit in sshd ssh ssh.socket sshd.socket; do
+  if systemctl is-active "$_ssh_unit" &>/dev/null; then
+    _SSH_OFF=false
+    break
+  fi
+  _ssh_state=$(systemctl is-enabled "$_ssh_unit" 2>/dev/null || echo "missing")
+  if [[ "$_ssh_state" == "enabled" ]]; then
+    _SSH_OFF=false
+    break
+  fi
+done
+
+if $_SSH_OFF; then
+  _emit_pass "SSH: inactive (no enabled or running unit) — maximum security"
 else
   SSHD_CONFIG="/etc/ssh/sshd_config"
   if [[ -f "$SSHD_CONFIG" ]]; then
     # PermitRootLogin
     VAL=$(sshd_cfg_val PermitRootLogin)
     if [[ "$VAL" == "no" ]]; then
-      pass "SSH: PermitRootLogin no"
+      _emit_pass "SSH: PermitRootLogin no"
     else
-      fail "SSH: PermitRootLogin ${VAL:-not set} (should be 'no')"
+      _emit_fail "SSH: PermitRootLogin ${VAL:-not set} (should be 'no')"
     fi
 
     # PasswordAuthentication
     VAL=$(sshd_cfg_val PasswordAuthentication)
     if [[ "$VAL" == "no" ]]; then
-      pass "SSH: PasswordAuthentication no"
+      _emit_pass "SSH: PasswordAuthentication no"
     else
-      warn "SSH: PasswordAuthentication ${VAL:-not explicitly 'no'}"
+      _emit_warn "SSH: PasswordAuthentication ${VAL:-not explicitly 'no'}"
     fi
 
     # PubkeyAuthentication (default is 'yes' in OpenSSH — only warn if explicitly disabled)
     VAL=$(sshd_cfg_val PubkeyAuthentication)
     if [[ "$VAL" == "yes" ]]; then
-      pass "SSH: PubkeyAuthentication yes"
+      _emit_pass "SSH: PubkeyAuthentication yes"
     elif [[ "$VAL" == "no" ]]; then
-      warn "SSH: PubkeyAuthentication no (should be 'yes')"
+      _emit_warn "SSH: PubkeyAuthentication no (should be 'yes')"
     else
       # Not explicitly set — OpenSSH default is 'yes', which is correct
-      pass "SSH: PubkeyAuthentication yes (default)"
+      _emit_pass "SSH: PubkeyAuthentication yes (default)"
     fi
 
     # X11Forwarding
     VAL=$(sshd_cfg_val X11Forwarding)
     if [[ "$VAL" == "no" ]]; then
-      pass "SSH: X11Forwarding no"
+      _emit_pass "SSH: X11Forwarding no"
     else
-      warn "SSH: X11Forwarding ${VAL:-not set to 'no'}"
+      _emit_warn "SSH: X11Forwarding ${VAL:-not set to 'no'}"
     fi
 
     # MaxAuthTries
     MAX_AUTH=$(sshd_cfg_val MaxAuthTries)
     MAX_AUTH=${MAX_AUTH:-6}
     if [[ "$MAX_AUTH" -le 3 ]]; then
-      pass "SSH: MaxAuthTries $MAX_AUTH"
+      _emit_pass "SSH: MaxAuthTries $MAX_AUTH"
     else
-      warn "SSH: MaxAuthTries $MAX_AUTH (recommended: <=3)"
+      _emit_warn "SSH: MaxAuthTries $MAX_AUTH (recommended: <=3)"
     fi
 
     # AllowUsers/AllowGroups
     if grep -qhiE "^\s*(AllowUsers|AllowGroups)" /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null; then
-      pass "SSH: user/group whitelist active"
+      _emit_pass "SSH: user/group whitelist active"
     else
-      warn "SSH: no user/group whitelist"
+      _emit_warn "SSH: no user/group whitelist"
     fi
 
     # LoginGraceTime (new)
@@ -2151,12 +2392,12 @@ else
         LGT_SEC="${BASH_REMATCH[1]}"
       fi
       if [[ "$LGT_SEC" =~ ^[0-9]+$ ]] && [[ "$LGT_SEC" -le 60 ]]; then
-        pass "SSH: LoginGraceTime $LGT (${LGT_SEC}s)"
+        _emit_pass "SSH: LoginGraceTime $LGT (${LGT_SEC}s)"
       else
-        warn "SSH: LoginGraceTime $LGT (${LGT_SEC}s, recommended: <=60s)"
+        _emit_warn "SSH: LoginGraceTime $LGT (${LGT_SEC}s, recommended: <=60s)"
       fi
     else
-      warn "SSH: LoginGraceTime not set (default 120s — too long)"
+      _emit_warn "SSH: LoginGraceTime not set (default 120s — too long)"
     fi
 
     # SSH Key Strength
@@ -2172,15 +2413,15 @@ else
         # F-097: ECDSA must be >=256 (P-256/P-384/P-521). P-192 is broken.
         # F-098: DSA is deprecated since OpenSSH 7.0 — explicit fail.
         if [[ "$TYPE" == "DSA" ]]; then
-          fail "Insecure SSH key: $KEY ($BITS bit DSA — deprecated since OpenSSH 7.0)"
+          _emit_fail "Insecure SSH key: $KEY ($BITS bit DSA — deprecated since OpenSSH 7.0)"
         elif [[ "$TYPE" == "RSA" ]] && [[ "${BITS:-0}" -lt 2048 ]]; then
-          fail "Weak SSH key: $KEY ($BITS bit $TYPE — minimum 2048)"
+          _emit_fail "Weak SSH key: $KEY ($BITS bit $TYPE — minimum 2048)"
         elif [[ "$TYPE" == "RSA" ]] && [[ "${BITS:-0}" -lt 4096 ]]; then
-          warn "SSH key: $KEY ($BITS bit $TYPE — 4096 recommended)"
+          _emit_warn "SSH key: $KEY ($BITS bit $TYPE — 4096 recommended)"
         elif [[ "$TYPE" == "ECDSA" ]] && [[ "${BITS:-0}" -lt 256 ]]; then
-          fail "Weak SSH key: $KEY ($BITS bit $TYPE — minimum P-256)"
+          _emit_fail "Weak SSH key: $KEY ($BITS bit $TYPE — minimum P-256)"
         elif [[ -n "$TYPE" ]]; then
-          pass "SSH key: $KEY ($BITS bit $TYPE)"
+          _emit_pass "SSH key: $KEY ($BITS bit $TYPE)"
         fi
       done
     done < <(_iter_user_homes)
@@ -2196,33 +2437,33 @@ check_audit() {
 ###############################################################################
 
 if systemctl is-active auditd &>/dev/null; then
-  pass "auditd: active"
+  _emit_pass "auditd: active"
 elif ! require_cmd auditctl; then
-  info "auditd not installed — skipped"
+  _emit_info "auditd not installed — skipped"
 else
-  fail "auditd: INACTIVE"
+  _emit_fail "auditd: INACTIVE"
 fi
 
 if require_cmd auditctl; then
   AUDIT_RULES=$(auditctl -l 2>/dev/null | grep -cv "^No rules" || true)
   # F-100: CIS Level 2 + STIG expect 38+ rules; 20 is a soft minimum.
   if [[ "$AUDIT_RULES" -ge 38 ]]; then
-    pass "Audit rules: $AUDIT_RULES (meets CIS Level 2 / STIG ≥38)"
+    _emit_pass "Audit rules: $AUDIT_RULES (meets CIS Level 2 / STIG ≥38)"
   elif [[ "$AUDIT_RULES" -ge 20 ]]; then
-    pass "Audit rules: $AUDIT_RULES (consider ≥38 for CIS Level 2)"
+    _emit_pass "Audit rules: $AUDIT_RULES (consider ≥38 for CIS Level 2)"
   elif [[ "$AUDIT_RULES" -gt 0 ]]; then
-    warn "Audit rules: only $AUDIT_RULES (recommended ≥20; CIS L2 ≥38)"
+    _emit_warn "Audit rules: only $AUDIT_RULES (recommended ≥20; CIS L2 ≥38)"
   else
-    fail "Audit rules: 0"
+    _emit_fail "Audit rules: 0"
   fi
 
   AUDIT_ENABLED=$(auditctl -s 2>/dev/null | grep -oP '(?:^enabled\s+|enabled=)\K[0-9]+' | head -1)
   if [[ "$AUDIT_ENABLED" == "2" ]]; then
-    pass "Audit: immutable (enabled=2)"
+    _emit_pass "Audit: immutable (enabled=2)"
   elif [[ "$AUDIT_ENABLED" == "1" ]]; then
-    warn "Audit: enabled=1 (not immutable)"
+    _emit_warn "Audit: enabled=1 (not immutable)"
   else
-    fail "Audit: enabled=$AUDIT_ENABLED"
+    _emit_fail "Audit: enabled=$AUDIT_ENABLED"
   fi
 
   CRITICAL_WATCHES="/etc/passwd /etc/shadow /etc/sudoers /etc/ssh /etc/pam.d"
@@ -2234,9 +2475,9 @@ if require_cmd auditctl; then
     # Match both short form (-w /path) and long form (-F path=/path, -F dir=/path),
     # including sub-path matches (e.g. -F path=/etc/ssh/sshd_config covers /etc/ssh)
     if echo "$_AUDIT_RULES_CACHE" | grep -qE -- "(-w ${_watch_re}( |$)|-F (path|dir)=${_watch_re}(/|\s|$))"; then
-      pass "Audit watch: $WATCH"
+      _emit_pass "Audit watch: $WATCH"
     else
-      warn "Audit watch missing: $WATCH"
+      _emit_warn "Audit watch missing: $WATCH"
     fi
   done
 fi
@@ -2247,9 +2488,9 @@ if [[ -f /var/log/audit/audit.log ]]; then
   AUDIT_SIZE_BYTES=$(stat -c%s /var/log/audit/audit.log 2>/dev/null || echo 0)
   AUDIT_SIZE=$(_human_size "$AUDIT_SIZE_BYTES")
   if [[ "$AUDIT_SIZE_BYTES" -gt 1073741824 ]]; then
-    warn "Audit log: $AUDIT_SIZE (>1GiB — rules may be too verbose; check rotation)"
+    _emit_warn "Audit log: $AUDIT_SIZE (>1GiB — rules may be too verbose; check rotation)"
   else
-    info "Audit log: $AUDIT_SIZE"
+    _emit_info "Audit log: $AUDIT_SIZE"
   fi
 fi
 
@@ -2264,18 +2505,18 @@ check_users() {
 # UID-0 Accounts
 UID0_COUNT=$(awk -F: '$3==0' /etc/passwd | wc -l)
 if [[ "$UID0_COUNT" -eq 1 ]]; then
-  pass "Only 1 UID-0 account (root)"
+  _emit_pass "Only 1 UID-0 account (root)"
 else
-  fail "$UID0_COUNT UID-0 accounts!"
+  _emit_fail "$UID0_COUNT UID-0 accounts!"
   $JSON_MODE || awk -F: '$3==0 {print "       " $1}' /etc/passwd
 fi
 
 # Empty Passwords
 EMPTY_PW=$(awk -F: '$2 == "" {print $1}' /etc/shadow 2>/dev/null | wc -l)
 if [[ "$EMPTY_PW" -eq 0 ]]; then
-  pass "No accounts with empty password"
+  _emit_pass "No accounts with empty password"
 else
-  fail "$EMPTY_PW accounts with empty password (no authentication required!)"
+  _emit_fail "$EMPTY_PW accounts with empty password (no authentication required!)"
 fi
 
 # PAM nullok — empty passwords accepted = critical risk on system-auth/password-auth.
@@ -2286,10 +2527,10 @@ for PAM_FILE in /etc/pam.d/system-auth /etc/pam.d/password-auth; do
   if [[ -f "$PAM_FILE" ]]; then
     _nullok_line=$(grep -E '^[[:space:]]*[^#[:space:]].*nullok' "$PAM_FILE" 2>/dev/null | head -1)
     if [[ -n "$_nullok_line" ]]; then
-      fail "PAM nullok in $(basename "$PAM_FILE") — empty passwords allowed"
+      _emit_fail "PAM nullok in $(basename "$PAM_FILE") — empty passwords allowed"
       $JSON_MODE || printf "       %s\n" "${_nullok_line:0:100}"
     else
-      pass "PAM nullok removed: $(basename "$PAM_FILE")"
+      _emit_pass "PAM nullok removed: $(basename "$PAM_FILE")"
     fi
   fi
 done
@@ -2298,12 +2539,12 @@ done
 # but only if pam_securetty.so is in the PAM stack.
 if [[ -f /etc/securetty ]]; then
   if [[ ! -s /etc/securetty ]]; then
-    pass "securetty present and empty (root TTY login blocked)"
+    _emit_pass "securetty present and empty (root TTY login blocked)"
   else
-    pass "securetty present"
+    _emit_pass "securetty present"
   fi
 else
-  info "securetty absent (root TTY restriction depends on PAM config)"
+  _emit_info "securetty absent (root TTY restriction depends on PAM config)"
 fi
 
 # Sudo group
@@ -2311,11 +2552,11 @@ WHEEL_MEMBERS=$(grep "^wheel:" /etc/group 2>/dev/null | cut -d: -f4)
 if [[ -z "$WHEEL_MEMBERS" ]]; then
   WHEEL_MEMBERS=$(grep "^sudo:" /etc/group 2>/dev/null | cut -d: -f4)
 fi
-info "Wheel/sudo members: $WHEEL_MEMBERS"
+_emit_info "Wheel/sudo members: $WHEEL_MEMBERS"
 
 # Shell users
 SHELL_USERS=$(grep -cvE '/nologin|/false|/sync|/shutdown|/halt' /etc/passwd)
-info "Users with login shell: $SHELL_USERS"
+_emit_info "Users with login shell: $SHELL_USERS"
 if ! $JSON_MODE; then
   while IFS=: read -r user _ uid _ _ _ shell; do
     printf "       %s (UID=%s, Shell=%s)\n" "$user" "$uid" "$shell"
@@ -2332,30 +2573,34 @@ fi
 _PAM_HASH=$(grep -hE "pam_unix\.so.*\b(yescrypt|sha512|sha256|md5|bigcrypt|blowfish)\b" /etc/pam.d/system-auth /etc/pam.d/common-password 2>/dev/null | grep -oE "(yescrypt|sha512|sha256|md5|bigcrypt|blowfish)" | head -1)
 _EFFECTIVE_HASH="${_PAM_HASH:-$_PW_HASH_METHOD}"
 if [[ "${_EFFECTIVE_HASH^^}" == "YESCRYPT" ]]; then
-  pass "Password hashing: YESCRYPT (strongest)"
+  _emit_pass "Password hashing: YESCRYPT (strongest)"
 elif [[ "${_EFFECTIVE_HASH^^}" == "SHA512" ]]; then
-  pass "Password hashing: SHA512 (strong)"
+  _emit_pass "Password hashing: SHA512 (strong)"
 elif [[ "${_EFFECTIVE_HASH^^}" == "SHA256" ]]; then
-  warn "Password hashing: SHA256 (consider SHA512 or YESCRYPT)"
+  _emit_warn "Password hashing: SHA256 (consider SHA512 or YESCRYPT)"
 elif [[ -n "$_EFFECTIVE_HASH" ]]; then
-  fail "Password hashing: $_EFFECTIVE_HASH (weak — migrate to SHA512 or YESCRYPT)"
+  _emit_fail "Password hashing: $_EFFECTIVE_HASH (weak — migrate to SHA512 or YESCRYPT)"
 else
-  info "Password hashing method: could not determine"
+  _emit_info "Password hashing method: could not determine"
 fi
 
 # Password Hashing Rounds
 _PW_ROUNDS=$(grep -iE "^SHA_CRYPT_MAX_ROUNDS|^YESCRYPT_COST_FACTOR" /etc/login.defs 2>/dev/null | tail -1 | awk '{print $2}')
 if [[ -n "$_PW_ROUNDS" ]]; then
-  info "Password hashing rounds/cost: $_PW_ROUNDS"
+  _emit_info "Password hashing rounds/cost: $_PW_ROUNDS"
 fi
 
 # PAM password quality (pwquality/cracklib)
+# F-104b: Fedora's authselect ships /etc/pam.d/system-auth and password-auth as
+# symlinks into /etc/authselect/. `grep -r` does NOT dereference symlinks
+# encountered during traversal; only `grep -R` (capital R) does. Without this
+# fix, pam_pwquality/cracklib detection silently false-negatives on Fedora.
 _PW_QUALITY=false
-if grep -rqsE "pam_pwquality|pam_cracklib" /etc/pam.d/ 2>/dev/null; then
+if grep -RqsE "pam_pwquality|pam_cracklib" /etc/pam.d/ 2>/dev/null; then
   _PW_QUALITY=true
-  pass "Password quality enforcement: pam_pwquality/pam_cracklib active"
+  _emit_pass "Password quality enforcement: pam_pwquality/pam_cracklib active"
 else
-  warn "No password quality enforcement (pam_pwquality/pam_cracklib not in PAM stack)"
+  _emit_warn "No password quality enforcement (pam_pwquality/pam_cracklib not in PAM stack)"
 fi
 
 # Accounts without password expiry — F-106: skip on systems using LDAP/SSSD
@@ -2366,44 +2611,54 @@ _NO_EXPIRE=0
 _CENTRAL_AUTH=false
 if [[ -f /etc/nsswitch.conf ]] && grep -qE '^passwd:.*\b(sss|ldap|winbind)\b' /etc/nsswitch.conf 2>/dev/null; then
   _CENTRAL_AUTH=true
-  info "Password expiry: skipped (central auth detected via nsswitch — chage queries local shadow only)"
+  _emit_info "Password expiry: skipped (central auth detected via nsswitch — chage queries local shadow only)"
 fi
 if ! $_CENTRAL_AUTH; then
+  # F-106b: chage(1) outputs are LOCALIZED — on a German/French/etc. system,
+  # the labels "Maximum number of days..." and "Password expires" become
+  # "Maximale Anzahl..." and "Passwort läuft ab", and the English-only greps
+  # silently return zero matches → false PASS for password-expiry checks.
+  # Force LC_ALL=C (POSIX/English) for chage so labels are stable.
   while IFS=: read -r _user _ _uid _ _ _ _; do
     _is_human_uid "$_uid" || continue
-    _max_days=$(chage -l "$_user" 2>/dev/null | grep "Maximum" | grep -oP '\d+$' || true)
-    if [[ "${_max_days:-0}" -eq 99999 || "${_max_days:-0}" -eq -1 ]]; then
-      ((_NO_EXPIRE++))
-    fi
+    # Extract the value-side after the colon — handles "99999", "-1", and
+    # the literal "never" string equivalently (a negative number caught by
+    # the previous \d+$ regex was returned as the unsigned digits, masking
+    # the no-expiry condition).
+    _max_val=$(LC_ALL=C chage -l "$_user" 2>/dev/null \
+      | awk -F: '/Maximum/{gsub(/^[[:space:]]+|[[:space:]]+$/,"",$2); print $2; exit}')
+    case "$_max_val" in
+      never|-1|99999) ((_NO_EXPIRE++)) ;;
+    esac
     # Check for expired passwords
-    _pw_expired=$(chage -l "$_user" 2>/dev/null | grep "Password expires" | grep -ciE "password must be changed|expired" || true)
+    _pw_expired=$(LC_ALL=C chage -l "$_user" 2>/dev/null | grep "Password expires" | grep -ciE "password must be changed|expired" || true)
     if [[ "${_pw_expired:-0}" -gt 0 ]]; then
-      warn "Password expired for user: $_user"
+      _emit_warn "Password expired for user: $_user"
     fi
   done < /etc/passwd
 fi
 if ! $_CENTRAL_AUTH; then
   if [[ "$_NO_EXPIRE" -gt 0 ]]; then
-    info "$_NO_EXPIRE user account(s) with no password expiry (perpetual passwords)"
+    _emit_info "$_NO_EXPIRE user account(s) with no password expiry (perpetual passwords)"
   else
-    pass "All user accounts have password expiry configured"
+    _emit_pass "All user accounts have password expiry configured"
   fi
 fi
 
 # Duplicate accounts
 _DUP_UIDS=$(awk -F: '{print $3}' /etc/passwd | sort | uniq -d)
 if [[ -n "$_DUP_UIDS" ]]; then
-  fail "Duplicate UIDs found: $_DUP_UIDS"
+  _emit_fail "Duplicate UIDs found: $_DUP_UIDS"
 else
-  pass "No duplicate UIDs"
+  _emit_pass "No duplicate UIDs"
 fi
 
 # Duplicate group IDs
 _DUP_GIDS=$(awk -F: '{print $3}' /etc/group | sort | uniq -d)
 if [[ -n "$_DUP_GIDS" ]]; then
-  warn "Duplicate GIDs found: $_DUP_GIDS"
+  _emit_warn "Duplicate GIDs found: $_DUP_GIDS"
 else
-  pass "No duplicate GIDs"
+  _emit_pass "No duplicate GIDs"
 fi
 
 # Password file consistency (pwck)
@@ -2412,9 +2667,9 @@ if require_cmd pwck; then
   _PWCK_ERRORS=$(echo "$_PWCK_OUT" | grep -cvE "^$|^pwck:" || true)
   _PWCK_ERRORS=${_PWCK_ERRORS:-0}
   if [[ "$_PWCK_ERRORS" -eq 0 ]]; then
-    pass "Password file consistency: OK (pwck)"
+    _emit_pass "Password file consistency: OK (pwck)"
   else
-    warn "Password file inconsistencies: $_PWCK_ERRORS (run 'pwck' to review)"
+    _emit_warn "Password file inconsistencies: $_PWCK_ERRORS (run 'pwck' to review)"
   fi
 fi
 
@@ -2425,14 +2680,14 @@ while IFS=: read -r _lu_user _ _lu_uid _ _ _ _; do
   _is_human_uid "$_lu_uid" || continue
   _lu_status=$(passwd -S "$_lu_user" 2>/dev/null | awk '{print $2}')
   if [[ "$_lu_status" == "L" || "$_lu_status" == "LK" ]]; then
-    info "Account locked: $_lu_user"
+    _emit_info "Account locked: $_lu_user"
     ((_LOCKED_ACCOUNTS++))
   fi
 done < /etc/passwd
 if [[ "$_LOCKED_ACCOUNTS" -gt 0 ]]; then
-  info "$_LOCKED_ACCOUNTS user account(s) locked"
+  _emit_info "$_LOCKED_ACCOUNTS user account(s) locked"
 else
-  pass "No locked user accounts"
+  _emit_pass "No locked user accounts"
 fi
 
 # Sudoers security
@@ -2441,9 +2696,9 @@ if [[ -f /etc/sudoers ]]; then
   # Check sudoers file permissions (should be 440)
   _SUDOERS_PERMS=$(stat -c %a /etc/sudoers 2>/dev/null)
   if [[ "$_SUDOERS_PERMS" == "440" ]]; then
-    pass "sudoers permissions: $_SUDOERS_PERMS"
+    _emit_pass "sudoers permissions: $_SUDOERS_PERMS"
   else
-    warn "sudoers permissions: $_SUDOERS_PERMS (should be 440)"
+    _emit_warn "sudoers permissions: $_SUDOERS_PERMS (should be 440)"
   fi
   # Check sudoers.d drop-in permissions
   if [[ -d /etc/sudoers.d ]]; then
@@ -2452,32 +2707,32 @@ if [[ -f /etc/sudoers ]]; then
       [[ -f "$_sf" ]] || continue
       _sf_perms=$(stat -c %a "$_sf" 2>/dev/null)
       if [[ "$_sf_perms" != "440" && "$_sf_perms" != "400" ]]; then
-        warn "sudoers.d/$(basename "$_sf"): permissions $_sf_perms (should be 440)"
+        _emit_warn "sudoers.d/$(basename "$_sf"): permissions $_sf_perms (should be 440)"
         ((_SUDOERSD_BAD++))
       fi
     done
-    [[ "$_SUDOERSD_BAD" -eq 0 ]] && pass "sudoers.d drop-ins: all permissions correct"
+    [[ "$_SUDOERSD_BAD" -eq 0 ]] && _emit_pass "sudoers.d drop-ins: all permissions correct"
   fi
   # Check for NOPASSWD — F-107: properly skip commented lines including
   # tab-indented comments. Use anchored regex on file contents (not grep
   # output prefix-based filter which fails on tab-prefixed comments).
   _NOPASSWD=$(grep -rE -- '^[[:space:]]*[^#[:space:]].*NOPASSWD' /etc/sudoers /etc/sudoers.d/ 2>/dev/null || true)
   if [[ -n "$_NOPASSWD" ]]; then
-    warn "NOPASSWD found in sudoers (passwordless sudo enabled)"
+    _emit_warn "NOPASSWD found in sudoers (passwordless sudo enabled)"
     if ! $JSON_MODE; then
       echo "$_NOPASSWD" | while read -r _np_line; do
         printf "       %s\n" "$_np_line"
       done
     fi
   else
-    pass "No NOPASSWD in sudoers (all sudo requires password)"
+    _emit_pass "No NOPASSWD in sudoers (all sudo requires password)"
   fi
   # Syntax check
   if require_cmd visudo; then
     if visudo -c &>/dev/null; then
-      pass "sudoers syntax: valid (visudo -c)"
+      _emit_pass "sudoers syntax: valid (visudo -c)"
     else
-      fail "sudoers syntax errors detected (run 'visudo -c')"
+      _emit_fail "sudoers syntax errors detected (run 'visudo -c')"
     fi
   fi
 fi
@@ -2486,7 +2741,7 @@ fi
 PASS_MAX=$(grep "^PASS_MAX_DAYS" /etc/login.defs | awk '{print $2}')
 PASS_MIN=$(grep "^PASS_MIN_DAYS" /etc/login.defs | awk '{print $2}')
 PASS_WARN=$(grep "^PASS_WARN_AGE" /etc/login.defs | awk '{print $2}')
-info "Password policy: MAX=$PASS_MAX, MIN=$PASS_MIN, WARN=$PASS_WARN"
+_emit_info "Password policy: MAX=$PASS_MAX, MIN=$PASS_MIN, WARN=$PASS_WARN"
 
 # Umask Check — F-105: scan all sources individually, report mismatches.
 # tail -1 across multi-file glob picks last match in alphabetic order which
@@ -2513,13 +2768,13 @@ for _file in "${!_UMASK_BY_FILE[@]}"; do
   [[ -n "$_v" ]] && _UMASK_DISTINCT["$_v"]=1
 done
 if [[ "${#_UMASK_DISTINCT[@]}" -eq 0 ]]; then
-  warn "Default umask not explicitly set in any /etc/ source"
+  _emit_warn "Default umask not explicitly set in any /etc/ source"
 elif [[ "${#_UMASK_DISTINCT[@]}" -eq 1 ]]; then
   UMASK_VAL="${!_UMASK_DISTINCT[*]}"
   if [[ "$UMASK_VAL" =~ ^0*(27|77)$ ]]; then
-    pass "Default umask: $UMASK_VAL (restrictive, consistent across /etc/)"
+    _emit_pass "Default umask: $UMASK_VAL (restrictive, consistent across /etc/)"
   else
-    warn "Default umask: $UMASK_VAL (recommended: 027 or 077)"
+    _emit_warn "Default umask: $UMASK_VAL (recommended: 027 or 077)"
   fi
 else
   # Conflicting umask values — likely runtime confusion, report all
@@ -2528,7 +2783,7 @@ else
     [[ -n "${_UMASK_BY_FILE[$_file]}" ]] && \
       _conflict_summary+="${_file##*/}=${_UMASK_BY_FILE[$_file]}, "
   done
-  warn "Default umask has CONFLICTING values across files: ${_conflict_summary%, } (last shell-init wins at runtime)"
+  _emit_warn "Default umask has CONFLICTING values across files: ${_conflict_summary%, } (last shell-init wins at runtime)"
 fi
 
 # Faillock
@@ -2542,9 +2797,9 @@ if require_cmd faillock; then
     # Count unique usernames with failures
     _LOCKED_USERS=$(echo "$_FAILLOCK_OUT" | grep -B50 "^[0-9]\{4\}-" | grep -c "^[a-zA-Z].*:" || true)
     _LOCKED_USERS=${_LOCKED_USERS:-0}
-    warn "Faillock: $LOCKED failed attempt(s) across $_LOCKED_USERS account(s)"
+    _emit_warn "Faillock: $LOCKED failed attempt(s) across $_LOCKED_USERS account(s)"
   else
-    pass "Faillock: no recorded failed login attempts"
+    _emit_pass "Faillock: no recorded failed login attempts"
   fi
 fi
 
@@ -2567,9 +2822,9 @@ while read -r USER_HOME; do
     [[ -f "$USER_HOME/$HIST" ]] || continue
     PERMS=$(stat -c %a "$USER_HOME/$HIST" 2>/dev/null)
     if (( (8#${PERMS:-777} & 8#077) != 0 )); then
-      warn "Shell history too open: $USER_HOME/$HIST ($PERMS, should be 600 or stricter)"
+      _emit_warn "Shell history too open: $USER_HOME/$HIST ($PERMS, should be 600 or stricter)"
     else
-      pass "Shell history: $USER_HOME/$HIST ($PERMS)"
+      _emit_pass "Shell history: $USER_HOME/$HIST ($PERMS)"
     fi
   done
   # App histories: world-readable (007) bit is the danger; group access acceptable
@@ -2577,7 +2832,7 @@ while read -r USER_HOME; do
     [[ -f "$USER_HOME/$HIST" ]] || continue
     PERMS=$(stat -c %a "$USER_HOME/$HIST" 2>/dev/null)
     if (( (8#${PERMS:-777} & 8#007) != 0 )); then
-      warn "App history world-readable: $USER_HOME/$HIST ($PERMS — may contain tokens/credentials)"
+      _emit_warn "App history world-readable: $USER_HOME/$HIST ($PERMS — may contain tokens/credentials)"
     fi
     # No PASS for app histories — too noisy at scale; user gets implicit pass via no-warn
   done
@@ -2604,21 +2859,21 @@ _SGID_WARN_MAX=20
 
 SUID_COUNT=$(_safe_find_root -perm -4000 -type f | wc -l)
 if [[ "$SUID_COUNT" -le "$_SUID_PASS_MAX" ]]; then
-  pass "SUID files: $SUID_COUNT (≤${_SUID_PASS_MAX})"
+  _emit_pass "SUID files: $SUID_COUNT (≤${_SUID_PASS_MAX})"
 elif [[ "$SUID_COUNT" -le "$_SUID_WARN_MAX" ]]; then
-  warn "SUID files: $SUID_COUNT (>${_SUID_PASS_MAX}, investigate)"
+  _emit_warn "SUID files: $SUID_COUNT (>${_SUID_PASS_MAX}, investigate)"
 else
-  fail "SUID files: $SUID_COUNT (>${_SUID_WARN_MAX})"
+  _emit_fail "SUID files: $SUID_COUNT (>${_SUID_WARN_MAX})"
 fi
 
 # SGID Files
 SGID_COUNT=$(_safe_find_root -perm -2000 -type f | wc -l)
 if [[ "$SGID_COUNT" -le "$_SGID_PASS_MAX" ]]; then
-  pass "SGID files: $SGID_COUNT (≤${_SGID_PASS_MAX})"
+  _emit_pass "SGID files: $SGID_COUNT (≤${_SGID_PASS_MAX})"
 elif [[ "$SGID_COUNT" -le "$_SGID_WARN_MAX" ]]; then
-  warn "SGID files: $SGID_COUNT (>${_SGID_PASS_MAX})"
+  _emit_warn "SGID files: $SGID_COUNT (>${_SGID_PASS_MAX})"
 else
-  fail "SGID files: $SGID_COUNT (>${_SGID_WARN_MAX})"
+  _emit_fail "SGID files: $SGID_COUNT (>${_SGID_WARN_MAX})"
 fi
 
 # World-Writable — F-110: cache find result so we don't run the same scan
@@ -2634,9 +2889,9 @@ else
 fi
 WW_COUNT=${WW_COUNT:-0}
 if [[ "$WW_COUNT" -eq 0 ]]; then
-  pass "World-writable files: 0"
+  _emit_pass "World-writable files: 0"
 else
-  fail "World-writable files: $WW_COUNT"
+  _emit_fail "World-writable files: $WW_COUNT"
   if ! $JSON_MODE; then
     while read -r f; do
       printf "       %s\n" "$f"
@@ -2648,36 +2903,42 @@ unset _WW_RESULT
 # Unowned Files
 UNOWNED=$(_safe_find_root -not -path '/var/lib/gdm/*' \( -nouser -o -nogroup \) | wc -l)
 if [[ "$UNOWNED" -eq 0 ]]; then
-  pass "Unowned files: 0"
+  _emit_pass "Unowned files: 0"
 elif [[ "$UNOWNED" -le 5 ]]; then
-  warn "Unowned files: $UNOWNED (investigate)"
+  _emit_warn "Unowned files: $UNOWNED (investigate)"
 else
-  fail "Unowned files: $UNOWNED (>5)"
+  _emit_fail "Unowned files: $UNOWNED (>5)"
 fi
 
 # Swappiness
 _SWAPPINESS=$(sysctl -n vm.swappiness 2>/dev/null || echo "N/A")
 if [[ "$_SWAPPINESS" != "N/A" ]]; then
   if [[ "$_SWAPPINESS" -le 10 ]]; then
-    pass "Swappiness: $_SWAPPINESS (low — minimal swap usage)"
+    _emit_pass "Swappiness: $_SWAPPINESS (low — minimal swap usage)"
   elif [[ "$_SWAPPINESS" -le 60 ]]; then
-    info "Swappiness: $_SWAPPINESS (default range)"
+    _emit_info "Swappiness: $_SWAPPINESS (default range)"
   else
-    warn "Swappiness: $_SWAPPINESS (high — more data written to disk, recovery risk)"
+    _emit_warn "Swappiness: $_SWAPPINESS (high — more data written to disk, recovery risk)"
   fi
 fi
 
 # ACL support on root filesystem
 if require_cmd getfacl; then
   if mount | grep " / " | grep -qE "acl|posixacl"; then
-    pass "ACL support: enabled on root filesystem"
+    _emit_pass "ACL support: enabled on root filesystem"
   else
-    # Most modern filesystems (ext4, xfs, btrfs) have ACL enabled by default
-    _ROOT_FS_TYPE=$(df -T / 2>/dev/null | awk 'NR==2{print $2}')
-    if [[ "$_ROOT_FS_TYPE" =~ ^(ext4|xfs|btrfs)$ ]]; then
-      pass "ACL support: $_ROOT_FS_TYPE has ACL enabled by default"
+    # Most modern filesystems (ext4, xfs, btrfs) have ACL enabled by default.
+    # Use findmnt instead of `df -T` — df can wrap on long device names
+    # (LUKS-LVM dm-X paths) and break the awk NR==2 column extraction.
+    if require_cmd findmnt; then
+      _ROOT_FS_TYPE=$(findmnt -no FSTYPE / 2>/dev/null)
     else
-      info "ACL support: could not verify on $_ROOT_FS_TYPE"
+      _ROOT_FS_TYPE=$(df -PT / 2>/dev/null | tail -1 | awk '{print $2}')
+    fi
+    if [[ "$_ROOT_FS_TYPE" =~ ^(ext4|xfs|btrfs)$ ]]; then
+      _emit_pass "ACL support: $_ROOT_FS_TYPE has ACL enabled by default"
+    else
+      _emit_info "ACL support: could not verify on $_ROOT_FS_TYPE"
     fi
   fi
 fi
@@ -2686,27 +2947,31 @@ fi
 TMP_MOUNT=$(mount | grep " /tmp " || echo "")
 if [[ -n "$TMP_MOUNT" ]]; then
   if echo "$TMP_MOUNT" | grep -q "nosuid"; then
-    pass "/tmp: nosuid"
+    _emit_pass "/tmp: nosuid"
   else
-    warn "/tmp: no nosuid"
+    _emit_warn "/tmp: no nosuid"
   fi
   if echo "$TMP_MOUNT" | grep -q "noexec"; then
-    pass "/tmp: noexec"
+    _emit_pass "/tmp: noexec"
   else
-    info "/tmp: no noexec (may break programs)"
+    _emit_info "/tmp: no noexec (may break programs)"
   fi
 else
-  info "/tmp: not separately mounted"
+  _emit_info "/tmp: not separately mounted"
 fi
 
-# Core Dumps
+# Core Dumps — F-115b: accept any pipe-to-noop pattern as "disabled".
+# Common hardening choices: |/dev/null, |/bin/false, |/bin/true, |/usr/bin/false.
+# All discard the core dump just as effectively as ulimit=0.
 CORE_PATTERN=$(cat /proc/sys/kernel/core_pattern 2>/dev/null)
 CORE_ULIMIT=$(ulimit -c 2>/dev/null)
 CORE_STORAGE=$(_systemd_conf_val /etc/systemd/coredump.conf Storage 2>/dev/null)
-if [[ "$CORE_ULIMIT" == "0" ]] || echo "$CORE_PATTERN" | grep -q "|/dev/null" || [[ "$CORE_STORAGE" == "none" ]]; then
-  pass "Core dumps: disabled"
+if [[ "$CORE_ULIMIT" == "0" ]] || \
+   echo "$CORE_PATTERN" | grep -qE '^\|(/usr)?/(s)?bin/(false|true)$|^\|/dev/null$' || \
+   [[ "$CORE_STORAGE" == "none" ]]; then
+  _emit_pass "Core dumps: disabled"
 else
-  warn "Core dumps: possible (pattern: $CORE_PATTERN)"
+  _emit_warn "Core dumps: possible (pattern: $CORE_PATTERN)"
 fi
 
 # Important file permissions
@@ -2731,12 +2996,12 @@ for FILE in "${!PERM_CHECKS[@]}"; do
       # Annotate when stricter-than-expected (e.g. shadow=0 vs expected 640)
       # to avoid users panicking at "Permissions /etc/shadow: 0" output (F-115)
       if [[ "$ACTUAL" -lt "$EXPECTED" ]]; then
-        pass "Permissions $FILE: $ACTUAL (stricter than recommended $EXPECTED)"
+        _emit_pass "Permissions $FILE: $ACTUAL (stricter than recommended $EXPECTED)"
       else
-        pass "Permissions $FILE: $ACTUAL"
+        _emit_pass "Permissions $FILE: $ACTUAL"
       fi
     else
-      warn "Permissions $FILE: $ACTUAL (expected: <=$EXPECTED)"
+      _emit_warn "Permissions $FILE: $ACTUAL (expected: <=$EXPECTED)"
     fi
   fi
 done
@@ -2748,9 +3013,9 @@ for BANNER_FILE in /etc/issue /etc/issue.net /etc/motd; do
     # F-117: extend regex to cover Arch, openSUSE, Manjaro, Mint, Pop!_OS,
     # Rocky, AlmaLinux, EndeavourOS — the typical default-banner strings.
     if grep -qiE "(Linux kernel [0-9]|Fedora release|Ubuntu [0-9]|CentOS|Debian GNU|RHEL|Red Hat|Arch Linux|openSUSE|Manjaro Linux|Linux Mint|Pop!_OS|Rocky Linux|AlmaLinux|EndeavourOS)" "$BANNER_FILE" 2>/dev/null; then
-      warn "$BANNER_FILE leaks system info"
+      _emit_warn "$BANNER_FILE leaks system info"
     else
-      pass "$BANNER_FILE: no system info leaked"
+      _emit_pass "$BANNER_FILE: no system info leaked"
     fi
   fi
 done
@@ -2769,50 +3034,50 @@ if require_cmd cryptsetup; then
     [[ -z "$DEV" ]] && continue
     CIPHER=$(cryptsetup status "$DEV" 2>/dev/null | grep "cipher:" | awk '{print $2}')
     KEYSIZE=$(cryptsetup status "$DEV" 2>/dev/null | grep "keysize:" | awk '{print $2}')
-    info "LUKS $DEV: cipher=$CIPHER keysize=$KEYSIZE"
+    _emit_info "LUKS $DEV: cipher=$CIPHER keysize=$KEYSIZE"
     if echo "$CIPHER" | grep -qE "aes-xts"; then
-      pass "LUKS cipher: $CIPHER (strong)"
+      _emit_pass "LUKS cipher: $CIPHER (strong)"
     elif echo "$CIPHER" | grep -qE "aes-cbc"; then
-      warn "LUKS cipher: $CIPHER (aes-cbc has known weaknesses — consider migrating to aes-xts)"
+      _emit_warn "LUKS cipher: $CIPHER (aes-cbc has known weaknesses — consider migrating to aes-xts)"
     elif [[ -n "$CIPHER" ]]; then
-      warn "LUKS cipher: $CIPHER (unusual)"
+      _emit_warn "LUKS cipher: $CIPHER (unusual)"
     fi
   done < <(lsblk -rno NAME,TYPE 2>/dev/null | awk '$2=="crypt" {print $1}')
 else
-  info "cryptsetup not installed — LUKS details skipped"
+  _emit_info "cryptsetup not installed — LUKS details skipped"
 fi
 
 # SSL/TLS Libraries
 if require_cmd openssl; then
   OPENSSL_VER=$(openssl version 2>/dev/null)
-  info "OpenSSL: $OPENSSL_VER"
+  _emit_info "OpenSSL: $OPENSSL_VER"
 fi
 
 # GPG Keys
 if require_cmd gpg; then
   GPG_KEYS=$(gpg --list-keys 2>/dev/null | grep -c "^pub" | ccount)
-  info "GPG keys: $GPG_KEYS"
+  _emit_info "GPG keys: $GPG_KEYS"
 fi
 
 # Entropy Check (new)
 if [[ -f /proc/sys/kernel/random/entropy_avail ]]; then
   ENTROPY=$(< /proc/sys/kernel/random/entropy_avail)
   if [[ "$ENTROPY" -ge 256 ]]; then
-    pass "Entropy: $ENTROPY (sufficient)"
+    _emit_pass "Entropy: $ENTROPY (sufficient)"
   else
-    warn "Entropy: $ENTROPY (low — minimum 256)"
+    _emit_warn "Entropy: $ENTROPY (low — minimum 256)"
   fi
 fi
 
 # Hardware Random Number Generator
 if [[ -c /dev/hwrng ]]; then
-  pass "Hardware RNG: /dev/hwrng present"
+  _emit_pass "Hardware RNG: /dev/hwrng present"
 elif [[ -d /sys/class/misc/hw_random ]]; then
-  pass "Hardware RNG: hw_random device available"
+  _emit_pass "Hardware RNG: hw_random device available"
 elif grep -qE "rdrand|rdseed" /proc/cpuinfo 2>/dev/null; then
-  pass "Hardware RNG: CPU supports RDRAND/RDSEED"
+  _emit_pass "Hardware RNG: CPU supports RDRAND/RDSEED"
 else
-  info "No hardware RNG detected (software entropy only)"
+  _emit_info "No hardware RNG detected (software entropy only)"
 fi
 
 # Swap Encryption (new)
@@ -2828,7 +3093,7 @@ if [[ "$SWAP_ACTIVE" -gt 0 ]]; then
     [[ -z "$swapdev" ]] && continue
     # ZRAM is in-memory compression — not persistent storage, no encryption needed
     if [[ "$swapdev" =~ ^/dev/zram ]]; then
-      info "Swap: $swapdev is ZRAM (in-memory compression — no encryption needed)"
+      _emit_info "Swap: $swapdev is ZRAM (in-memory compression — no encryption needed)"
       continue
     fi
     SWAP_HAS_REAL=true
@@ -2851,14 +3116,14 @@ if [[ "$SWAP_ACTIVE" -gt 0 ]]; then
     fi
   done <<< "$SWAP_DEVS"
   if ! $SWAP_HAS_REAL; then
-    pass "Swap: ZRAM only (in-memory — no disk persistence risk)"
+    _emit_pass "Swap: ZRAM only (in-memory — no disk persistence risk)"
   elif $SWAP_ENCRYPTED; then
-    pass "Swap: encrypted"
+    _emit_pass "Swap: encrypted"
   else
-    warn "Swap: NOT encrypted (memory contents at risk)"
+    _emit_warn "Swap: NOT encrypted (memory contents at risk)"
   fi
 else
-  info "No swap configured"
+  _emit_info "No swap configured"
 fi
 
 }
@@ -2887,13 +3152,13 @@ elif require_cmd zypper; then
 fi
 
 if [[ "$UPDATES" == "0" ]]; then
-  pass "System up to date (0 updates)"
+  _emit_pass "System up to date (0 updates)"
 elif [[ "$UPDATES" != "?" ]] && [[ "$UPDATES" -le 10 ]]; then
-  warn "$UPDATES updates available"
+  _emit_warn "$UPDATES updates available"
 elif [[ "$UPDATES" != "?" ]]; then
-  warn "$UPDATES updates available!"
+  _emit_warn "$UPDATES updates available!"
 else
-  info "Could not check for updates"
+  _emit_info "Could not check for updates"
 fi
 
 # Security Updates
@@ -2931,26 +3196,26 @@ if $SEC_CHECKED; then
   SEC_UPDATES=$(echo "${SEC_UPDATES:-0}" | tr -dc '0-9')
   SEC_UPDATES=${SEC_UPDATES:-0}
   if [[ "${SEC_UPDATES}" -gt 0 ]]; then
-    fail "Security updates: $SEC_UPDATES"
+    _emit_fail "Security updates: $SEC_UPDATES"
   else
-    pass "No pending security updates"
+    _emit_pass "No pending security updates"
   fi
 else
-  info "Security updates: could not check (unsupported package manager)"
+  _emit_info "Security updates: could not check (unsupported package manager)"
 fi
 
 # Package count
 if require_cmd rpm; then
   PKG_COUNT=$(rpm -qa 2>/dev/null | wc -l)
-  info "Installed packages: $PKG_COUNT"
+  _emit_info "Installed packages: $PKG_COUNT"
 elif require_cmd dpkg; then
   PKG_COUNT=$(dpkg -l 2>/dev/null | grep -c "^ii")
-  info "Installed packages: $PKG_COUNT"
+  _emit_info "Installed packages: $PKG_COUNT"
 elif require_cmd pacman; then
   PKG_COUNT=$(pacman -Q 2>/dev/null | wc -l)
-  info "Installed packages: $PKG_COUNT"
+  _emit_info "Installed packages: $PKG_COUNT"
 else
-  info "Package count: unsupported package manager"
+  _emit_info "Package count: unsupported package manager"
 fi
 
 # RPM GPG Verification
@@ -2967,48 +3232,48 @@ if require_cmd rpm; then
     | grep "RSA:(none) PGP:(none) GPG:(none)" | grep -cvE "^gpg-pubkey-|^kmod-" | ccount)
   RPM_NOSIG_KMOD_ONLY=$(( RPM_NOSIG - RPM_NOSIG_KMOD ))
   if [[ "$RPM_NOSIG" -eq 0 ]]; then
-    pass "All RPM packages signed"
+    _emit_pass "All RPM packages signed"
   elif [[ "$RPM_NOSIG_KMOD" -eq 0 && "$RPM_NOSIG_KMOD_ONLY" -gt 0 ]]; then
-    info "$RPM_NOSIG unsigned RPM packages (all kmod — locally built, expected)"
+    _emit_info "$RPM_NOSIG unsigned RPM packages (all kmod — locally built, expected)"
   elif [[ "$RPM_NOSIG_KMOD" -gt 0 && "$RPM_NOSIG_KMOD_ONLY" -gt 0 ]]; then
-    warn "$RPM_NOSIG_KMOD unsigned RPM packages (+ $RPM_NOSIG_KMOD_ONLY locally-built kmod)"
+    _emit_warn "$RPM_NOSIG_KMOD unsigned RPM packages (+ $RPM_NOSIG_KMOD_ONLY locally-built kmod)"
   else
-    warn "$RPM_NOSIG unsigned RPM packages"
+    _emit_warn "$RPM_NOSIG unsigned RPM packages"
   fi
 
   # RPM GPG Key Count (new)
   GPG_KEY_COUNT=$(rpm -qa gpg-pubkey 2>/dev/null | wc -l)
-  info "RPM GPG keys imported: $GPG_KEY_COUNT"
+  _emit_info "RPM GPG keys imported: $GPG_KEY_COUNT"
 elif require_cmd dpkg; then
   # Debian/Ubuntu: check for unauthenticated packages and GPG key count
   APT_NOAUTH=$(apt list --installed 2>/dev/null | grep -c "\[.*local\]" || true)
   APT_NOAUTH=${APT_NOAUTH:-0}
   if [[ "$APT_NOAUTH" -eq 0 ]]; then
-    pass "All APT packages from authenticated sources"
+    _emit_pass "All APT packages from authenticated sources"
   else
-    warn "$APT_NOAUTH APT packages from unauthenticated/local sources"
+    _emit_warn "$APT_NOAUTH APT packages from unauthenticated/local sources"
   fi
 
   # APT trusted key count
   APT_KEYS=$(apt-key list 2>/dev/null | grep -c "^pub" || true)
   if [[ "${APT_KEYS:-0}" -gt 0 ]]; then
-    info "APT trusted keys: $APT_KEYS"
+    _emit_info "APT trusted keys: $APT_KEYS"
   else
     # Newer systems use /etc/apt/trusted.gpg.d/
     APT_KEYS=$(find /etc/apt/trusted.gpg.d/ /usr/share/keyrings/ -name "*.gpg" -o -name "*.asc" 2>/dev/null | wc -l || true)
-    info "APT trusted keyrings: ${APT_KEYS:-0}"
+    _emit_info "APT trusted keyrings: ${APT_KEYS:-0}"
   fi
 elif require_cmd pacman; then
   # Arch: check pacman signature enforcement
   if grep -qE "^SigLevel\s*=.*Required" /etc/pacman.conf 2>/dev/null; then
-    pass "Pacman: package signature verification required"
+    _emit_pass "Pacman: package signature verification required"
   elif grep -qE "^SigLevel\s*=.*Never" /etc/pacman.conf 2>/dev/null; then
-    fail "Pacman: package signature verification DISABLED"
+    _emit_fail "Pacman: package signature verification DISABLED"
   else
-    info "Pacman: default signature level (Optional)"
+    _emit_info "Pacman: default signature level (Optional)"
   fi
 else
-  info "Package signature verification: not available for this package manager"
+  _emit_info "Package signature verification: not available for this package manager"
 fi
 
 # Automated Security Updates
@@ -3019,35 +3284,35 @@ if systemctl is-active dnf5-automatic.timer &>/dev/null || systemctl is-enabled 
   # F-128: sed-based extraction preserves any '=' in value (defensive)
   _DNF5_UPGRADE_TYPE=$(grep -i "^upgrade_type" "$_DNF5_AUTO_CONF" 2>/dev/null | sed -E 's/^[^=]+=[[:space:]]*//;s/[[:space:]]+$//' | tail -1)
   if [[ "${_DNF5_UPGRADE_TYPE,,}" == "security" ]]; then
-    pass "Automated updates: dnf5-automatic enabled (security-only)"
+    _emit_pass "Automated updates: dnf5-automatic enabled (security-only)"
   else
-    pass "Automated updates: dnf5-automatic enabled (upgrade_type=${_DNF5_UPGRADE_TYPE:-default})"
+    _emit_pass "Automated updates: dnf5-automatic enabled (upgrade_type=${_DNF5_UPGRADE_TYPE:-default})"
   fi
 elif systemctl is-active dnf-automatic.timer &>/dev/null || systemctl is-enabled dnf-automatic.timer &>/dev/null; then
-  pass "Automated updates: dnf-automatic enabled"
+  _emit_pass "Automated updates: dnf-automatic enabled"
 elif systemctl is-active unattended-upgrades &>/dev/null || [[ -f /etc/apt/apt.conf.d/20auto-upgrades ]]; then
-  pass "Automated updates: unattended-upgrades active"
+  _emit_pass "Automated updates: unattended-upgrades active"
 elif require_cmd pacman; then
   if systemctl is-active pacman-filesdb-refresh.timer &>/dev/null; then
-    info "Automated updates: pacman-filesdb-refresh timer active (partial)"
+    _emit_info "Automated updates: pacman-filesdb-refresh timer active (partial)"
   else
-    info "Automated updates: Arch uses rolling updates — manual 'pacman -Syu' recommended"
+    _emit_info "Automated updates: Arch uses rolling updates — manual 'pacman -Syu' recommended"
   fi
 elif require_cmd zypper; then
   if systemctl is-active packagekit.service &>/dev/null; then
-    pass "Automated updates: PackageKit service active"
+    _emit_pass "Automated updates: PackageKit service active"
   else
-    warn "No automated security update mechanism detected"
+    _emit_warn "No automated security update mechanism detected"
   fi
 else
-  warn "No automated security update mechanism detected"
+  _emit_warn "No automated security update mechanism detected"
 fi
 
 # Flatpaks
 if require_cmd flatpak; then
   # F-129: --columns=application gives one line per app, no header — exact count
   FLATPAK_COUNT=$(flatpak list --app --columns=application 2>/dev/null | wc -l)
-  info "Flatpaks: $FLATPAK_COUNT"
+  _emit_info "Flatpaks: $FLATPAK_COUNT"
 fi
 
 }
@@ -3062,9 +3327,9 @@ check_rootkit() {
 # post-2018 rootkits like XZ Backdoor, Bootkitty, Kovid, BPFDoor).
 # Recommend chkrootkit (last release 2025-05-12) which knows modern threats.
 if require_cmd rkhunter; then
-  info "rkhunter installed but UNMAINTAINED since 2018-02 — signatures miss XZ Backdoor, Bootkitty, BPFDoor; use chkrootkit instead"
+  _emit_info "rkhunter installed but UNMAINTAINED since 2018-02 — signatures miss XZ Backdoor, Bootkitty, BPFDoor; use chkrootkit instead"
 else
-  info "rkhunter not installed (chkrootkit + AIDE + IMA preferred for modern rootkit detection)"
+  _emit_info "rkhunter not installed (chkrootkit + AIDE + IMA preferred for modern rootkit detection)"
 fi
 
 # chkrootkit with false-positive filter (timeout 120s prevents hangs).
@@ -3073,13 +3338,13 @@ if require_cmd chkrootkit; then
   $JSON_MODE || printf "  ${CYN}Running chkrootkit (max 120s)...${RST}\n"
   CHKRK_OUT=$(timeout 120 chkrootkit 2>/dev/null || echo "TIMEOUT")
   if [[ "$CHKRK_OUT" == "TIMEOUT" ]]; then
-    warn "chkrootkit: timed out after 120s"
+    _emit_warn "chkrootkit: timed out after 120s"
   else
     CHKRK_FP_PATTERN="bindshell|sniffer|chkutmp|w55808|slapper|scalper|wted|Xor\.DDoS|linux_ldiscs|suckit"
     CHKRK_INFECTED=$(echo "$CHKRK_OUT" | grep "INFECTED" | grep -cviE "$CHKRK_FP_PATTERN" | ccount)
     CHKRK_FP=$(echo "$CHKRK_OUT" | grep "INFECTED" | grep -ciE "$CHKRK_FP_PATTERN" | ccount)
     if [[ "$CHKRK_INFECTED" -eq 0 ]]; then
-      pass "chkrootkit: clean (0 real INFECTED, $CHKRK_FP known false positives filtered)"
+      _emit_pass "chkrootkit: clean (0 real INFECTED, $CHKRK_FP known false positives filtered)"
       # F-132: show filtered FPs as INFO so user can verify nothing legit was hidden
       if [[ "$CHKRK_FP" -gt 0 ]] && ! $JSON_MODE; then
         echo "$CHKRK_OUT" | grep "INFECTED" | grep -iE "$CHKRK_FP_PATTERN" | head -3 | while read -r fp; do
@@ -3087,7 +3352,7 @@ if require_cmd chkrootkit; then
         done
       fi
     else
-      fail "chkrootkit: $CHKRK_INFECTED INFECTED (after filtering $CHKRK_FP known FPs)"
+      _emit_fail "chkrootkit: $CHKRK_INFECTED INFECTED (after filtering $CHKRK_FP known FPs)"
       if ! $JSON_MODE; then
         while read -r i; do
           printf "       %s\n" "$i"
@@ -3096,7 +3361,7 @@ if require_cmd chkrootkit; then
     fi
   fi
 else
-  info "chkrootkit not installed — skipped (recommended over rkhunter for 2026)"
+  _emit_info "chkrootkit not installed — skipped (recommended over rkhunter for 2026)"
 fi
 
 # Suspect Cron Jobs — F-133: when cron.deny restricts users, `crontab -l -u`
@@ -3116,11 +3381,11 @@ while read -r USER_HOME; do
     CRONTAB=$(crontab -l -u "$_cron_user" 2>/dev/null | grep -v "^#" | grep -v "^$" || true)
   fi
   if [[ -n "$CRONTAB" ]]; then
-    info "Crontab $_cron_user:"
+    _emit_info "Crontab $_cron_user:"
     while read -r line; do
       $JSON_MODE || printf "       %s\n" "$line"
       if echo "$line" | grep -qiE "curl|wget|nc |ncat|python.*http|bash.*http|/dev/tcp"; then
-        warn "Suspicious cron entry: $line"
+        _emit_warn "Suspicious cron entry: $line"
       fi
     done <<< "$CRONTAB"
   fi
@@ -3132,7 +3397,7 @@ for CRONDIR in /etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/cron.weekly /et
     _cron_files=("$CRONDIR"/*)
     shopt -u nullglob
     COUNT="${#_cron_files[@]}"
-    info "$CRONDIR: $COUNT entries"
+    _emit_info "$CRONDIR: $COUNT entries"
   fi
 done
 
@@ -3150,9 +3415,9 @@ check_processes() {
 # shellcheck disable=SC2009  # pgrep can't match multi-pattern regex with word boundaries
 SUSPECT_PROCS=$(ps aux 2>/dev/null | grep -iE "\bnc\s+-[a-z]*l|\bncat\s+-[a-z]*l|\bsocat\s+.*EXEC|\bsocat\s+.*TCP-LISTEN|\bmeterpreter\b|\breverse[_.-]shell\b|\bcobalt\s*strike\b|\bmimikatz\b|\blazagne\b|\bkeylog\b" | grep -v grep || true)
 if [[ -z "$SUSPECT_PROCS" ]]; then
-  pass "No obvious-named suspicious processes (real malware renames — see AIDE/IMA/chkrootkit for actual integrity)"
+  _emit_pass "No obvious-named suspicious processes (real malware renames — see AIDE/IMA/chkrootkit for actual integrity)"
 else
-  fail "Suspicious processes found:"
+  _emit_fail "Suspicious processes found:"
   if ! $JSON_MODE; then
     while read -r p; do printf "       %s\n" "$p"; done <<< "$SUSPECT_PROCS"
   fi
@@ -3160,7 +3425,7 @@ fi
 
 # Processes running as root
 ROOT_PROCS=$(ps aux | awk '$1=="root" {print $11}' | sort -u | wc -l)
-info "Root processes (unique): $ROOT_PROCS"
+_emit_info "Root processes (unique): $ROOT_PROCS"
 
 # Hidden Processes
 PS_PIDS=$(ps -eo pid --no-headers | sed 's/ //g' | sort -u)
@@ -3169,28 +3434,28 @@ HIDDEN=$(comm -23 <(echo "$PROC_PIDS") <(echo "$PS_PIDS") | wc -l)
 HIDDEN=${HIDDEN//[^0-9]/}
 HIDDEN=${HIDDEN:-0}
 if [[ "$HIDDEN" -le 10 ]]; then
-  pass "Hidden processes: $HIDDEN (normal: race condition)"
+  _emit_pass "Hidden processes: $HIDDEN (normal: race condition)"
 else
-  warn "Hidden processes: $HIDDEN"
+  _emit_warn "Hidden processes: $HIDDEN"
 fi
 
 # Zombie / Dead Processes
 _ZOMBIE_COUNT=$(ps aux 2>/dev/null | awk '$8 ~ /^Z/ {count++} END {print count+0}')
 if [[ "$_ZOMBIE_COUNT" -eq 0 ]]; then
-  pass "Zombie processes: 0"
+  _emit_pass "Zombie processes: 0"
 elif [[ "$_ZOMBIE_COUNT" -le 5 ]]; then
-  warn "Zombie processes: $_ZOMBIE_COUNT (investigate with: ps aux | grep ' Z ')"
+  _emit_warn "Zombie processes: $_ZOMBIE_COUNT (investigate with: ps aux | grep ' Z ')"
 else
-  fail "Zombie processes: $_ZOMBIE_COUNT (resource leak or crashed processes)"
+  _emit_fail "Zombie processes: $_ZOMBIE_COUNT (resource leak or crashed processes)"
 fi
 
 # Deleted Binaries still running
 # shellcheck disable=SC2010,SC2012  # /proc/*/exe requires ls -l to show symlink targets
 DELETED_BINS=$(ls -l /proc/*/exe 2>/dev/null | grep -c "(deleted)")
 if [[ "$DELETED_BINS" -eq 0 ]]; then
-  pass "No deleted binaries running"
+  _emit_pass "No deleted binaries running"
 else
-  warn "Deleted binaries running: $DELETED_BINS"
+  _emit_warn "Deleted binaries running: $DELETED_BINS"
   if ! $JSON_MODE; then
     # shellcheck disable=SC2010
     while read -r d; do
@@ -3211,7 +3476,7 @@ check_network() {
 ESTAB=$(ss -tnp state established 2>/dev/null | tail -n+2)
 ESTAB_COUNT=$(echo "$ESTAB" | grep -c . || true)
 ESTAB_COUNT=${ESTAB_COUNT:-0}
-info "Established TCP connections: $ESTAB_COUNT"
+_emit_info "Established TCP connections: $ESTAB_COUNT"
 if [[ "$ESTAB_COUNT" -gt 0 ]] && ! $JSON_MODE; then
   while read -r line; do
     printf "       %s\n" "$line"
@@ -3222,11 +3487,11 @@ fi
 ICMP_REDIR_ALL=$(sysctl -n net.ipv4.conf.all.accept_redirects 2>/dev/null)
 ICMP_REDIR_DEF=$(sysctl -n net.ipv4.conf.default.accept_redirects 2>/dev/null)
 if [[ "${ICMP_REDIR_ALL:-1}" -eq 0 ]] && [[ "${ICMP_REDIR_DEF:-1}" -eq 0 ]]; then
-  pass "ICMP redirects: blocked (all+default)"
+  _emit_pass "ICMP redirects: blocked (all+default)"
 elif [[ "${ICMP_REDIR_ALL:-1}" -eq 0 ]]; then
-  warn "ICMP redirects: conf.all=0, but conf.default=${ICMP_REDIR_DEF} (new interfaces may accept)"
+  _emit_warn "ICMP redirects: conf.all=0, but conf.default=${ICMP_REDIR_DEF} (new interfaces may accept)"
 else
-  fail "ICMP redirects: accepted"
+  _emit_fail "ICMP redirects: accepted"
 fi
 
 # TCP Wrappers (new)
@@ -3236,14 +3501,14 @@ if [[ -f /etc/hosts.allow ]]; then
   ALLOW_RULES="${ALLOW_RULES:-0}"
   DENY_RULES=$(grep -cvE '^#|^$' /etc/hosts.deny 2>/dev/null)
   DENY_RULES="${DENY_RULES:-0}"
-  info "TCP wrappers: $ALLOW_RULES allow, $DENY_RULES deny rules"
+  _emit_info "TCP wrappers: $ALLOW_RULES allow, $DENY_RULES deny rules"
   if [[ "$DENY_RULES" -eq 0 ]]; then
-    info "hosts.deny: no deny rules (TCP wrappers deprecated on modern systems)"
+    _emit_info "hosts.deny: no deny rules (TCP wrappers deprecated on modern systems)"
   else
-    pass "hosts.deny: $DENY_RULES deny rules"
+    _emit_pass "hosts.deny: $DENY_RULES deny rules"
   fi
 else
-  info "TCP wrappers: not configured (hosts.allow missing)"
+  _emit_info "TCP wrappers: not configured (hosts.allow missing)"
 fi
 
 # Connections in WAIT state
@@ -3251,11 +3516,11 @@ sub_header "Connection States"
 _WAIT_COUNT=$(ss -tn state time-wait 2>/dev/null | tail -n+2 | wc -l)
 _WAIT_COUNT=${_WAIT_COUNT:-0}
 if [[ "$_WAIT_COUNT" -gt 100 ]]; then
-  warn "TCP TIME_WAIT connections: $_WAIT_COUNT (possible resource exhaustion)"
+  _emit_warn "TCP TIME_WAIT connections: $_WAIT_COUNT (possible resource exhaustion)"
 elif [[ "$_WAIT_COUNT" -gt 50 ]]; then
-  info "TCP TIME_WAIT connections: $_WAIT_COUNT"
+  _emit_info "TCP TIME_WAIT connections: $_WAIT_COUNT"
 else
-  pass "TCP TIME_WAIT connections: $_WAIT_COUNT"
+  _emit_pass "TCP TIME_WAIT connections: $_WAIT_COUNT"
 fi
 
 # ARP monitoring
@@ -3263,13 +3528,13 @@ sub_header "ARP Monitoring"
 _ARP_MON_FOUND=false
 for _arp_tool in arpwatch arpon addrwatch; do
   if require_cmd "$_arp_tool" || systemctl is-active "${_arp_tool}" &>/dev/null; then
-    pass "ARP monitoring: $_arp_tool available"
+    _emit_pass "ARP monitoring: $_arp_tool available"
     _ARP_MON_FOUND=true
     break
   fi
 done
 if ! $_ARP_MON_FOUND; then
-  info "No ARP monitoring software detected (consider arpwatch)"
+  _emit_info "No ARP monitoring software detected (consider arpwatch)"
 fi
 
 }
@@ -3284,43 +3549,43 @@ if require_cmd docker; then
   if systemctl is-active docker &>/dev/null; then
     # F-145: distinguish rootless (safe) from rootful (privileged daemon)
     if docker info 2>/dev/null | grep -qi "rootless"; then
-      info "Docker rootless mode — minimal daemon attack surface"
+      _emit_info "Docker rootless mode — minimal daemon attack surface"
     else
-      warn "Docker daemon running (rootful) — consider rootless mode"
+      _emit_warn "Docker daemon running (rootful) — consider rootless mode"
     fi
     CONTAINERS=$(docker ps -q 2>/dev/null | wc -l)
-    info "Running containers: $CONTAINERS"
+    _emit_info "Running containers: $CONTAINERS"
   else
-    info "Docker installed, not active"
+    _emit_info "Docker installed, not active"
   fi
 fi
 
 if require_cmd podman; then
   PODMAN_ROOT=$(podman ps -q 2>/dev/null | wc -l)
   if [[ "$PODMAN_ROOT" -gt 0 ]]; then
-    warn "Podman root containers: $PODMAN_ROOT"
+    _emit_warn "Podman root containers: $PODMAN_ROOT"
   else
-    pass "Podman containers (root): 0"
+    _emit_pass "Podman containers (root): 0"
   fi
 fi
 
 if require_cmd virsh; then
   VM_COUNT=$(virsh list --all 2>/dev/null | grep -cE "running|paused" | ccount)
-  info "Running VMs: $VM_COUNT"
+  _emit_info "Running VMs: $VM_COUNT"
 fi
 
 # F-148: severity-tiered classification of user.max_user_namespaces
 USER_NS=$(sysctl -n user.max_user_namespaces 2>/dev/null || echo "N/A")
 if [[ "$USER_NS" == "N/A" ]]; then
-  info "Max user namespaces: N/A (kernel does not expose this sysctl)"
+  _emit_info "Max user namespaces: N/A (kernel does not expose this sysctl)"
 elif [[ "$USER_NS" == "0" ]]; then
-  pass "Max user namespaces: 0 (hardened — userns disabled)"
+  _emit_pass "Max user namespaces: 0 (hardened — userns disabled)"
 elif [[ "$USER_NS" -lt 1000 ]]; then
-  pass "Max user namespaces: $USER_NS (restricted)"
+  _emit_pass "Max user namespaces: $USER_NS (restricted)"
 elif [[ "$USER_NS" -lt 10000 ]]; then
-  info "Max user namespaces: $USER_NS (Fedora/RHEL default range)"
+  _emit_info "Max user namespaces: $USER_NS (Fedora/RHEL default range)"
 else
-  info "Max user namespaces: $USER_NS (high — typical for Ubuntu/container hosts)"
+  _emit_info "Max user namespaces: $USER_NS (high — typical for Ubuntu/container hosts)"
 fi
 
 }
@@ -3358,11 +3623,11 @@ _journal_raw=$(journalctl -p err --since "1 hour ago" --no-pager -q 2>/dev/null 
 JOURNAL_ERR=$(echo "$_journal_raw" | grep -cvE "$_journal_filter" || true)
 JOURNAL_ERR=${JOURNAL_ERR:-0}
 if [[ "$JOURNAL_ERR" -le 15 ]]; then
-  pass "Journal errors (1h): $JOURNAL_ERR"
+  _emit_pass "Journal errors (1h): $JOURNAL_ERR"
 elif [[ "$JOURNAL_ERR" -le 100 ]]; then
-  warn "Journal errors (1h): $JOURNAL_ERR (review with: journalctl -p err --since '1 hour ago')"
+  _emit_warn "Journal errors (1h): $JOURNAL_ERR (review with: journalctl -p err --since '1 hour ago')"
 else
-  fail "Journal errors (1h): $JOURNAL_ERR — top offending sources:"
+  _emit_fail "Journal errors (1h): $JOURNAL_ERR — top offending sources:"
   if ! $JSON_MODE; then
     echo "$_journal_raw" | grep -vE "$_journal_filter" | awk '{print $5}' \
       | sort | uniq -c | sort -rn | head -3 | while read -r line; do
@@ -3388,51 +3653,53 @@ JOURNAL_CRIT=$(echo "$_JCRIT_LINES" \
   | grep -cvE "sudo|password is required|auth could not identify|systemd-coredump|watchdog.*did not stop|sp5100-tco|amd_pci_pm|amd_nb|pcieport.*AER.*(Corrected|RxErr)" || true)
 JOURNAL_CRIT=${JOURNAL_CRIT:-0}
 if [[ "$JOURNAL_CRIT" -eq 0 ]]; then
-  pass "Journal critical (24h): 0"
+  _emit_pass "Journal critical (24h): 0"
 elif [[ "$JOURNAL_CRIT" -le 20 ]]; then
-  warn "Journal critical (24h): $JOURNAL_CRIT"
+  _emit_warn "Journal critical (24h): $JOURNAL_CRIT"
 else
-  fail "Journal critical (24h): $JOURNAL_CRIT"
+  _emit_fail "Journal critical (24h): $JOURNAL_CRIT"
 fi
 
 # F-151: limit to recent (1h) — kernel ring buffer accumulates boot-time
 # errors over months on long-uptime servers, inflating count
 DMESG_ERR=$(dmesg --level=err,crit,alert,emerg --since "1 hour ago" 2>/dev/null | wc -l)
 if [[ "$DMESG_ERR" -le 5 ]]; then
-  pass "dmesg errors (1h): $DMESG_ERR"
+  _emit_pass "dmesg errors (1h): $DMESG_ERR"
 else
-  warn "dmesg errors (1h): $DMESG_ERR"
+  _emit_warn "dmesg errors (1h): $DMESG_ERR"
 fi
 
 OOM_KILLS=$(dmesg 2>/dev/null | grep -c "Out of memory" | ccount)
 if [[ "$OOM_KILLS" -eq 0 ]]; then
-  pass "OOM kills: 0"
+  _emit_pass "OOM kills: 0"
 else
-  fail "OOM kills: $OOM_KILLS"
+  _emit_fail "OOM kills: $OOM_KILLS"
 fi
 
 SEGFAULTS=$(dmesg 2>/dev/null | grep -c "segfault" | ccount)
 if [[ "$SEGFAULTS" -eq 0 ]]; then
-  pass "Segfaults: 0"
+  _emit_pass "Segfaults: 0"
 else
-  warn "Segfaults: $SEGFAULTS"
+  _emit_warn "Segfaults: $SEGFAULTS"
 fi
 
 if [[ -f /etc/logrotate.conf ]]; then
-  pass "logrotate configured"
+  _emit_pass "logrotate configured"
 else
-  warn "logrotate not configured"
+  _emit_warn "logrotate not configured"
 fi
 
-JOURNAL_STORAGE=$(journalctl --disk-usage 2>/dev/null | grep -oP '\d+\.?\d*[GMKT]' | head -1)
-info "Journal disk usage: $JOURNAL_STORAGE"
+# LC_ALL=C — journalctl translates the size suffix and may emit comma decimals
+# on de_DE/fr_FR (e.g. "280,0M") which the dot-only regex below cannot parse.
+JOURNAL_STORAGE=$(LC_ALL=C journalctl --disk-usage 2>/dev/null | grep -oP '\d+\.?\d*[GMKT]' | head -1)
+_emit_info "Journal disk usage: ${JOURNAL_STORAGE:-unknown}"
 
 # Systemd Journal Forwarding (new)
 JOURNAL_FWD=$(grep -i "ForwardToSyslog" /etc/systemd/journald.conf 2>/dev/null | grep -v "^#" | head -1)
 if [[ -n "$JOURNAL_FWD" ]]; then
-  info "Journal forwarding: $JOURNAL_FWD"
+  _emit_info "Journal forwarding: $JOURNAL_FWD"
 else
-  info "Journal forwarding: default (not explicitly configured)"
+  _emit_info "Journal forwarding: default (not explicitly configured)"
 fi
 
 # Deleted log files still in use (file handle open but file deleted — logs lost on restart)
@@ -3441,11 +3708,11 @@ _DELETED_LOGS=$(find /proc/*/fd -lname '*/log/*' -exec ls -la {} \; 2>/dev/null 
 _DELETED_LOGS="${_DELETED_LOGS:-0}"
 _DELETED_LOGS=${_DELETED_LOGS:-0}
 if [[ "$_DELETED_LOGS" -eq 0 ]]; then
-  pass "No deleted log files in use"
+  _emit_pass "No deleted log files in use"
 elif [[ "$_DELETED_LOGS" -le 3 ]]; then
-  info "Deleted log files still open: $_DELETED_LOGS (logrotate pending restart)"
+  _emit_info "Deleted log files still open: $_DELETED_LOGS (logrotate pending restart)"
 else
-  warn "Deleted log files still open: $_DELETED_LOGS (services holding stale file handles)"
+  _emit_warn "Deleted log files still open: $_DELETED_LOGS (services holding stale file handles)"
 fi
 
 # F-155: only check empty syslog files if rsyslog/syslog-ng is actually
@@ -3456,12 +3723,12 @@ if systemctl is-active rsyslog syslog-ng &>/dev/null; then
   for _logf in /var/log/messages /var/log/syslog /var/log/auth.log /var/log/secure /var/log/kern.log; do
     if [[ -f "$_logf" && ! -s "$_logf" ]]; then
       ((_EMPTY_LOGS++))
-      warn "Empty log file: $_logf (logging may be broken)"
+      _emit_warn "Empty log file: $_logf (logging may be broken)"
     fi
   done
-  [[ "$_EMPTY_LOGS" -eq 0 ]] && pass "No empty log files detected"
+  [[ "$_EMPTY_LOGS" -eq 0 ]] && _emit_pass "No empty log files detected"
 else
-  info "Syslog implementation not active — using systemd-journald only (modern default)"
+  _emit_info "Syslog implementation not active — using systemd-journald only (modern default)"
 fi
 
 }
@@ -3476,15 +3743,15 @@ UPTIME=$(uptime -p)
 LOAD=$(awk '{print $1, $2, $3}' /proc/loadavg)
 CPU_COUNT=$(nproc)
 LOAD_1=$(echo "$LOAD" | awk '{print $1}')
-info "Uptime: $UPTIME"
-info "Load: $LOAD (CPUs: $CPU_COUNT)"
+_emit_info "Uptime: $UPTIME"
+_emit_info "Load: $LOAD (CPUs: $CPU_COUNT)"
 
 # F-157: replace bc dependency with awk (POSIX-portable, always available)
 if [[ -n "$LOAD_1" ]]; then
   if awk -v l="$LOAD_1" -v c="$CPU_COUNT" 'BEGIN { exit !(l > c) }'; then
-    warn "Load ($LOAD_1) > CPU count ($CPU_COUNT)"
+    _emit_warn "Load ($LOAD_1) > CPU count ($CPU_COUNT)"
   else
-    pass "Load OK: $LOAD_1 / $CPU_COUNT CPUs"
+    _emit_pass "Load OK: $LOAD_1 / $CPU_COUNT CPUs"
   fi
 fi
 
@@ -3495,21 +3762,21 @@ MEM_AVAIL=$(free -h | awk '/^Mem:/ {print $7}')
 # caches files which inflates 'used'. 'available' is what apps can claim
 # without paging.
 MEM_AVAIL_PCT=$(free | awk '/^Mem:/ {printf "%.0f", ($7/$2)*100}')
-info "RAM: $MEM_USED / $MEM_TOTAL (${MEM_AVAIL_PCT}% available, $MEM_AVAIL free)"
+_emit_info "RAM: $MEM_USED / $MEM_TOTAL (${MEM_AVAIL_PCT}% available, $MEM_AVAIL free)"
 if [[ "$MEM_AVAIL_PCT" -lt 5 ]]; then
-  fail "RAM: only ${MEM_AVAIL_PCT}% available (critical)"
+  _emit_fail "RAM: only ${MEM_AVAIL_PCT}% available (critical)"
 elif [[ "$MEM_AVAIL_PCT" -lt 15 ]]; then
-  warn "RAM: ${MEM_AVAIL_PCT}% available"
+  _emit_warn "RAM: ${MEM_AVAIL_PCT}% available"
 else
-  pass "RAM: ${MEM_AVAIL_PCT}% available"
+  _emit_pass "RAM: ${MEM_AVAIL_PCT}% available"
 fi
 
 SWAP_TOTAL=$(free -h | awk '/^Swap:/ {print $2}')
 SWAP_USED=$(free -h | awk '/^Swap:/ {print $3}')
 if [[ "$SWAP_TOTAL" != "0B" ]] && [[ "$SWAP_TOTAL" != "0" ]]; then
-  info "Swap: $SWAP_USED / $SWAP_TOTAL"
+  _emit_info "Swap: $SWAP_USED / $SWAP_TOTAL"
 else
-  info "No swap configured"
+  _emit_info "No swap configured"
 fi
 
 sub_header "Disk Usage"
@@ -3526,46 +3793,51 @@ while read -r line; do
   # Skip read-only image filesystems (always 100% by design)
   case "$FSTYPE" in
     iso9660|squashfs|erofs|cramfs|romfs)
-      info "Disk $MOUNT: read-only $FSTYPE image (always 100% — skipped)"
+      _emit_info "Disk $MOUNT: read-only $FSTYPE image (always 100% — skipped)"
       continue
       ;;
   esac
   # Skip explicitly read-only mounts (loopback ISOs etc.)
   if mount | grep -qE "on $MOUNT type [^ ]+ \(ro,"; then
-    info "Disk $MOUNT: read-only mount (skipped)"
+    _emit_info "Disk $MOUNT: read-only mount (skipped)"
     continue
   fi
   if [[ "$PCT" -gt 90 ]]; then
-    fail "Disk $MOUNT: ${PCT}% full!"
+    _emit_fail "Disk $MOUNT: ${PCT}% full!"
   elif [[ "$PCT" -gt 80 ]]; then
     if [[ "$MOUNT" == */efi* || "$MOUNT" == */firmware* ]]; then
-      info "Disk $MOUNT: ${PCT}% (EFI/firmware — normal)"
+      _emit_info "Disk $MOUNT: ${PCT}% (EFI/firmware — normal)"
     else
-      warn "Disk $MOUNT: ${PCT}% full"
+      _emit_warn "Disk $MOUNT: ${PCT}% full"
     fi
   else
-    pass "Disk $MOUNT: ${PCT}% used"
+    _emit_pass "Disk $MOUNT: ${PCT}% used"
   fi
 done < <(df -h -T -x tmpfs -x devtmpfs -x squashfs -x iso9660 -x erofs -x overlay 2>/dev/null | tail -n+2)
 
 # F-160: Inode check — detect FS type to label dynamic-inode systems
 # correctly. Btrfs/ZFS/F2FS/Bcachefs all return "-" or 0% — dynamic
 # allocation, not a measurement. Add 80% WARN tier for fixed-inode FS.
-ROOT_FS_TYPE=$(df -T / 2>/dev/null | awk 'NR==2{print $2}')
-INODE_PCT=$(df -i / 2>/dev/null | tail -1 | awk '{print $5}' | tr -d '%')
+# Use findmnt for fs-type — `df -T` can wrap on long device names.
+if require_cmd findmnt; then
+  ROOT_FS_TYPE=$(findmnt -no FSTYPE / 2>/dev/null)
+else
+  ROOT_FS_TYPE=$(df -PT / 2>/dev/null | tail -1 | awk '{print $2}')
+fi
+INODE_PCT=$(df -Pi / 2>/dev/null | tail -1 | awk '{print $5}' | tr -d '%')
 case "$ROOT_FS_TYPE" in
   btrfs|zfs|f2fs|bcachefs)
-    pass "Inodes /: N/A ($ROOT_FS_TYPE — dynamic allocation)"
+    _emit_pass "Inodes /: N/A ($ROOT_FS_TYPE — dynamic allocation)"
     ;;
   *)
     if [[ "$INODE_PCT" == "-" ]] || [[ -z "$INODE_PCT" ]]; then
-      info "Inodes /: not reportable ($ROOT_FS_TYPE)"
+      _emit_info "Inodes /: not reportable ($ROOT_FS_TYPE)"
     elif [[ "$INODE_PCT" -gt 90 ]]; then
-      fail "Inodes /: ${INODE_PCT}% ($ROOT_FS_TYPE — critical)"
+      _emit_fail "Inodes /: ${INODE_PCT}% ($ROOT_FS_TYPE — critical)"
     elif [[ "$INODE_PCT" -gt 80 ]]; then
-      warn "Inodes /: ${INODE_PCT}% ($ROOT_FS_TYPE — approaching limit)"
+      _emit_warn "Inodes /: ${INODE_PCT}% ($ROOT_FS_TYPE — approaching limit)"
     else
-      pass "Inodes /: ${INODE_PCT}% ($ROOT_FS_TYPE)"
+      _emit_pass "Inodes /: ${INODE_PCT}% ($ROOT_FS_TYPE)"
     fi
     ;;
 esac
@@ -3581,9 +3853,9 @@ else
   IOWAIT=0
 fi
 if [[ "${IOWAIT:-0}" -gt 20 ]]; then
-  warn "I/O wait: ${IOWAIT}%"
+  _emit_warn "I/O wait: ${IOWAIT}%"
 else
-  pass "I/O wait: ${IOWAIT:-0}%"
+  _emit_pass "I/O wait: ${IOWAIT:-0}%"
 fi
 
 sub_header "Top 5 CPU"
@@ -3619,13 +3891,13 @@ if [[ -d "$VULN_DIR" ]]; then
     NAME=$(basename "$VULN")
     STATUS=$(cat "$VULN" 2>/dev/null)
     if echo "$STATUS" | grep -qi "vulnerable"; then
-      fail "CPU vuln $NAME: $STATUS"
+      _emit_fail "CPU vuln $NAME: $STATUS"
     elif echo "$STATUS" | grep -qi "mitigation"; then
-      pass "CPU vuln $NAME: mitigated"
+      _emit_pass "CPU vuln $NAME: mitigated"
     elif echo "$STATUS" | grep -qi "not affected"; then
-      pass "CPU vuln $NAME: Not affected"
+      _emit_pass "CPU vuln $NAME: Not affected"
     else
-      warn "CPU vuln $NAME: $STATUS"
+      _emit_warn "CPU vuln $NAME: $STATUS"
     fi
   done
 fi
@@ -3654,15 +3926,15 @@ if require_cmd smartctl; then
       SMART=$(smartctl -H -d usbjmicron "$DISK" 2>/dev/null | grep -iE "health|result" | tail -1)
     fi
     if echo "$SMART" | grep -qiE "passed|ok"; then
-      pass "SMART $DISK: OK"
+      _emit_pass "SMART $DISK: OK"
     elif [[ -n "$SMART" ]]; then
-      fail "SMART $DISK: $SMART"
+      _emit_fail "SMART $DISK: $SMART"
     else
-      info "SMART $DISK: not reportable (USB bridge without SMART passthrough?)"
+      _emit_info "SMART $DISK: not reportable (USB bridge without SMART passthrough?)"
     fi
   done < <(lsblk -dno NAME,TYPE 2>/dev/null | awk '$2=="disk"{print "/dev/"$1}')
 else
-  info "smartctl not installed — SMART checks skipped"
+  _emit_info "smartctl not installed — SMART checks skipped"
 fi
 
 # Temperature (F-165: distinguish "not installed" from "installed but
@@ -3670,17 +3942,17 @@ fi
 if require_cmd sensors; then
   _SENSORS_OUT=$(sensors 2>/dev/null)
   if [[ -z "$_SENSORS_OUT" ]] || ! echo "$_SENSORS_OUT" | grep -q "°C"; then
-    info "lm_sensors installed but no readings — run 'sudo sensors-detect' to configure"
+    _emit_info "lm_sensors installed but no readings — run 'sudo sensors-detect' to configure"
   else
     MAX_TEMP=$(echo "$_SENSORS_OUT" | grep -oP ':\s+\+\K\d+\.\d+(?=°C)' | sort -rn | head -1)
     if [[ -n "$MAX_TEMP" ]]; then
       TEMP_NUM=$(echo "$MAX_TEMP" | grep -oP '^\d+')
       if [[ "$TEMP_NUM" -gt 85 ]]; then
-        fail "Max temperature: ${MAX_TEMP}°C (CRITICAL)"
+        _emit_fail "Max temperature: ${MAX_TEMP}°C (CRITICAL)"
       elif [[ "$TEMP_NUM" -gt 70 ]]; then
-        warn "Max temperature: ${MAX_TEMP}°C (elevated)"
+        _emit_warn "Max temperature: ${MAX_TEMP}°C (elevated)"
       else
-        pass "Max temperature: ${MAX_TEMP}°C"
+        _emit_pass "Max temperature: ${MAX_TEMP}°C"
       fi
     fi
     # Show all sensor zones
@@ -3692,7 +3964,7 @@ if require_cmd sensors; then
     fi
   fi
 else
-  info "lm_sensors not installed — temperature checks skipped"
+  _emit_info "lm_sensors not installed — temperature checks skipped"
 fi
 
 # USB Devices
@@ -3701,7 +3973,7 @@ fi
 # host controller — those are not real devices, just the bus endpoints.
 USB_COUNT=$(lsusb 2>/dev/null | grep -cv "Linux Foundation.*root hub")
 USB_COUNT=${USB_COUNT:-0}
-info "USB devices: $USB_COUNT (excluding host root hubs)"
+_emit_info "USB devices: $USB_COUNT (excluding host root hubs)"
 
 }
 
@@ -3730,9 +4002,9 @@ if require_cmd dig; then
   # F-167: query DNS root nameservers (no third-party tracked)
   DNS_TEST=$(dig +short . NS +time=3 2>/dev/null | head -1 || echo "FAIL")
   if [[ "$DNS_TEST" != "FAIL" ]] && [[ -n "$DNS_TEST" ]]; then
-    pass "DNS resolution: working"
+    _emit_pass "DNS resolution: working"
   else
-    warn "DNS resolution: failed"
+    _emit_warn "DNS resolution: failed"
   fi
 fi
 
@@ -3751,14 +4023,14 @@ check_certificates() {
 if require_cmd trust; then
   CA_COUNT=$(trust list 2>/dev/null | grep -c "type: certificate")
   CA_COUNT=${CA_COUNT:-0}
-  info "System CA certificates: $CA_COUNT"
+  _emit_info "System CA certificates: $CA_COUNT"
 elif [[ -f /etc/ssl/certs/ca-certificates.crt ]]; then
   CA_COUNT=$(grep -c "BEGIN CERTIFICATE" /etc/ssl/certs/ca-certificates.crt 2>/dev/null)
   CA_COUNT=${CA_COUNT:-0}
-  info "System CA certificates: $CA_COUNT (from ca-certificates.crt)"
+  _emit_info "System CA certificates: $CA_COUNT (from ca-certificates.crt)"
 elif [[ -d /etc/ssl/certs ]]; then
   CA_COUNT=$(find /etc/ssl/certs -maxdepth 1 \( -name "*.pem" -o -name "*.crt" \) 2>/dev/null | wc -l)
-  info "System CA certificates: $CA_COUNT (from /etc/ssl/certs/)"
+  _emit_info "System CA certificates: $CA_COUNT (from /etc/ssl/certs/)"
 fi
 
 if require_cmd openssl; then
@@ -3766,7 +4038,7 @@ if require_cmd openssl; then
     [[ -d "$_CERT_DIR" ]] || continue
     while read -r cert; do
       if ! openssl x509 -checkend 0 -in "$cert" -noout &>/dev/null; then
-        warn "Expired certificate: $cert"
+        _emit_warn "Expired certificate: $cert"
       fi
     done < <(find "$_CERT_DIR" -maxdepth 1 \( -name "*.pem" -o -name "*.crt" \) 2>/dev/null | grep -v "ca-bundle" | head -20)
   done
@@ -3784,7 +4056,7 @@ while read -r USER_HOME; do
     AUTH_KEYS=$(wc -l "$USER_HOME/.ssh/authorized_keys" 2>/dev/null | awk '{print $1}' || true)
     AUTH_KEYS=${AUTH_KEYS:-0}
     if [[ "$KEY_COUNT" -gt 0 ]] || [[ "$AUTH_KEYS" -gt 0 ]]; then
-      info "SSH keys for $_ssh_user: $KEY_COUNT keys, $AUTH_KEYS authorized"
+      _emit_info "SSH keys for $_ssh_user: $KEY_COUNT keys, $AUTH_KEYS authorized"
     fi
   fi
 done < <(_iter_user_homes)
@@ -3816,9 +4088,9 @@ done < <(_safe_find_home \
   ! -path "*/cacert*" ! -path "*/ca-bundle*" \
   ! -path "*public_key*" ! -path "*/roots.pem"))
 if [[ -z "$EXPOSED_KEYS" ]]; then
-  pass "No exposed private keys"
+  _emit_pass "No exposed private keys"
 else
-  fail "Exposed private keys:"
+  _emit_fail "Exposed private keys:"
   if ! $JSON_MODE; then
     while read -r k; do printf "       %s\n" "$k"; done <<< "$EXPOSED_KEYS"
   fi
@@ -3827,7 +4099,7 @@ fi
 # .env files (uses _safe_find_home — same snapshot/cache excludes)
 ENV_FILES=$(_safe_find_home \( -name ".env" -o -name ".env.local" -o -name ".env.production" \) -readable -size +0c | wc -l)
 if [[ "$ENV_FILES" -gt 0 ]]; then
-  info ".env files found: $ENV_FILES"
+  _emit_info ".env files found: $ENV_FILES"
 fi
 
 # Credentials in configs
@@ -3835,7 +4107,7 @@ CRED_PATTERNS="password|passwd|secret|api_key|token|credential"
 # F-173: `find -exec grep` per-file forks once each. `grep -rli` on /etc is
 # faster (single grep process scans recursively).
 CRED_FOUND=$(grep -rliE "$CRED_PATTERNS" /etc --include='*.conf' 2>/dev/null | wc -l)
-info "Config files with credential patterns: $CRED_FOUND"
+_emit_info "Config files with credential patterns: $CRED_FOUND"
 
 }
 
@@ -3856,13 +4128,13 @@ if require_cmd systemd-analyze; then
   for SVC in $_SECURITY_SVCS; do
     SCORE=$(systemd-analyze security "$SVC" 2>/dev/null | tail -1 | grep -oP '\d+\.\d+' || echo "N/A")
     if [[ "$SCORE" != "N/A" ]]; then
-      info "systemd-security $SVC: $SCORE (security service, needs root)"
+      _emit_info "systemd-security $SVC: $SCORE (security service, needs root)"
     fi
   done
   for SVC in $_HARDWARE_SVCS; do
     SCORE=$(systemd-analyze security "$SVC" 2>/dev/null | tail -1 | grep -oP '\d+\.\d+' || echo "N/A")
     if [[ "$SCORE" != "N/A" ]]; then
-      info "systemd-security $SVC: $SCORE (system service, needs hardware access)"
+      _emit_info "systemd-security $SVC: $SCORE (system service, needs hardware access)"
     fi
   done
   _HIGH_EXPOSURE=0
@@ -3871,16 +4143,16 @@ if require_cmd systemd-analyze; then
     [[ "$SCORE" == "N/A" ]] && continue
     SCORE_INT=$(echo "$SCORE" | cut -d. -f1)
     if [[ "$SCORE_INT" -le 4 ]]; then
-      pass "systemd-security $SVC: $SCORE (well-sandboxed)"
+      _emit_pass "systemd-security $SVC: $SCORE (well-sandboxed)"
     elif [[ "$SCORE_INT" -le 7 ]]; then
-      info "systemd-security $SVC: $SCORE"
+      _emit_info "systemd-security $SVC: $SCORE"
     else
-      warn "systemd-security $SVC: $SCORE (high exposure — poor sandboxing)"
+      _emit_warn "systemd-security $SVC: $SCORE (high exposure — poor sandboxing)"
       ((_HIGH_EXPOSURE++))
     fi
   done
   if [[ "$_HIGH_EXPOSURE" -eq 0 ]]; then
-    pass "No user-facing services with critical exposure scores"
+    _emit_pass "No user-facing services with critical exposure scores"
   fi
 fi
 
@@ -3899,11 +4171,11 @@ if require_cmd loginctl; then
   if [[ -n "$SESSION_ID" ]]; then
     SESSION_TYPE=$(loginctl show-session "$SESSION_ID" -p Type --value 2>/dev/null || echo "unknown")
     if [[ "$SESSION_TYPE" == "wayland" ]]; then
-      pass "Display server: Wayland (more secure than X11)"
+      _emit_pass "Display server: Wayland (more secure than X11)"
     elif [[ "$SESSION_TYPE" == "x11" ]]; then
-      warn "Display server: X11 (keylogger risk — consider Wayland)"
+      _emit_warn "Display server: X11 (keylogger risk — consider Wayland)"
     else
-      info "Display server: $SESSION_TYPE"
+      _emit_info "Display server: $SESSION_TYPE"
     fi
   fi
 fi
@@ -3914,8 +4186,8 @@ _de_lock_check_cb() {
   val=$(echo "$3" | xargs | tr '[:upper:]' '[:lower:]')
   _DE_LOCK_FOUND=1
   case "$val" in
-    true|1) pass "Screen lock: enabled [$user, $_DE_FAMILY]" ;;
-    false|0) warn "Screen lock: disabled [$user, $_DE_FAMILY]" ;;
+    true|1) _emit_pass "Screen lock: enabled [$user, $_DE_FAMILY]" ;;
+    false|0) _emit_warn "Screen lock: disabled [$user, $_DE_FAMILY]" ;;
   esac
 }
 _DE_LOCK_FOUND=0
@@ -3928,14 +4200,14 @@ case "$_DE_FAMILY" in
     ;;
 esac
 [[ "$_DE_LOCK_FOUND" -eq 0 && "$_DE_FAMILY" != "unknown" ]] && \
-  info "Screen lock: no active $_DE_FAMILY session found for check"
+  _emit_info "Screen lock: no active $_DE_FAMILY session found for check"
 
 # Auto-Login — detailed check in Section 39 (Desktop Session Security)
 if [[ -f /etc/gdm/custom.conf ]] || [[ -f /etc/gdm3/custom.conf ]]; then
   if grep -qi '^\s*AutomaticLoginEnable[[:space:]]*=[[:space:]]*true' /etc/gdm*/custom.conf /etc/gdm*/daemon.conf 2>/dev/null; then
-    fail "GDM auto-login enabled!"
+    _emit_fail "GDM auto-login enabled!"
   else
-    pass "GDM: no auto-login"
+    _emit_pass "GDM: no auto-login"
   fi
 fi
 
@@ -3950,20 +4222,20 @@ check_ntp() {
 if require_cmd timedatectl; then
   NTP_SYNC=$(timedatectl show -p NTPSynchronized --value 2>/dev/null)
   if [[ "$NTP_SYNC" == "yes" ]]; then
-    pass "NTP synchronized"
+    _emit_pass "NTP synchronized"
   else
-    warn "NTP not synchronized"
+    _emit_warn "NTP not synchronized"
   fi
   TZ=$(timedatectl show -p Timezone --value 2>/dev/null)
-  info "Timezone: $TZ"
+  _emit_info "Timezone: $TZ"
 fi
 
 if systemctl is-active chronyd &>/dev/null || systemctl is-active chrony &>/dev/null; then
-  pass "chrony: active"
+  _emit_pass "chrony: active"
   if require_cmd chronyc; then
     CHRONY_SOURCES=$(chronyc sources 2>/dev/null | grep -c "^\^" || true)
     CHRONY_SOURCES=${CHRONY_SOURCES:-0}
-    info "Chrony sources: $CHRONY_SOURCES"
+    _emit_info "Chrony sources: $CHRONY_SOURCES"
 
     # Network Time Security (NTS) check — F-180: detect chrony version first
     # since `authdata` is chrony 4.0+ only. RHEL 8 ships chrony 3.x; on those,
@@ -3975,7 +4247,7 @@ if systemctl is-active chronyd &>/dev/null || systemctl is-active chrony &>/dev/
       NTS_SOURCES=$(chronyc -n authdata 2>/dev/null | awk '$3 == "NTS" {c++} END {print c+0}')
     fi
     if [[ "$NTS_SOURCES" -gt 0 ]]; then
-      pass "NTS (Network Time Security): $NTS_SOURCES active source(s) using NTS"
+      _emit_pass "NTS (Network Time Security): $NTS_SOURCES active source(s) using NTS"
     else
       # Fallback: check chrony.conf for 'nts' keyword on server/pool lines
       _NTS_CONF=false
@@ -3987,9 +4259,9 @@ if systemctl is-active chronyd &>/dev/null || systemctl is-active chrony &>/dev/
         fi
       done
       if $_NTS_CONF; then
-        pass "NTS (Network Time Security) configured in chrony.conf"
+        _emit_pass "NTS (Network Time Security) configured in chrony.conf"
       else
-        info "NTS (Network Time Security) not configured — consider adding 'nts' to chrony server lines"
+        _emit_info "NTS (Network Time Security) not configured — consider adding 'nts' to chrony server lines"
       fi
     fi
   fi
@@ -4003,15 +4275,15 @@ if systemctl is-active chronyd &>/dev/null || systemctl is-active chrony &>/dev/
       fi
     done < <(chronyc sources 2>/dev/null | tail -n+3)
     if [[ "$_BAD_SOURCES" -gt 0 ]]; then
-      warn "NTP: $_BAD_SOURCES unreachable/falseticker source(s) (check 'chronyc sources')"
+      _emit_warn "NTP: $_BAD_SOURCES unreachable/falseticker source(s) (check 'chronyc sources')"
     else
-      pass "NTP: all sources reachable and valid"
+      _emit_pass "NTP: all sources reachable and valid"
     fi
   fi
 elif systemctl is-active systemd-timesyncd &>/dev/null; then
-  pass "timesyncd: active"
+  _emit_pass "timesyncd: active"
 else
-  warn "No NTP service active"
+  _emit_warn "No NTP service active"
 fi
 
 }
@@ -4023,22 +4295,22 @@ check_fail2ban() {
 ###############################################################################
 
 if systemctl is-active fail2ban &>/dev/null; then
-  pass "fail2ban: active"
+  _emit_pass "fail2ban: active"
 
   if require_cmd fail2ban-client; then
     JAILS=$(fail2ban-client status 2>/dev/null | grep "Jail list" | sed 's/.*://;s/,/ /g' | xargs)
-    info "Active jails: $JAILS"
+    _emit_info "Active jails: $JAILS"
 
     for JAIL in $JAILS; do
       BANNED=$(fail2ban-client status "$JAIL" 2>/dev/null | grep "Currently banned" | awk '{print $NF}')
       TOTAL_BANNED=$(fail2ban-client status "$JAIL" 2>/dev/null | grep "Total banned" | awk '{print $NF}')
-      info "Jail $JAIL: $BANNED current, $TOTAL_BANNED total banned"
+      _emit_info "Jail $JAIL: $BANNED current, $TOTAL_BANNED total banned"
     done
   fi
 elif ! require_cmd fail2ban-client; then
-  info "fail2ban not installed — skipped"
+  _emit_info "fail2ban not installed — skipped"
 else
-  fail "fail2ban: INACTIVE"
+  _emit_fail "fail2ban: INACTIVE"
 fi
 
 }
@@ -4069,7 +4341,7 @@ if ! $JSON_MODE; then
 fi
 
 USERS_LOGGED=$(who | wc -l)
-info "Currently logged in: $USERS_LOGGED users"
+_emit_info "Currently logged in: $USERS_LOGGED users"
 
 # F-186: sudo usage count exposes admin-activity rhythm. On multi-user systems
 # this leaks behavioral metadata when audit output is shared. Bucketize by
@@ -4077,13 +4349,13 @@ info "Currently logged in: $USERS_LOGGED users"
 SUDO_USAGE=$(journalctl _COMM=sudo --since "1 hour ago" --no-pager 2>/dev/null | grep -c "COMMAND" || true)
 SUDO_USAGE=${SUDO_USAGE:-0}
 if [[ "$SUDO_USAGE" -eq 0 ]]; then
-  info "Sudo activity (1h): no sudo commands logged"
+  _emit_info "Sudo activity (1h): no sudo commands logged"
 elif [[ "$SUDO_USAGE" -lt 10 ]]; then
-  info "Sudo activity (1h): low (<10 commands — typical admin)"
+  _emit_info "Sudo activity (1h): low (<10 commands — typical admin)"
 elif [[ "$SUDO_USAGE" -lt 100 ]]; then
-  info "Sudo activity (1h): moderate (10-99 commands — active admin/automation)"
+  _emit_info "Sudo activity (1h): moderate (10-99 commands — active admin/automation)"
 else
-  info "Sudo activity (1h): high (100+ commands — heavy automation or scripted use)"
+  _emit_info "Sudo activity (1h): high (100+ commands — heavy automation or scripted use)"
 fi
 
 }
@@ -4105,21 +4377,21 @@ _coredump_socket_active=false
 systemctl is-active systemd-coredump.socket &>/dev/null && _coredump_socket_active=true
 
 if [[ "${COREDUMP_STORAGE,,}" == "none" ]]; then
-  pass "Coredump storage: none (disabled)"
+  _emit_pass "Coredump storage: none (disabled)"
   if $_coredump_socket_active; then
-    info "systemd-coredump socket: active (no persistence — storage=none)"
+    _emit_info "systemd-coredump socket: active (no persistence — storage=none)"
   else
-    pass "systemd-coredump socket: inactive (fully disabled)"
+    _emit_pass "systemd-coredump socket: inactive (fully disabled)"
   fi
 elif [[ -n "$COREDUMP_STORAGE" ]]; then
-  warn "Coredump storage: $COREDUMP_STORAGE (should be 'none')"
+  _emit_warn "Coredump storage: $COREDUMP_STORAGE (should be 'none')"
   if $_coredump_socket_active; then
-    warn "systemd-coredump socket: active with storage=$COREDUMP_STORAGE"
+    _emit_warn "systemd-coredump socket: active with storage=$COREDUMP_STORAGE"
   fi
 else
-  info "Coredump storage: default/external (not explicitly disabled)"
+  _emit_info "Coredump storage: default/external (not explicitly disabled)"
   if $_coredump_socket_active; then
-    info "systemd-coredump socket: active (default behavior — set Storage=none to suppress)"
+    _emit_info "systemd-coredump socket: active (default behavior — set Storage=none to suppress)"
   fi
 fi
 
@@ -4127,16 +4399,16 @@ fi
 sub_header "USB Guard"
 if require_cmd usbguard; then
   if systemctl is-active usbguard &>/dev/null; then
-    pass "USBGuard: active"
+    _emit_pass "USBGuard: active"
     # F-188: filter empty trailing line (off-by-one)
     POLICY_COUNT=$(usbguard list-rules 2>/dev/null | grep -cE '^[0-9]+:')
     POLICY_COUNT=${POLICY_COUNT:-0}
-    info "USBGuard rules: $POLICY_COUNT"
+    _emit_info "USBGuard rules: $POLICY_COUNT"
   else
-    warn "USBGuard installed but inactive"
+    _emit_warn "USBGuard installed but inactive"
   fi
 else
-  info "USBGuard not installed — USB devices unrestricted"
+  _emit_info "USBGuard not installed — USB devices unrestricted"
 fi
 
 # Compiler Check (new)
@@ -4162,56 +4434,56 @@ if [[ -n "$COMPILERS_FOUND" ]]; then
     done
   fi
   if $_IS_DESKTOP; then
-    info "Compilers/build tools present: $COMPILERS_FOUND(normal for development desktop)"
+    _emit_info "Compilers/build tools present: $COMPILERS_FOUND(normal for development desktop)"
   elif $_IS_BUILD_HOST; then
-    info "Compilers/build tools present: $COMPILERS_FOUND(expected on CI/build host)"
+    _emit_info "Compilers/build tools present: $COMPILERS_FOUND(expected on CI/build host)"
   else
-    warn "Compilers/build tools present: $COMPILERS_FOUND(risk on production systems)"
+    _emit_warn "Compilers/build tools present: $COMPILERS_FOUND(risk on production systems)"
   fi
 else
-  pass "No compilers/build tools found"
+  _emit_pass "No compilers/build tools found"
 fi
 
 # Prelink Check (new)
 if require_cmd prelink; then
-  warn "prelink is installed (can interfere with AIDE/security)"
+  _emit_warn "prelink is installed (can interfere with AIDE/security)"
 else
-  pass "prelink not installed"
+  _emit_pass "prelink not installed"
 fi
 
 # AIDE/Tripwire — File Integrity Monitoring (new)
 sub_header "File Integrity Monitoring"
 FIM_FOUND=false
 if require_cmd aide; then
-  pass "AIDE installed (file integrity monitoring)"
+  _emit_pass "AIDE installed (file integrity monitoring)"
   FIM_FOUND=true
 fi
 if require_cmd tripwire; then
-  pass "Tripwire installed (file integrity monitoring)"
+  _emit_pass "Tripwire installed (file integrity monitoring)"
   FIM_FOUND=true
 fi
 if ! $FIM_FOUND; then
-  warn "No file integrity monitoring (AIDE/Tripwire) installed"
+  _emit_warn "No file integrity monitoring (AIDE/Tripwire) installed"
 fi
 
 # Cron Permission Check (new)
 sub_header "Cron/At Permissions"
 if [[ -f /etc/cron.allow ]]; then
-  pass "cron.allow exists (whitelist approach)"
+  _emit_pass "cron.allow exists (whitelist approach)"
 elif [[ -f /etc/cron.deny ]]; then
-  info "cron.deny exists (blacklist approach — cron.allow preferred)"
+  _emit_info "cron.deny exists (blacklist approach — cron.allow preferred)"
 else
-  warn "Neither cron.allow nor cron.deny exists"
+  _emit_warn "Neither cron.allow nor cron.deny exists"
 fi
 
 # At Permission Check (new)
 if require_cmd at; then
   if [[ -f /etc/at.allow ]]; then
-    pass "at.allow exists (whitelist approach)"
+    _emit_pass "at.allow exists (whitelist approach)"
   elif [[ -f /etc/at.deny ]]; then
-    info "at.deny exists (blacklist approach — at.allow preferred)"
+    _emit_info "at.deny exists (blacklist approach — at.allow preferred)"
   else
-    warn "Neither at.allow nor at.deny exists"
+    _emit_warn "Neither at.allow nor at.deny exists"
   fi
 fi
 
@@ -4221,30 +4493,42 @@ _IMA_ACTIVE=false
 if [[ -d /sys/kernel/security/ima ]]; then
   _IMA_ACTIVE=true
   _IMA_POLICY=$(cat /sys/kernel/security/ima/policy_name 2>/dev/null || echo "custom")
-  pass "IMA: active (policy: $_IMA_POLICY)"
+  _emit_pass "IMA: active (policy: $_IMA_POLICY)"
   _IMA_VIOLATIONS=$(cat /sys/kernel/security/ima/violations 2>/dev/null || echo "0")
   if [[ "${_IMA_VIOLATIONS:-0}" -gt 0 ]]; then
-    warn "IMA violations: $_IMA_VIOLATIONS"
+    _emit_warn "IMA violations: $_IMA_VIOLATIONS"
   else
-    pass "IMA violations: 0"
+    _emit_pass "IMA violations: 0"
+  fi
+  # v3.7: actively-measuring signal (count > 0 means policy is hitting files)
+  _IMA_COUNT_FILE=/sys/kernel/security/integrity/ima/runtime_measurements_count
+  if [[ -r "$_IMA_COUNT_FILE" ]]; then
+    _IMA_COUNT=$(< "$_IMA_COUNT_FILE")
+    if [[ "${_IMA_COUNT:-0}" -gt 100 ]]; then
+      _emit_pass "IMA: $_IMA_COUNT runtime measurements (actively measuring)"
+    elif [[ "${_IMA_COUNT:-0}" -gt 0 ]]; then
+      _emit_info "IMA: only $_IMA_COUNT measurements (policy may be too narrow)"
+    else
+      _emit_warn "IMA: 0 runtime measurements (active but not measuring — check policy)"
+    fi
   fi
 else
   if grep -q "ima" /proc/cmdline 2>/dev/null; then
-    info "IMA: configured in cmdline but /sys/kernel/security/ima not found"
+    _emit_info "IMA: configured in cmdline but /sys/kernel/security/ima not found"
   else
-    info "IMA: not active (consider adding ima_policy=appraise_tcb to kernel cmdline)"
+    _emit_info "IMA: not active (consider adding ima_policy=appraise_tcb to kernel cmdline)"
   fi
 fi
 # EVM
 if [[ -f /sys/kernel/security/evm ]]; then
   _EVM_STATUS=$(cat /sys/kernel/security/evm 2>/dev/null)
   if [[ "$_EVM_STATUS" -ge 1 ]]; then
-    pass "EVM: active (status=$_EVM_STATUS)"
+    _emit_pass "EVM: active (status=$_EVM_STATUS)"
   else
-    info "EVM: present but not initialized (status=$_EVM_STATUS)"
+    _emit_info "EVM: present but not initialized (status=$_EVM_STATUS)"
   fi
 else
-  info "EVM: not available"
+  _emit_info "EVM: not available"
 fi
 
 # binfmt_misc (non-native binary execution)
@@ -4258,9 +4542,9 @@ if [[ -d /proc/sys/fs/binfmt_misc ]]; then
   done
   _BINFMT_COUNT=${_BINFMT_COUNT:-0}
   if [[ "$_BINFMT_COUNT" -eq 0 ]]; then
-    pass "binfmt_misc: no non-native binary formats registered"
+    _emit_pass "binfmt_misc: no non-native binary formats registered"
   else
-    info "binfmt_misc: $_BINFMT_COUNT registered format(s)"
+    _emit_info "binfmt_misc: $_BINFMT_COUNT registered format(s)"
     if ! $JSON_MODE; then
       for _bf in /proc/sys/fs/binfmt_misc/*; do
         [[ "$(basename "$_bf")" =~ ^(register|status)$ ]] && continue
@@ -4270,17 +4554,17 @@ if [[ -d /proc/sys/fs/binfmt_misc ]]; then
     fi
   fi
 else
-  pass "binfmt_misc: not mounted"
+  _emit_pass "binfmt_misc: not mounted"
 fi
 
 # FireWire (IEEE 1394) DMA attack surface
 sub_header "FireWire / IEEE 1394"
 if lsmod 2>/dev/null | grep -qE "^firewire_core|^ohci1394|^sbp2"; then
-  fail "FireWire module loaded — DMA attack risk"
+  _emit_fail "FireWire module loaded — DMA attack risk"
 elif grep -rqsE "install\s+(firewire[-_]core|ohci1394|sbp2)\s+/(usr/)?s?bin/(false|true)|blacklist\s+(firewire[-_]core|ohci1394|sbp2)" /etc/modprobe.d/ 2>/dev/null; then
-  pass "FireWire modules: blacklisted"
+  _emit_pass "FireWire modules: blacklisted"
 else
-  pass "FireWire modules: not loaded"
+  _emit_pass "FireWire modules: not loaded"
 fi
 
 # Home directory permissions
@@ -4295,16 +4579,16 @@ while IFS=: read -r _huser _ _huid _ _ _hhome _; do
   # 755 is the install default on Fedora/Ubuntu — flagging it as WARN creates
   # systematic alarm fatigue (F-196).
   if (( (8#${_HPERMS} & 8#022) != 0 )); then
-    warn "Home directory $_hhome: $_HPERMS (group/other writable — fix with chmod 750)"
+    _emit_warn "Home directory $_hhome: $_HPERMS (group/other writable — fix with chmod 750)"
   elif (( (8#${_HPERMS} & 8#005) != 0 )); then
-    info "Home directory $_hhome: $_HPERMS (Linux default — chmod 750 for stricter privacy)"
+    _emit_info "Home directory $_hhome: $_HPERMS (Linux default — chmod 750 for stricter privacy)"
   else
-    pass "Home directory $_hhome: $_HPERMS (private)"
+    _emit_pass "Home directory $_hhome: $_HPERMS (private)"
   fi
   # Check ownership
   _HOWNER=$(stat -c %U "$_hhome" 2>/dev/null)
   if [[ "$_HOWNER" != "$_huser" ]]; then
-    fail "Home directory $_hhome owned by $_HOWNER (should be $_huser)"
+    _emit_fail "Home directory $_hhome owned by $_HOWNER (should be $_huser)"
   fi
 done < /etc/passwd
 
@@ -4318,16 +4602,16 @@ for _tmout_file in /etc/profile /etc/profile.d/*.sh /etc/bashrc /etc/bash.bashrc
     if [[ -n "$_TMOUT_VAL" && "$_TMOUT_VAL" -gt 0 ]]; then
       _TMOUT_SET=true
       if [[ "$_TMOUT_VAL" -le 900 ]]; then
-        pass "Shell TMOUT=${_TMOUT_VAL}s (in $(basename "$_tmout_file"))"
+        _emit_pass "Shell TMOUT=${_TMOUT_VAL}s (in $(basename "$_tmout_file"))"
       else
-        warn "Shell TMOUT=${_TMOUT_VAL}s (recommended: ≤900s)"
+        _emit_warn "Shell TMOUT=${_TMOUT_VAL}s (recommended: ≤900s)"
       fi
       break
     fi
   fi
 done
 if ! $_TMOUT_SET; then
-  info "Shell TMOUT not set (idle sessions never timeout)"
+  _emit_info "Shell TMOUT not set (idle sessions never timeout)"
 fi
 
 # AIDE database existence
@@ -4343,12 +4627,71 @@ if require_cmd aide; then
   if [[ -n "$_AIDE_DB" ]]; then
     _AIDE_DB_SIZE=$(stat -c%s "$_AIDE_DB" 2>/dev/null || echo "0")
     if [[ "${_AIDE_DB_SIZE:-0}" -gt 0 ]]; then
-      pass "AIDE database: $_AIDE_DB ($(_human_size "$_AIDE_DB_SIZE"))"
+      _emit_pass "AIDE database: $_AIDE_DB ($(_human_size "$_AIDE_DB_SIZE"))"
     else
-      warn "AIDE database exists but is empty: $_AIDE_DB"
+      _emit_warn "AIDE database exists but is empty: $_AIDE_DB"
     fi
   else
-    warn "AIDE installed but no database found (run: sudo aide --init)"
+    _emit_warn "AIDE installed but no database found (run: sudo aide --init)"
+  fi
+fi
+
+# v3.7: AIDE actual integrity-check status (not just existence)
+# Reads last scheduled run from journal + offers opt-in fresh check via
+# NOID_AIDE_LIVE=1. Without this, "AIDE installed" was a placebo signal.
+sub_header "AIDE Integrity Status"
+if require_cmd aide; then
+  # 1. Last scheduled-run status from journal — try common service names
+  _AIDE_JOURNAL=""
+  for _aide_unit in aide-check.service aide.service aidecheck.service; do
+    _AIDE_JOURNAL=$(journalctl -u "$_aide_unit" --since '7 days ago' -n 10 --no-pager 2>/dev/null)
+    [[ -n "$_AIDE_JOURNAL" ]] && break
+  done
+  if [[ -n "$_AIDE_JOURNAL" ]]; then
+    # Drift markers are distro-specific. Fedora's aide-check.service emits
+    # the literal "Changes Detected"/"New files"/"Files modified" via the
+    # notify-send wrapper; raw `aide --check` log lines say "added"/"removed"/
+    # "changed"/"mismatch". Cover both.
+    if echo "$_AIDE_JOURNAL" | grep -qiE 'all files match|0 differences|exit_code=0|status: ok|exit-code=0'; then
+      _emit_pass "AIDE: last scheduled check clean (no changes)"
+    elif echo "$_AIDE_JOURNAL" | grep -qiE 'changes detected|new files|files (modified|added|removed|changed)|added|removed|changed|mismatch'; then
+      _emit_warn "AIDE: last scheduled check found changes — review journalctl -u aide-check"
+    else
+      _emit_info "AIDE: last scheduled check ran (status unclear — review journal)"
+    fi
+  else
+    _emit_info "AIDE: no scheduled check in journal (last 7 days) — schedule via systemd timer"
+  fi
+
+  # 2. Optional fresh check via NOID_AIDE_LIVE=1 (slow: can take minutes)
+  if [[ "${NOID_AIDE_LIVE:-0}" == "1" ]]; then
+    $JSON_MODE || printf "  ${CYN}Running aide --check (max 5min)...${RST}\n"
+    _AIDE_OUT=$(mktemp -t noid-aide-XXXXXX.log)
+    timeout 300 aide --check &>"$_AIDE_OUT"
+    _AIDE_RC=$?
+    # AIDE exit codes are a bitmask:
+    #   0 = no differences
+    #   1 = new files
+    #   2 = removed files
+    #   4 = changed files
+    #   7 = combination of the above
+    #   14+ = errors during scan
+    if [[ "$_AIDE_RC" -eq 0 ]]; then
+      _emit_pass "AIDE on-demand check: 0 changes detected"
+      # Clean up — log only contains the "0 differences" header on success.
+      rm -f "$_AIDE_OUT"
+    elif [[ "$_AIDE_RC" -ge 14 ]]; then
+      _emit_warn "AIDE on-demand check: scan errors (rc=$_AIDE_RC) — see $_AIDE_OUT"
+    else
+      # Keep log on drift detection — user needs the per-file detail to act.
+      _bits=""
+      [[ $((_AIDE_RC & 1)) -ne 0 ]] && _bits+="new "
+      [[ $((_AIDE_RC & 2)) -ne 0 ]] && _bits+="removed "
+      [[ $((_AIDE_RC & 4)) -ne 0 ]] && _bits+="changed "
+      _emit_warn "AIDE on-demand check: ${_bits}files (rc=$_AIDE_RC) — see $_AIDE_OUT"
+    fi
+  else
+    _emit_info "AIDE fresh check: skipped (set NOID_AIDE_LIVE=1 to run on-demand)"
   fi
 fi
 
@@ -4363,7 +4706,7 @@ while IFS=: read -r _huser _ _huid _ _ _hhome _; do
     _SH_SUSP=$(grep -ciE "$_SH_PATTERN" "$_histf" 2>/dev/null || true)
     _SH_SUSP=${_SH_SUSP:-0}
     if [[ "$_SH_SUSP" -gt 0 ]]; then
-      warn "$_SH_SUSP suspicious entries in $_histf (curl|bash, wget, /dev/tcp patterns)"
+      _emit_warn "$_SH_SUSP suspicious entries in $_histf (curl|bash, wget, /dev/tcp patterns)"
       # F-200: show first 3 examples (truncated) so user can audit instead of guess
       if ! $JSON_MODE; then
         grep -nE "$_SH_PATTERN" "$_histf" 2>/dev/null | head -3 | while read -r line; do
@@ -4375,7 +4718,7 @@ while IFS=: read -r _huser _ _huid _ _ _hhome _; do
   done
 done < /etc/passwd
 if [[ "$_SUSPICIOUS_HIST" -eq 0 ]]; then
-  pass "No suspicious shell history entries found"
+  _emit_pass "No suspicious shell history entries found"
 fi
 
 }
@@ -4392,45 +4735,50 @@ sub_header "Suspicious Module Check"
 # with obvious names. AIDE/IMA file-integrity checks are the reliable signal.
 SUSPICIOUS_MODS=$(lsmod 2>/dev/null | awk '{print $1}' | grep -iE "backdoor|rootkit|hide|keylog|sniff|inject" || true)
 if [[ -z "$SUSPICIOUS_MODS" ]]; then
-  pass "No obvious-named suspicious modules (real rootkits hide — rely on IMA/AIDE for integrity)"
+  _emit_pass "No obvious-named suspicious modules (real rootkits hide — rely on IMA/AIDE for integrity)"
 else
-  fail "Suspicious kernel modules: $SUSPICIOUS_MODS"
+  _emit_fail "Suspicious kernel modules: $SUSPICIOUS_MODS"
 fi
 
 # Unnecessary filesystem modules (new)
 sub_header "Disabled Filesystem Modules"
 for FS_MOD in cramfs freevxfs jffs2 hfs hfsplus squashfs udf affs befs sysv qnx4 qnx6; do
   if grep -rqsE "install\s+$FS_MOD\s+/(usr/)?s?bin/(false|true)|blacklist\s+$FS_MOD" /etc/modprobe.d/ 2>/dev/null; then
-    pass "Module $FS_MOD: disabled"
+    _emit_pass "Module $FS_MOD: disabled"
   elif [[ "$FS_MOD" == "squashfs" ]] && command -v flatpak &>/dev/null; then
     if lsmod 2>/dev/null | grep -q "^squashfs\s"; then
-      info "Module squashfs: loaded (required by Flatpak)"
+      _emit_info "Module squashfs: loaded (required by Flatpak)"
     else
-      info "Module squashfs: not disabled but not loaded (Flatpak installed)"
+      _emit_info "Module squashfs: not disabled but not loaded (Flatpak installed)"
     fi
   else
     if lsmod 2>/dev/null | grep -q "^${FS_MOD}\s"; then
-      warn "Module $FS_MOD: loaded (should be disabled)"
+      _emit_warn "Module $FS_MOD: loaded (should be disabled)"
     else
-      info "Module $FS_MOD: not explicitly disabled (not loaded)"
+      _emit_info "Module $FS_MOD: not explicitly disabled (not loaded)"
     fi
   fi
 done
 
-# USB storage module
+# USB storage module — F-203b: USBGuard is an alternative defense-in-depth
+# layer that policy-controls USB devices at runtime. When USBGuard is active,
+# blacklisting usb-storage is redundant rather than mandatory; downgrade WARN
+# to INFO to avoid alarm fatigue on users who chose USBGuard instead.
 if grep -rqsE "install\s+usb[-_]storage\s+/(usr/)?s?bin/(false|true)|blacklist\s+usb[-_]storage" /etc/modprobe.d/ 2>/dev/null; then
-  pass "USB storage module: disabled"
+  _emit_pass "USB storage module: disabled"
+elif systemctl is-active usbguard &>/dev/null; then
+  _emit_info "USB storage module: not blacklisted (USBGuard active — runtime policy enforced)"
 else
-  warn "USB storage module: not disabled"
+  _emit_warn "USB storage module: not disabled"
 fi
 
 # Module loading status
 if [[ -f /proc/sys/kernel/modules_disabled ]]; then
   MOD_DISABLED=$(< /proc/sys/kernel/modules_disabled)
   if [[ "$MOD_DISABLED" -eq 1 ]]; then
-    pass "Kernel module loading: disabled (locked down)"
+    _emit_pass "Kernel module loading: disabled (locked down)"
   else
-    info "Kernel module loading: enabled (modules_disabled=0)"
+    _emit_info "Kernel module loading: enabled (modules_disabled=0)"
   fi
 fi
 
@@ -4448,21 +4796,21 @@ for CRONDIR in /etc/crontab /etc/cron.hourly /etc/cron.daily /etc/cron.weekly /e
     OWNER=$(stat -c '%U' "$CRONDIR" 2>/dev/null)
     PERMS=$(stat -c '%a' "$CRONDIR" 2>/dev/null)
     if [[ "$OWNER" != "root" ]]; then
-      fail "$CRONDIR owner: $OWNER (should be root)"
+      _emit_fail "$CRONDIR owner: $OWNER (should be root)"
     elif [[ -d "$CRONDIR" ]]; then
       if (( (8#${PERMS:-777} & ~8#755) == 0 )); then
-        pass "$CRONDIR: owner=$OWNER, perms=$PERMS"
+        _emit_pass "$CRONDIR: owner=$OWNER, perms=$PERMS"
       else
-        warn "$CRONDIR permissions: $PERMS (too open for directory)"
+        _emit_warn "$CRONDIR permissions: $PERMS (too open for directory)"
       fi
     elif [[ -f "$CRONDIR" ]]; then
       # Allow read for group/other (644), warn on write/execute for group/other
       if (( (8#${PERMS:-777} & 8#033) != 0 )); then
-        warn "$CRONDIR permissions: $PERMS (write/execute for group/other)"
+        _emit_warn "$CRONDIR permissions: $PERMS (write/execute for group/other)"
       elif (( (8#${PERMS:-777} & ~8#644) != 0 )); then
-        warn "$CRONDIR permissions: $PERMS (expected: <=644)"
+        _emit_warn "$CRONDIR permissions: $PERMS (expected: <=644)"
       else
-        pass "$CRONDIR: owner=$OWNER, perms=$PERMS"
+        _emit_pass "$CRONDIR: owner=$OWNER, perms=$PERMS"
       fi
     fi
   fi
@@ -4474,16 +4822,16 @@ if [[ -f /etc/securetty ]]; then
   # legitimately returns 0 (file exists, zero matches). Use ${var:-0} default.
   TTY_COUNT=$(grep -cvE '^#|^$' /etc/securetty 2>/dev/null)
   TTY_COUNT="${TTY_COUNT:-0}"
-  info "securetty: $TTY_COUNT TTYs allowed"
+  _emit_info "securetty: $TTY_COUNT TTYs allowed"
 fi
 
 # /etc/security/limits.conf + drop-ins — core dump limits (F-206: scan
 # /etc/security/limits.d/*.conf as well, modern systems put hardening rules
 # in drop-ins instead of editing the main file)
 if grep -qrhE "^\s*\*\s+hard\s+core\s+0" /etc/security/limits.conf /etc/security/limits.d/ 2>/dev/null; then
-  pass "limits.conf: hard core 0 (core dumps disabled)"
+  _emit_pass "limits.conf: hard core 0 (core dumps disabled)"
 else
-  warn "limits.conf: core dumps not disabled via limits"
+  _emit_warn "limits.conf: core dumps not disabled via limits"
 fi
 
 }
@@ -4496,9 +4844,9 @@ check_boot() {
 
 # UEFI vs BIOS
 if [[ -d /sys/firmware/efi ]]; then
-  pass "Boot mode: UEFI"
+  _emit_pass "Boot mode: UEFI"
 else
-  info "Boot mode: Legacy BIOS"
+  _emit_info "Boot mode: Legacy BIOS"
 fi
 
 # Kernel module signing — checks compile-time AND runtime enforcement (F-208).
@@ -4520,9 +4868,9 @@ if [[ -f /proc/sys/kernel/tainted ]]; then
     _SIG_REASON="runtime (kernel cmdline)"
   fi
   if $_SIG_ENFORCED; then
-    pass "Kernel module signing: enforced ($_SIG_REASON)"
+    _emit_pass "Kernel module signing: enforced ($_SIG_REASON)"
   else
-    info "Kernel module signing: not enforced"
+    _emit_info "Kernel module signing: not enforced"
   fi
 fi
 
@@ -4531,7 +4879,7 @@ shopt -s nullglob
 _boot_kernels=(/boot/vmlinuz-*)
 shopt -u nullglob
 KERNEL_COUNT="${#_boot_kernels[@]}"
-info "Installed kernels: $KERNEL_COUNT"
+_emit_info "Installed kernels: $KERNEL_COUNT"
 
 # systemd-analyze blame top 5 (new)
 if require_cmd systemd-analyze; then
@@ -4540,7 +4888,7 @@ if require_cmd systemd-analyze; then
   for _rescue_unit in rescue.service emergency.service; do
     _rescue_exec=$(systemctl show -p ExecStart "$_rescue_unit" 2>/dev/null | grep -oP 'path=\K[^;]+' || true)
     if [[ -n "$_rescue_exec" && "$_rescue_exec" != *sulogin* ]]; then
-      info "${_rescue_unit%.service} shell: no password required (physical access risk)"
+      _emit_info "${_rescue_unit%.service} shell: no password required (physical access risk)"
     fi
   done
 fi
@@ -4560,7 +4908,7 @@ if require_cmd rpm; then
   # Timeout prevents 5+ minute hangs on large package sets (F-211)
   RPM_VA_OUTPUT=$(timeout 90 rpm -Va 2>/dev/null || echo "TIMEOUT")
   if [[ "$RPM_VA_OUTPUT" == "TIMEOUT" ]]; then
-    warn "RPM verify: timed out after 90s (large package set or DB locked)"
+    _emit_warn "RPM verify: timed out after 90s (large package set or DB locked)"
   else
     RPM_VERIFY_ALL=$(echo "$RPM_VA_OUTPUT" | grep -cE "^..5" || true)
     RPM_VERIFY_ALL=${RPM_VERIFY_ALL:-0}
@@ -4568,13 +4916,45 @@ if require_cmd rpm; then
       | grep -cvE "\.pyc\b|/__pycache__/|/usr/lib/issue" || true)
     RPM_VERIFY_BIN=${RPM_VERIFY_BIN:-0}
     if [[ "$RPM_VERIFY_ALL" -eq 0 ]]; then
-      pass "RPM verify: all package files intact"
+      _emit_pass "RPM verify: all package files intact"
     elif [[ "$RPM_VERIFY_BIN" -eq 0 ]]; then
-      pass "RPM verify: $RPM_VERIFY_ALL config files changed (no binaries — normal after hardening)"
+      _emit_pass "RPM verify: $RPM_VERIFY_ALL config files changed (no binaries — normal after hardening)"
     elif [[ "$RPM_VERIFY_BIN" -le 5 ]]; then
-      warn "RPM verify: $RPM_VERIFY_BIN binaries + $((RPM_VERIFY_ALL - RPM_VERIFY_BIN)) configs changed"
+      _emit_warn "RPM verify: $RPM_VERIFY_BIN binaries + $((RPM_VERIFY_ALL - RPM_VERIFY_BIN)) configs changed"
     else
-      fail "RPM verify: $RPM_VERIFY_BIN binaries with changed checksums!"
+      _emit_fail "RPM verify: $RPM_VERIFY_BIN binaries with changed checksums!"
+    fi
+
+    # v3.7: RPM drift-detection via baseline diff
+    # First run: NOID_RPM_BASELINE_INIT=1 captures current state
+    # Subsequent runs: diff against baseline, alert on NEW modifications
+    # Catches XZ-Backdoor-class changes (modified binary, valid signature,
+    # drift between runs). Snapshot count alone misses this.
+    _RPM_BASELINE=/var/lib/noid-privacy/rpm-baseline.txt
+    _RPM_MODIFIED_NOW=$(echo "$RPM_VA_OUTPUT" | awk '/^..5/ {print $NF}' | sort -u)
+    if [[ -f "$_RPM_BASELINE" ]]; then
+      _RPM_NEW=$(comm -13 <(sort -u "$_RPM_BASELINE") <(echo "$_RPM_MODIFIED_NOW") | grep -v '^$')
+      if [[ -z "$_RPM_NEW" ]]; then
+        _emit_pass "RPM drift: no new modifications since baseline"
+      else
+        _RPM_NEW_COUNT=$(echo "$_RPM_NEW" | wc -l)
+        _emit_warn "RPM drift: $_RPM_NEW_COUNT new modification(s) since baseline"
+        if ! $JSON_MODE && [[ "$_RPM_NEW_COUNT" -le 10 ]]; then
+          echo "$_RPM_NEW" | while read -r _line; do
+            printf "       %s\n" "$_line"
+          done
+        fi
+      fi
+    else
+      _emit_info "RPM baseline: not initialized (run with NOID_RPM_BASELINE_INIT=1)"
+    fi
+    # Optional: capture/update baseline
+    if [[ "${NOID_RPM_BASELINE_INIT:-0}" == "1" ]] || [[ "${NOID_RPM_BASELINE_UPDATE:-0}" == "1" ]]; then
+      install -d -m 755 /var/lib/noid-privacy 2>/dev/null
+      echo "$_RPM_MODIFIED_NOW" > "$_RPM_BASELINE" 2>/dev/null
+      chmod 644 "$_RPM_BASELINE" 2>/dev/null
+      _RPM_BASELINE_COUNT=$(echo "$_RPM_MODIFIED_NOW" | wc -l)
+      _emit_info "RPM baseline: captured $_RPM_BASELINE_COUNT modified files to $_RPM_BASELINE"
     fi
   fi
 elif require_cmd debsums; then
@@ -4582,34 +4962,34 @@ elif require_cmd debsums; then
   # routine after hardening, only binary changes warrant escalation.
   DEB_OUTPUT=$(timeout 90 debsums -c 2>/dev/null || echo "TIMEOUT")
   if [[ "$DEB_OUTPUT" == "TIMEOUT" ]]; then
-    warn "debsums: timed out after 90s"
+    _emit_warn "debsums: timed out after 90s"
   else
     DEB_VERIFY_TOTAL=$(echo "$DEB_OUTPUT" | grep -c '\S' || echo 0)
     DEB_VERIFY_TOTAL=${DEB_VERIFY_TOTAL:-0}
     DEB_VERIFY_BIN=$(echo "$DEB_OUTPUT" | grep -cE '/(s?bin|libexec)/' || echo 0)
     DEB_VERIFY_BIN=${DEB_VERIFY_BIN:-0}
     if [[ "$DEB_VERIFY_TOTAL" -eq 0 ]]; then
-      pass "debsums: all package files intact"
+      _emit_pass "debsums: all package files intact"
     elif [[ "$DEB_VERIFY_BIN" -eq 0 ]]; then
-      pass "debsums: $DEB_VERIFY_TOTAL config files changed (no binaries — normal after hardening)"
+      _emit_pass "debsums: $DEB_VERIFY_TOTAL config files changed (no binaries — normal after hardening)"
     elif [[ "$DEB_VERIFY_BIN" -le 5 ]]; then
-      warn "debsums: $DEB_VERIFY_BIN binaries + $((DEB_VERIFY_TOTAL - DEB_VERIFY_BIN)) configs changed"
+      _emit_warn "debsums: $DEB_VERIFY_BIN binaries + $((DEB_VERIFY_TOTAL - DEB_VERIFY_BIN)) configs changed"
     else
-      fail "debsums: $DEB_VERIFY_BIN binaries with changed checksums!"
+      _emit_fail "debsums: $DEB_VERIFY_BIN binaries with changed checksums!"
     fi
   fi
 elif [[ "$DISTRO_FAMILY" == "debian" ]]; then
-  info "Package integrity: install 'debsums' for Debian file verification (apt install debsums)"
+  _emit_info "Package integrity: install 'debsums' for Debian file verification (apt install debsums)"
 elif require_cmd pacman; then
   # Arch: verify installed package files
   PAC_VERIFY=$(pacman -Qkk 2>/dev/null | grep -c "MODIFIED" || true)
   PAC_VERIFY=${PAC_VERIFY:-0}
   if [[ "$PAC_VERIFY" -eq 0 ]]; then
-    pass "Pacman verify: all package files intact"
+    _emit_pass "Pacman verify: all package files intact"
   elif [[ "$PAC_VERIFY" -le 10 ]]; then
-    warn "Pacman verify: $PAC_VERIFY modified files"
+    _emit_warn "Pacman verify: $PAC_VERIFY modified files"
   else
-    fail "Pacman verify: $PAC_VERIFY modified files!"
+    _emit_fail "Pacman verify: $PAC_VERIFY modified files!"
   fi
 fi
 
@@ -4621,29 +5001,29 @@ PATH_ISSUES=0
 IFS=: read -ra PATH_DIRS <<< "$PATH"
 for DIR in "${PATH_DIRS[@]}"; do
   if [[ -z "$DIR" ]]; then
-    fail "PATH contains empty entry (equivalent to '.' — privilege escalation risk)"
+    _emit_fail "PATH contains empty entry (equivalent to '.' — privilege escalation risk)"
     ((PATH_ISSUES++))
     continue
   fi
   if [[ "$DIR" == "." ]]; then
-    fail "PATH contains '.' (current directory — privilege escalation risk)"
+    _emit_fail "PATH contains '.' (current directory — privilege escalation risk)"
     ((PATH_ISSUES++))
     continue
   fi
   if [[ "$DIR" != /* ]]; then
-    fail "PATH contains relative entry: $DIR (privilege escalation risk)"
+    _emit_fail "PATH contains relative entry: $DIR (privilege escalation risk)"
     ((PATH_ISSUES++))
     continue
   fi
   # Skip symlinks (e.g. /sbin -> /usr/sbin on Fedora)
   [[ -L "$DIR" ]] && continue
   if [[ -d "$DIR" ]] && [[ "$(stat -c %a "$DIR" 2>/dev/null)" =~ [2367]$ ]]; then
-    warn "World-writable directory in PATH: $DIR"
+    _emit_warn "World-writable directory in PATH: $DIR"
     ((PATH_ISSUES++))
   fi
 done
 if [[ "$PATH_ISSUES" -eq 0 ]]; then
-  pass "PATH security: no world-writable, '.', or relative entries"
+  _emit_pass "PATH security: no world-writable, '.', or relative entries"
 fi
 
 # Duplicate lines in /etc/hosts
@@ -4652,15 +5032,15 @@ if [[ -f /etc/hosts ]]; then
   _HOSTS_DUPS=$(grep -vE '^#|^$' /etc/hosts 2>/dev/null | sort | uniq -d | wc -l)
   _HOSTS_DUPS=${_HOSTS_DUPS:-0}
   if [[ "$_HOSTS_DUPS" -eq 0 ]]; then
-    pass "/etc/hosts: no duplicate entries"
+    _emit_pass "/etc/hosts: no duplicate entries"
   else
-    warn "/etc/hosts: $_HOSTS_DUPS duplicate entries"
+    _emit_warn "/etc/hosts: $_HOSTS_DUPS duplicate entries"
   fi
   # Verify localhost entry
   if grep -qE "^127\.0\.0\.1\s+localhost" /etc/hosts 2>/dev/null; then
-    pass "/etc/hosts: localhost entry present"
+    _emit_pass "/etc/hosts: localhost entry present"
   else
-    warn "/etc/hosts: missing 127.0.0.1 localhost entry"
+    _emit_warn "/etc/hosts: missing 127.0.0.1 localhost entry"
   fi
 fi
 
@@ -4673,11 +5053,11 @@ if require_cmd aide; then
   if [[ -n "$_AIDE_CONF" ]]; then
     if grep -qE "sha512|sha256" "$_AIDE_CONF" 2>/dev/null; then
       _AIDE_HASH=$(grep -oE "sha512|sha256" "$_AIDE_CONF" 2>/dev/null | head -1)
-      pass "AIDE checksum: $_AIDE_HASH (strong)"
+      _emit_pass "AIDE checksum: $_AIDE_HASH (strong)"
     elif grep -qE "md5" "$_AIDE_CONF" 2>/dev/null; then
-      fail "AIDE checksum: MD5 (weak — switch to sha512)"
+      _emit_fail "AIDE checksum: MD5 (weak — switch to sha512)"
     else
-      info "AIDE checksum algorithm: could not determine from $_AIDE_CONF"
+      _emit_info "AIDE checksum algorithm: could not determine from $_AIDE_CONF"
     fi
   fi
 fi
@@ -4686,13 +5066,13 @@ fi
 sub_header "Valid Shells"
 if [[ -f /etc/shells ]]; then
   _SHELL_COUNT=$(grep -cvE "^#|^$" /etc/shells 2>/dev/null || true)
-  info "Valid shells in /etc/shells: ${_SHELL_COUNT:-0}"
+  _emit_info "Valid shells in /etc/shells: ${_SHELL_COUNT:-0}"
   # Check for insecure shells
   # F-217: extended legacy-shell list includes csh/tcsh and bare sh/dash
   # (non-interactive but listed in /etc/shells).
   for _ishell in /bin/csh /bin/tcsh /bin/sh /bin/dash; do
     if grep -q "^${_ishell}$" /etc/shells 2>/dev/null; then
-      info "Legacy shell available: $_ishell"
+      _emit_info "Legacy shell available: $_ishell"
     fi
   done
 fi
@@ -4752,60 +5132,60 @@ check_browser_privacy() {
       local val
       val="$(_ff_pref "$pf" "toolkit.telemetry.enabled")"
       if [[ "$val" == "true" ]]; then
-        fail "Firefox telemetry explicitly enabled [$label]"
+        _emit_fail "Firefox telemetry explicitly enabled [$label]"
       elif [[ "$val" == "false" ]]; then
-        pass "Firefox telemetry disabled [$label]"
+        _emit_pass "Firefox telemetry disabled [$label]"
       else
-        info "Firefox telemetry not explicitly set (default: disabled on most distros) [$label]"
+        _emit_info "Firefox telemetry not explicitly set (default: disabled on most distros) [$label]"
       fi
 
       val="$(_ff_pref "$pf" "datareporting.healthreport.uploadEnabled")"
       if [[ "$val" == "false" ]]; then
-        pass "Firefox health report disabled [$label]"
+        _emit_pass "Firefox health report disabled [$label]"
       elif [[ "$val" == "true" ]]; then
-        fail "Firefox health report upload enabled [$label]"
+        _emit_fail "Firefox health report upload enabled [$label]"
       else
-        warn "Firefox health report not explicitly disabled [$label]"
+        _emit_warn "Firefox health report not explicitly disabled [$label]"
       fi
 
       val="$(_ff_pref "$pf" "media.peerconnection.enabled")"
       if [[ "$val" == "false" ]]; then
-        pass "WebRTC disabled — no IP leak [$label]"
+        _emit_pass "WebRTC disabled — no IP leak [$label]"
       else
-        warn "WebRTC enabled — may leak real IP behind VPN [$label]"
+        _emit_warn "WebRTC enabled — may leak real IP behind VPN [$label]"
       fi
 
       val="$(_ff_pref "$pf" "network.trr.mode")"
       if [[ "$val" == "2" ]]; then
-        pass "DNS-over-HTTPS enabled (mode 2 — DoH first, fallback to native DNS) [$label]"
+        _emit_pass "DNS-over-HTTPS enabled (mode 2 — DoH first, fallback to native DNS) [$label]"
       elif [[ "$val" == "3" ]]; then
-        pass "DNS-over-HTTPS strict (mode 3 — DoH only, no fallback) [$label]"
+        _emit_pass "DNS-over-HTTPS strict (mode 3 — DoH only, no fallback) [$label]"
       elif [[ -z "$val" || "$val" == "0" ]]; then
-        warn "DNS-over-HTTPS not configured [$label]"
+        _emit_warn "DNS-over-HTTPS not configured [$label]"
       else
-        info "DNS-over-HTTPS mode $val [$label]"
+        _emit_info "DNS-over-HTTPS mode $val [$label]"
       fi
 
       val="$(_ff_pref "$pf" "browser.contentblocking.category")"
       if [[ "$val" == "strict" ]]; then
-        pass "Tracking protection set to strict [$label]"
+        _emit_pass "Tracking protection set to strict [$label]"
       elif [[ "$val" == "custom" ]]; then
-        info "Tracking protection custom [$label]"
+        _emit_info "Tracking protection custom [$label]"
       else
-        warn "Tracking protection not strict (${val:-standard}) [$label]"
+        _emit_warn "Tracking protection not strict (${val:-standard}) [$label]"
       fi
 
       val="$(_ff_pref "$pf" "network.cookie.cookieBehavior")"
       if [[ "$val" == "5" ]]; then
-        pass "Third-party cookies blocked (Total Cookie Protection) [$label]"
+        _emit_pass "Third-party cookies blocked (Total Cookie Protection) [$label]"
       elif [[ "$val" == "4" ]]; then
-        pass "Third-party cookies blocked [$label]"
+        _emit_pass "Third-party cookies blocked [$label]"
       elif [[ "$val" == "1" ]]; then
-        info "Third-party cookies blocked (legacy) [$label]"
+        _emit_info "Third-party cookies blocked (legacy) [$label]"
       elif [[ -z "$val" ]]; then
-        info "Cookie behavior not set (default: Total Cookie Protection with ETP) [$label]"
+        _emit_info "Cookie behavior not set (default: Total Cookie Protection with ETP) [$label]"
       else
-        warn "Third-party cookies allowed (behavior=${val}) [$label]"
+        _emit_warn "Third-party cookies allowed (behavior=${val}) [$label]"
       fi
 
       local ext_json="$profile_dir/extensions.json"
@@ -4823,29 +5203,29 @@ check_browser_privacy() {
           local _ub_active="${_ublock_status%|*}"
           local _ub_userdis="${_ublock_status#*|}"
           if [[ "$_ub_active" == "true" && "$_ub_userdis" == "false" ]]; then
-            pass "uBlock Origin installed and enabled [$label]"
+            _emit_pass "uBlock Origin installed and enabled [$label]"
           else
-            warn "uBlock Origin installed but DISABLED (active=$_ub_active userDisabled=$_ub_userdis) [$label]"
+            _emit_warn "uBlock Origin installed but DISABLED (active=$_ub_active userDisabled=$_ub_userdis) [$label]"
           fi
         elif grep -q "uBlock0@raymondhill.net" "$ext_json" 2>/dev/null; then
           # Without jq, just confirm presence (assume active if listed)
-          pass "uBlock Origin installed [$label]"
+          _emit_pass "uBlock Origin installed [$label]"
         elif grep -qE "uBOLite@raymondhill.net|@ublock-origin-lite" "$ext_json" 2>/dev/null; then
-          pass "uBlock Origin Lite installed [$label]"
+          _emit_pass "uBlock Origin Lite installed [$label]"
         else
-          warn "uBlock Origin not found [$label]"
+          _emit_warn "uBlock Origin not found [$label]"
         fi
       else
-        info "No extensions data found [$label]"
+        _emit_info "No extensions data found [$label]"
       fi
 
       val="$(_ff_pref "$pf" "app.shield.optoutstudies.enabled")"
       if [[ "$val" == "false" ]]; then
-        pass "Shield Studies disabled [$label]"
+        _emit_pass "Shield Studies disabled [$label]"
       elif [[ "$val" == "true" ]]; then
-        warn "Shield Studies enabled [$label]"
+        _emit_warn "Shield Studies enabled [$label]"
       else
-        info "Shield Studies not explicitly configured [$label]"
+        _emit_info "Shield Studies not explicitly configured [$label]"
       fi
 
       # F-222: differentiate "no password saving" (good), "saving with master
@@ -4853,7 +5233,7 @@ check_browser_privacy() {
       # if encrypted), and "saving without master password" (warn — bad).
       val="$(_ff_pref "$pf" "signon.rememberSignons")"
       if [[ "$val" == "false" ]]; then
-        pass "Browser password saving disabled [$label]"
+        _emit_pass "Browser password saving disabled [$label]"
       else
         # Check for Firefox primary password (formerly "master password")
         local _has_pp=false
@@ -4866,11 +5246,11 @@ check_browser_privacy() {
           [[ -n "$_pp_token" && "$_pp_token" != "NSS Internal PKCS #11 Module" ]] && _has_pp=true
         fi
         if $_has_pp; then
-          info "Browser password saving enabled with primary password [$label]"
+          _emit_info "Browser password saving enabled with primary password [$label]"
         elif [[ -z "$val" ]]; then
-          info "Browser password saving not explicitly disabled (default: enabled) [$label]"
+          _emit_info "Browser password saving not explicitly disabled (default: enabled) [$label]"
         else
-          warn "Browser password saving enabled WITHOUT primary password [$label] — set one in Settings → Privacy"
+          _emit_warn "Browser password saving enabled WITHOUT primary password [$label] — set one in Settings → Privacy"
         fi
       fi
     done
@@ -4892,7 +5272,7 @@ check_browser_privacy() {
       chrome_real="$(realpath "$(command -v "$chrome_bin")" 2>/dev/null || echo "$chrome_bin")"
       [[ -n "${chrome_seen[$chrome_real]:-}" ]] && continue
       chrome_seen["$chrome_real"]=1
-      warn "$chrome_bin installed — vendor telemetry/tracking risk"
+      _emit_warn "$chrome_bin installed — vendor telemetry/tracking risk"
     fi
   done
   for chrome_bin in chromium chromium-browser; do
@@ -4901,7 +5281,7 @@ check_browser_privacy() {
       chrome_real="$(realpath "$(command -v "$chrome_bin")" 2>/dev/null || echo "$chrome_bin")"
       [[ -n "${chrome_seen[$chrome_real]:-}" ]] && continue
       chrome_seen["$chrome_real"]=1
-      info "$chrome_bin installed (Chromium upstream — no Google services by default)"
+      _emit_info "$chrome_bin installed (Chromium upstream — no Google services by default)"
     fi
   done
   for chrome_bin in brave-browser brave; do
@@ -4910,21 +5290,21 @@ check_browser_privacy() {
       chrome_real="$(realpath "$(command -v "$chrome_bin")" 2>/dev/null || echo "$chrome_bin")"
       [[ -n "${chrome_seen[$chrome_real]:-}" ]] && continue
       chrome_seen["$chrome_real"]=1
-      info "$chrome_bin installed (privacy-focused Chromium fork)"
+      _emit_info "$chrome_bin installed (privacy-focused Chromium fork)"
     fi
   done
   # Flatpak Brave/Edge/Opera presence
   if command -v flatpak &>/dev/null; then
     if flatpak list --app --columns=application 2>/dev/null | grep -qE '^com\.brave\.Browser$'; then
-      info "Brave Browser installed (flatpak)"
+      _emit_info "Brave Browser installed (flatpak)"
     fi
     if flatpak list --app --columns=application 2>/dev/null | grep -qE '^com\.microsoft\.Edge$'; then
-      warn "Microsoft Edge installed (flatpak) — vendor telemetry"
+      _emit_warn "Microsoft Edge installed (flatpak) — vendor telemetry"
     fi
   fi
 
   if [[ "$found_any" == false ]]; then
-    info "No Firefox-family browser profiles found"
+    _emit_info "No Firefox-family browser profiles found"
   fi
 }
 
@@ -4943,16 +5323,16 @@ check_app_telemetry() {
 
     val="$(_gsettings_user "$user" "$uid" "org.gnome.system.location" "enabled" 2>/dev/null)"
     if [[ "$val" == "true" ]]; then
-      warn "GNOME Location Services enabled [$user]"
+      _emit_warn "GNOME Location Services enabled [$user]"
     elif [[ "$val" == "false" ]]; then
-      pass "GNOME Location Services disabled [$user]"
+      _emit_pass "GNOME Location Services disabled [$user]"
     fi
 
     val="$(_gsettings_user "$user" "$uid" "org.gnome.desktop.privacy" "report-technical-problems" 2>/dev/null)"
     if [[ "$val" == "true" ]]; then
-      warn "GNOME problem reporting enabled [$user]"
+      _emit_warn "GNOME problem reporting enabled [$user]"
     elif [[ "$val" == "false" ]]; then
-      pass "GNOME problem reporting disabled [$user]"
+      _emit_pass "GNOME problem reporting disabled [$user]"
     fi
 
     val="$(_gsettings_user "$user" "$uid" "org.gnome.desktop.privacy" "remember-recent-files" 2>/dev/null)"
@@ -4962,23 +5342,23 @@ check_app_telemetry() {
       age="${age##*uint32 }"    # Strip GVariant type prefix (e.g. "uint32 30" → "30")
       age="${age//[^0-9]/}"
       if [[ "$age" == "0" ]]; then
-        pass "Recent files: max-age=0 (list always empty) [$user]"
+        _emit_pass "Recent files: max-age=0 (list always empty) [$user]"
       elif [[ -n "$age" && "$age" -le 7 && "$age" -gt 0 ]]; then
-        pass "Recent files kept for ${age} days [$user]"
+        _emit_pass "Recent files kept for ${age} days [$user]"
       elif [[ -n "$age" && "$age" -le 30 ]]; then
-        info "Recent files kept for ${age} days [$user]"
+        _emit_info "Recent files kept for ${age} days [$user]"
       else
-        warn "Recent files enabled (max age: ${age:-unlimited} days) [$user]"
+        _emit_warn "Recent files enabled (max age: ${age:-unlimited} days) [$user]"
       fi
     elif [[ "$val" == "false" ]]; then
-      pass "Recent files tracking disabled [$user]"
+      _emit_pass "Recent files tracking disabled [$user]"
     fi
 
     val="$(_gsettings_user "$user" "$uid" "org.gnome.desktop.privacy" "send-software-usage-stats" 2>/dev/null)"
     if [[ "$val" == "true" ]]; then
-      warn "GNOME software usage stats enabled [$user]"
+      _emit_warn "GNOME software usage stats enabled [$user]"
     elif [[ "$val" == "false" ]]; then
-      pass "GNOME software usage stats disabled [$user]"
+      _emit_pass "GNOME software usage stats disabled [$user]"
     fi
   }
 
@@ -4989,9 +5369,9 @@ check_app_telemetry() {
   _idx_name=$(_de_check_file_indexer)
   _idx_rc=$?
   if [[ "$_idx_rc" -eq 0 ]]; then
-    warn "$_idx_name file indexer active — indexes file contents (privacy: stores in user DB)"
+    _emit_warn "$_idx_name file indexer active — indexes file contents (privacy: stores in user DB)"
   else
-    pass "$_idx_name file indexer not running"
+    _emit_pass "$_idx_name file indexer not running"
   fi
 
   if command -v flatpak &>/dev/null; then
@@ -5018,45 +5398,45 @@ check_app_telemetry() {
       perms="$(flatpak info --show-permissions "$app" 2>/dev/null)"
       # High-risk patterns
       if echo "$perms" | grep -qE "filesystems=(host([;,[:space:]]|$)|.*[;,]host([;,[:space:]]|$))|filesystems=(host-os([;,[:space:]]|$)|.*[;,]host-os([;,[:space:]]|$))|filesystems=(home([;,[:space:]]|$)|.*[;,]home([;,[:space:]]|$))|org\.freedesktop\.Flatpak=talk"; then
-        warn "Flatpak '$app' has high-risk permissions (host/home filesystem or Flatpak portal)"
+        _emit_warn "Flatpak '$app' has high-risk permissions (host/home filesystem or Flatpak portal)"
         ((dangerous++))
       fi
       # Medium-risk: raw device access (info, not warn)
       if echo "$perms" | grep -qE "devices=(all([;,[:space:]]|$)|.*[;,]all([;,[:space:]]|$))"; then
-        info "Flatpak '$app' has devices=all (raw hardware — legitimate for webcam/audio apps)"
+        _emit_info "Flatpak '$app' has devices=all (raw hardware — legitimate for webcam/audio apps)"
       fi
     done < <(flatpak list --app --columns=application 2>/dev/null)
     if [[ "$dangerous" -eq 0 ]]; then
-      pass "No Flatpak apps with high-risk permissions"
+      _emit_pass "No Flatpak apps with high-risk permissions"
     fi
   else
-    info "Flatpak not installed"
+    _emit_info "Flatpak not installed"
   fi
 
   if command -v snap &>/dev/null; then
     if snap get system experimental.telemetry 2>/dev/null | grep -qi "true"; then
-      warn "Snap telemetry enabled"
+      _emit_warn "Snap telemetry enabled"
     else
-      pass "Snap telemetry not enabled"
+      _emit_pass "Snap telemetry not enabled"
     fi
   fi
 
   local abrt_active
   abrt_active="$(systemctl list-units --state=active --no-legend 'abrt-*' 2>/dev/null | wc -l | ccount)"
   if [[ "$abrt_active" -gt 0 ]]; then
-    warn "ABRT crash reporter active ($abrt_active services) — sends crash data"
+    _emit_warn "ABRT crash reporter active ($abrt_active services) — sends crash data"
   else
-    pass "ABRT crash reporter not active"
+    _emit_pass "ABRT crash reporter not active"
   fi
 
   if [[ "$DISTRO_FAMILY" == "rhel" ]]; then
     local dnf_conf="/etc/dnf/dnf.conf"
     if [[ -f "$dnf_conf" ]] && grep -qi "^countme[[:space:]]*=[[:space:]]*true" "$dnf_conf" 2>/dev/null; then
-      warn "Fedora countme enabled in dnf.conf"
+      _emit_warn "Fedora countme enabled in dnf.conf"
     elif [[ -f "$dnf_conf" ]] && grep -qi "^countme[[:space:]]*=[[:space:]]*false" "$dnf_conf" 2>/dev/null; then
-      pass "Fedora countme disabled in dnf.conf"
+      _emit_pass "Fedora countme disabled in dnf.conf"
     else
-      info "Fedora countme not explicitly set in dnf.conf (default: disabled since Fedora 36)"
+      _emit_info "Fedora countme not explicitly set in dnf.conf (default: disabled since Fedora 36)"
     fi
   fi
 
@@ -5064,12 +5444,12 @@ check_app_telemetry() {
     if dpkg -l popularity-contest 2>/dev/null | grep -q "^ii"; then
       local popcon_conf="/etc/popularity-contest.conf"
       if [[ -f "$popcon_conf" ]] && grep -q 'PARTICIPATE="yes"' "$popcon_conf" 2>/dev/null; then
-        warn "Ubuntu popularity-contest active — reports installed packages"
+        _emit_warn "Ubuntu popularity-contest active — reports installed packages"
       else
-        info "popularity-contest installed but not participating"
+        _emit_info "popularity-contest installed but not participating"
       fi
     else
-      pass "popularity-contest not installed"
+      _emit_pass "popularity-contest not installed"
     fi
   fi
 
@@ -5090,14 +5470,14 @@ check_app_telemetry() {
       _nm_enabled="$(sed -n '/^\[connectivity\]/,/^\[/{ s/^enabled[[:space:]]*=[[:space:]]*//p; }' "$_nmf" 2>/dev/null | tail -1)"
       if [[ "$_nm_enabled" == "false" ]]; then
         _nm_connectivity_disabled=true
-        pass "NetworkManager connectivity check disabled (in $(basename "$_nmf"))"
+        _emit_pass "NetworkManager connectivity check disabled (in $(basename "$_nmf"))"
         break
       fi
       # Check uri setting
       local _nm_uri
       _nm_uri="$(sed -n '/^\[connectivity\]/,/^\[/{ s/^uri[[:space:]]*=[[:space:]]*//p; }' "$_nmf" 2>/dev/null | tail -1)"
       if [[ -n "$_nm_uri" ]]; then
-        info "NetworkManager connectivity check active (pings $_nm_uri, in $(basename "$_nmf"))"
+        _emit_info "NetworkManager connectivity check active (pings $_nm_uri, in $(basename "$_nmf"))"
         break
       fi
     fi
@@ -5106,9 +5486,9 @@ check_app_telemetry() {
   if $_nm_connectivity_disabled; then
     : # already reported pass above
   elif $_nm_connectivity_found; then
-    info "NetworkManager [connectivity] section found but no explicit disable — connectivity check likely active"
+    _emit_info "NetworkManager [connectivity] section found but no explicit disable — connectivity check likely active"
   else
-    info "NetworkManager connectivity check uses default (may phone home)"
+    _emit_info "NetworkManager connectivity check uses default (may phone home)"
   fi
 }
 
@@ -5128,13 +5508,19 @@ check_network_privacy() {
     [[ -n "$val" ]] && nm_wifi_rand="$val"
   done
   if [[ "$nm_wifi_rand" == "yes" || "$nm_wifi_rand" == "true" ]]; then
-    pass "WiFi scan MAC randomization enabled"
+    _emit_pass "WiFi scan MAC randomization enabled"
   elif [[ "$nm_wifi_rand" == "no" || "$nm_wifi_rand" == "false" ]]; then
-    fail "WiFi scan MAC randomization disabled"
+    _emit_fail "WiFi scan MAC randomization disabled"
   else
-    info "WiFi scan MAC randomization not configured (default: yes since NM 1.4)"
+    _emit_info "WiFi scan MAC randomization not configured (default: yes since NM 1.4)"
   fi
 
+  # F-232b: cloned-mac-address can live in three places:
+  # 1. NetworkManager.conf [connection] section: ethernet.cloned-mac-address=...
+  # 2. conf.d drop-ins:                          ethernet.cloned-mac-address=...
+  # 3. system-connections/*.nmconnection [ethernet] section: cloned-mac-address=...
+  # Per-connection profiles (3) are the common case on Fedora — config-section
+  # form (1+2) is for global defaults. Scan all three.
   local eth_clone=""
   for conf_file in /etc/NetworkManager/NetworkManager.conf /etc/NetworkManager/conf.d/*.conf; do
     [[ -f "$conf_file" ]] || continue
@@ -5142,24 +5528,34 @@ check_network_privacy() {
     val="$(sed -n '/^\[connection\]/,/^\[/{ s/^ethernet\.cloned-mac-address[[:space:]]*=[[:space:]]*//p; }' "$conf_file" 2>/dev/null)"
     [[ -n "$val" ]] && eth_clone="$val"
   done
+  # Per-connection profile scan (most common on Fedora desktop)
+  # Script enforces root mode at line 720, so files are readable without sudo.
+  if [[ -z "$eth_clone" ]]; then
+    for conf_file in /etc/NetworkManager/system-connections/*.nmconnection; do
+      [[ -f "$conf_file" ]] || continue
+      local val
+      val=$(sed -n '/^\[ethernet\]/,/^\[/{ s/^cloned-mac-address[[:space:]]*=[[:space:]]*//p; }' "$conf_file" 2>/dev/null | head -1)
+      [[ -n "$val" ]] && eth_clone="$val" && break
+    done
+  fi
   # F-232: 'stable' is a deliberate privacy choice — derives consistent MAC
   # per connection-UUID. Better than no randomization (no permanent hardware
   # MAC exposure) and acceptable on static-IP setups where the IP is anyway
   # the stable identifier. Promote from INFO to PASS-with-note.
   if [[ "$eth_clone" == "random" ]]; then
-    pass "Ethernet MAC randomization: random (new MAC on each connection)"
+    _emit_pass "Ethernet MAC randomization: random (new MAC on each connection)"
   elif [[ "$eth_clone" == "stable" ]]; then
-    pass "Ethernet MAC: stable (per-connection consistent — privacy without disruption)"
+    _emit_pass "Ethernet MAC: stable (per-connection consistent — privacy without disruption)"
   elif [[ -n "$eth_clone" ]]; then
-    info "Ethernet cloned-mac-address=$eth_clone"
+    _emit_info "Ethernet cloned-mac-address=$eth_clone"
   else
-    info "Ethernet MAC randomization not configured (uses permanent hardware MAC)"
+    _emit_info "Ethernet MAC randomization not configured (uses permanent hardware MAC)"
   fi
 
   if systemctl is-active --quiet avahi-daemon.service 2>/dev/null; then
-    warn "Avahi (mDNS) active — broadcasts hostname on local network"
+    _emit_warn "Avahi (mDNS) active — broadcasts hostname on local network"
   else
-    pass "Avahi (mDNS) not running"
+    _emit_pass "Avahi (mDNS) not running"
   fi
 
   local avahi_conf="/etc/avahi/avahi-daemon.conf"
@@ -5171,14 +5567,14 @@ check_network_privacy() {
     avahi_enabled=$(systemctl is-enabled avahi-daemon.service 2>/dev/null) || true
     [[ -z "$avahi_enabled" ]] && avahi_enabled="unknown"
     if [[ "$avahi_enabled" == "masked" || "$avahi_enabled" == "disabled" || "$avahi_enabled" == "static" ]]; then
-      info "Avahi is $avahi_enabled — config check skipped"
+      _emit_info "Avahi is $avahi_enabled — config check skipped"
     else
       local pub_host
       pub_host="$(sed -n '/^\[publish\]/,/^\[/{ s/^publish-hostname[[:space:]]*=[[:space:]]*//p; }' "$avahi_conf" 2>/dev/null)"
       if [[ "$pub_host" == "no" ]]; then
-        pass "Avahi hostname publishing disabled"
+        _emit_pass "Avahi hostname publishing disabled"
       else
-        warn "Avahi publishes hostname (publish-hostname=${pub_host:-yes})"
+        _emit_warn "Avahi publishes hostname (publish-hostname=${pub_host:-yes})"
       fi
     fi
   fi
@@ -5196,15 +5592,15 @@ check_network_privacy() {
     [[ -n "$dval" ]] && llmnr_val="$dval"
   done
   if [[ "$llmnr_val" == "no" || "$llmnr_val" == "false" ]]; then
-    pass "LLMNR disabled in resolved.conf"
+    _emit_pass "LLMNR disabled in resolved.conf"
   elif [[ -z "$llmnr_val" ]]; then
     if [[ -f "$resolved_conf" ]]; then
-      warn "LLMNR not configured (default: enabled — leaks hostname)"
+      _emit_warn "LLMNR not configured (default: enabled — leaks hostname)"
     else
-      warn "resolved.conf not found — LLMNR status unknown (likely enabled by default)"
+      _emit_warn "resolved.conf not found — LLMNR status unknown (likely enabled by default)"
     fi
   else
-    info "LLMNR set to '$llmnr_val'"
+    _emit_info "LLMNR set to '$llmnr_val'"
   fi
 
   local hostname
@@ -5219,8 +5615,11 @@ check_network_privacy() {
     [[ ${#name} -ge 5 ]] || return 1
     [[ "${host,,}" =~ (^|[-_.])${name,,}([-_.]|$) ]]
   }
+  # F-233b: use _is_human_uid (honors /etc/login.defs UID_MIN/UID_MAX) instead
+  # of hardcoded 1000 — distros with non-default UID_MIN (Ubuntu Server's 500
+  # in legacy installs, custom enterprise builds) need this consistency.
   while IFS=: read -r user _ uid _ gecos _ _; do
-    [[ "$uid" -ge 1000 ]] || continue
+    _is_human_uid "$uid" || continue
     local full_name="${gecos%%,*}"
     local first_name="${full_name%% *}"
     local last_name="${full_name##* }"
@@ -5232,9 +5631,9 @@ check_network_privacy() {
     fi
   done < /etc/passwd
   if [[ "$real_names" == true ]]; then
-    warn "Hostname '$hostname' may contain real name — reveals identity on networks"
+    _emit_warn "Hostname '$hostname' may contain real name — reveals identity on networks"
   else
-    pass "Hostname '$hostname' does not appear to contain real names"
+    _emit_pass "Hostname '$hostname' does not appear to contain real names"
   fi
 
   # IPv6 privacy posture — three layered checks (kernel global, kernel
@@ -5256,7 +5655,7 @@ check_network_privacy() {
     _if="${_if%/disable_ipv6}"
     [[ "$_if" == "all" || "$_if" == "default" || "$_if" == "lo" ]] && continue
     # Skip VPN tunnels — their IPv6 is internal, not LAN-exposed
-    echo "$_if" | grep -qE "^(tun|tap|wg|proton|pvpn|tailscale|zt|nebula|mullvad|nordlynx)" && continue
+    echo "$_if" | grep -qE "$_VPN_IFACE_REGEX" && continue
     _has_phys_iface=true
     local _v
     _v="$(< "$_ifpath")"
@@ -5272,7 +5671,7 @@ check_network_privacy() {
       [[ -z "$_cname" ]] && continue
       local _conn_iface
       _conn_iface=$(nmcli -t -f GENERAL.DEVICES connection show "$_cname" 2>/dev/null | grep -oP '(?<=GENERAL\.DEVICES:).*' | head -1)
-      if echo "$_conn_iface" | grep -qE "^(tun|tap|wg|proton|pvpn|tailscale|zt|nebula|mullvad|nordlynx)"; then
+      if echo "$_conn_iface" | grep -qE "$_VPN_IFACE_REGEX"; then
         continue
       fi
       _has_active=true
@@ -5296,16 +5695,16 @@ check_network_privacy() {
   fi
 
   if [[ "$ipv6_disabled_all" == "1" ]] || $_all_phys_v6_off || $_ipv6_nm_disabled; then
-    pass "IPv6 disabled on physical interfaces — privacy extensions not needed (VPN-internal IPv6 by design)"
+    _emit_pass "IPv6 disabled on physical interfaces — privacy extensions not needed (VPN-internal IPv6 by design)"
   else
     local tempaddr
     tempaddr="$(sysctl -n net.ipv6.conf.default.use_tempaddr 2>/dev/null)"
     if [[ "$tempaddr" == "2" ]]; then
-      pass "IPv6 privacy extensions enabled (prefer temporary addresses)"
+      _emit_pass "IPv6 privacy extensions enabled (prefer temporary addresses)"
     elif [[ "$tempaddr" == "1" ]]; then
-      info "IPv6 privacy extensions enabled but not preferred"
+      _emit_info "IPv6 privacy extensions enabled but not preferred"
     else
-      warn "IPv6 privacy extensions disabled — stable address reveals identity"
+      _emit_warn "IPv6 privacy extensions disabled — stable address reveals identity"
     fi
   fi
 
@@ -5326,7 +5725,7 @@ check_network_privacy() {
   fi
 
   if ! $_uses_dhcp; then
-    pass "DHCP hostname: N/A (all connections use static IP — no DHCP sent)"
+    _emit_pass "DHCP hostname: N/A (all connections use static IP — no DHCP sent)"
   else
     local dhcp_hostname=""
     # Check global NM config ([connection] section with dotted key)
@@ -5354,9 +5753,9 @@ check_network_privacy() {
       $_dhcp_any_leak && dhcp_hostname="true"
     fi
     if [[ "$dhcp_hostname" == "false" || "$dhcp_hostname" == "no" || "$dhcp_hostname" == "0" ]]; then
-      pass "DHCP hostname sending disabled"
+      _emit_pass "DHCP hostname sending disabled"
     else
-      warn "DHCP sends hostname to network (dhcp-send-hostname=${dhcp_hostname:-true})"
+      _emit_warn "DHCP sends hostname to network (dhcp-send-hostname=${dhcp_hostname:-true})"
     fi
   fi
 
@@ -5371,25 +5770,25 @@ check_network_privacy() {
     [[ -n "$dval" ]] && mdns_val="$dval"
   done
   if [[ "$mdns_val" == "no" || "$mdns_val" == "false" ]]; then
-    pass "Multicast DNS disabled in resolved.conf"
+    _emit_pass "Multicast DNS disabled in resolved.conf"
   elif [[ -z "$mdns_val" ]]; then
     if [[ -f "$resolved_conf" ]]; then
-      info "Multicast DNS not configured in resolved.conf"
+      _emit_info "Multicast DNS not configured in resolved.conf"
     else
-      info "resolved.conf not found — Multicast DNS status unknown"
+      _emit_info "resolved.conf not found — Multicast DNS status unknown"
     fi
   else
-    info "Multicast DNS set to '$mdns_val'"
+    _emit_info "Multicast DNS set to '$mdns_val'"
   fi
 
   # Conservative: flags any active cups-browsed regardless of patch level.
   # Patched builds (cups-filters >= 2.0.1) are not vulnerable to CVE-2024-47176.
   if systemctl is-active --quiet cups-browsed.service 2>/dev/null; then
-    warn "cups-browsed active — check if patched for CVE-2024-47176 (cups-filters >= 2.0.1)"
+    _emit_warn "cups-browsed active — check if patched for CVE-2024-47176 (cups-filters >= 2.0.1)"
   elif systemctl is-enabled --quiet cups-browsed.service 2>/dev/null; then
-    warn "cups-browsed enabled but not running — consider disabling"
+    _emit_warn "cups-browsed enabled but not running — consider disabling"
   else
-    pass "cups-browsed not active"
+    _emit_pass "cups-browsed not active"
   fi
 }
 
@@ -5409,11 +5808,11 @@ check_data_privacy() {
       size="$(stat -c%s "$recent_file" 2>/dev/null || true)"
       size=${size:-0}
       if [[ "$size" -gt 1048576 ]]; then
-        warn "recently-used.xbel is $(_human_size "$size") [$user] — consider clearing"
+        _emit_warn "recently-used.xbel is $(_human_size "$size") [$user] — consider clearing"
       elif [[ "$size" -gt 102400 ]]; then
-        info "recently-used.xbel is $(_human_size "$size") [$user]"
+        _emit_info "recently-used.xbel is $(_human_size "$size") [$user]"
       else
-        pass "recently-used.xbel small ($(_human_size "$size")) [$user]"
+        _emit_pass "recently-used.xbel small ($(_human_size "$size")) [$user]"
       fi
     fi
 
@@ -5424,9 +5823,9 @@ check_data_privacy() {
       size="$(timeout 5 du -sb "$thumb_dir" 2>/dev/null | cut -f1)"
       size="${size:-0}"
       if [[ "$size" -gt 104857600 ]]; then
-        warn "Thumbnail cache $(_human_size "$size") [$user] — reveals viewed images"
+        _emit_warn "Thumbnail cache $(_human_size "$size") [$user] — reveals viewed images"
       elif [[ "$size" -gt 10485760 ]]; then
-        info "Thumbnail cache $(_human_size "$size") [$user]"
+        _emit_info "Thumbnail cache $(_human_size "$size") [$user]"
       fi
     fi
 
@@ -5436,9 +5835,9 @@ check_data_privacy() {
       size="$(du -sb "$trash_dir" 2>/dev/null | cut -f1)"
       size="${size:-0}"
       if [[ "$size" -gt 104857600 ]]; then
-        warn "Trash is $(_human_size "$size") [$user] — deleted files still on disk"
+        _emit_warn "Trash is $(_human_size "$size") [$user] — deleted files still on disk"
       elif [[ "$size" -gt 1048576 ]]; then
-        info "Trash is $(_human_size "$size") [$user]"
+        _emit_info "Trash is $(_human_size "$size") [$user]"
       fi
     fi
 
@@ -5462,7 +5861,7 @@ check_data_privacy() {
       sensitive=$(grep -ciE 'password=[^[:space:]]+|token=[^[:space:]]+|api[_-]?key=[^[:space:]]+|secret=[^[:space:]]+|export.*KEY=' "$hf" 2>/dev/null || true)
       sensitive=${sensitive:-0}
       if [[ "$sensitive" -gt 0 ]]; then
-        warn "$sensitive potential secrets in $hf [$user]"
+        _emit_warn "$sensitive potential secrets in $hf [$user]"
       fi
     done
     local bashrc="$home/.bashrc"
@@ -5470,7 +5869,7 @@ check_data_privacy() {
       local histsize
       histsize="$(grep -oP '^(export\s+)?HISTSIZE=\K\d+' "$bashrc" 2>/dev/null | tail -1)"
       if [[ -n "$histsize" && "$histsize" -gt 10000 ]]; then
-        info "HISTSIZE=$histsize (large — consider scrubbing periodically) [$user]"
+        _emit_info "HISTSIZE=$histsize (large — consider scrubbing periodically) [$user]"
       fi
     fi
   }
@@ -5484,7 +5883,7 @@ check_data_privacy() {
   local proc
   for proc in "${clip_procs[@]}"; do
     if pgrep -x "$proc" &>/dev/null; then
-      warn "Clipboard manager '$proc' running — may store passwords in memory"
+      _emit_warn "Clipboard manager '$proc' running — may store passwords in memory"
       clip_found=true
     fi
   done
@@ -5496,18 +5895,18 @@ check_data_privacy() {
         val=$(echo "$3" | xargs | tr '[:upper:]' '[:lower:]')
         # KeepClipboardContents=false → history disabled (good for privacy)
         case "$val" in
-          false|0) pass "Klipper running with history disabled [$1, KDE]" ;;
-          true|1)  info "Klipper running with history (KDE default — disable in System Settings → Clipboard) [$1]" ;;
+          false|0) _emit_pass "Klipper running with history disabled [$1, KDE]" ;;
+          true|1)  _emit_info "Klipper running with history (KDE default — disable in System Settings → Clipboard) [$1]" ;;
         esac
       }
       _kreadconfig_for_users "klipperrc" "General" "KeepClipboardContents" _kde_klipper_history_check
     else
-      warn "Klipper running outside KDE — may store passwords in memory"
+      _emit_warn "Klipper running outside KDE — may store passwords in memory"
     fi
     clip_found=true
   fi
   if [[ "$clip_found" == false ]]; then
-    pass "No clipboard manager daemon detected"
+    _emit_pass "No clipboard manager daemon detected"
   fi
 
   local core_pattern
@@ -5519,16 +5918,16 @@ check_data_privacy() {
     # Read effective setting — drop-ins override main config
     core_storage="$(_systemd_conf_val /etc/systemd/coredump.conf Storage)"
     if [[ "${core_storage,,}" == "none" ]]; then
-      info "Core dumps: systemd-coredump storage=none (checked in filesystem section)"
+      _emit_info "Core dumps: systemd-coredump storage=none (checked in filesystem section)"
     else
-      info "Core dumps: systemd-coredump storage=${core_storage:-external} (checked in filesystem section)"
+      _emit_info "Core dumps: systemd-coredump storage=${core_storage:-external} (checked in filesystem section)"
     fi
   elif [[ "$core_pattern" == "|"* ]]; then
-    info "Core dumps piped to: ${core_pattern:0:60}"
+    _emit_info "Core dumps piped to: ${core_pattern:0:60}"
   elif [[ "$core_soft" == "0" ]]; then
-    info "Core dumps: ulimit=0 (checked in filesystem section)"
+    _emit_info "Core dumps: ulimit=0 (checked in filesystem section)"
   else
-    info "Core dumps: enabled (checked in filesystem section)"
+    _emit_info "Core dumps: enabled (checked in filesystem section)"
   fi
 
   local journal_dir="/var/log/journal"
@@ -5537,20 +5936,24 @@ check_data_privacy() {
     jsize="$(du -sb "$journal_dir" 2>/dev/null | cut -f1)"
     jsize="${jsize:-0}"
     if [[ "$jsize" -gt 536870912 ]]; then
-      warn "Persistent journal is $(_human_size "$jsize") — may contain sensitive data"
+      _emit_warn "Persistent journal is $(_human_size "$jsize") — may contain sensitive data"
     else
-      info "Persistent journal is $(_human_size "$jsize")"
+      _emit_info "Persistent journal is $(_human_size "$jsize")"
     fi
   else
-    pass "No persistent journal (logs in volatile memory only)"
+    _emit_pass "No persistent journal (logs in volatile memory only)"
   fi
 
   local tmp_fs
-  tmp_fs="$(df -T /tmp 2>/dev/null | awk 'NR==2{print $2}')"
-  if [[ "$tmp_fs" == "tmpfs" ]]; then
-    pass "/tmp is tmpfs (cleared on reboot)"
+  if require_cmd findmnt; then
+    tmp_fs="$(findmnt -no FSTYPE /tmp 2>/dev/null)"
   else
-    warn "/tmp is $tmp_fs — temporary files survive reboot"
+    tmp_fs="$(df -PT /tmp 2>/dev/null | tail -1 | awk '{print $2}')"
+  fi
+  if [[ "$tmp_fs" == "tmpfs" ]]; then
+    _emit_pass "/tmp is tmpfs (cleared on reboot)"
+  else
+    _emit_warn "/tmp is $tmp_fs — temporary files survive reboot"
   fi
 }
 
@@ -5572,9 +5975,9 @@ check_desktop_session() {
     delay=$(echo "$3" | sed "s/uint32 //;s/'//g" | tr -d ' ')
     [[ "$delay" =~ ^[0-9]+$ ]] || return
     if [[ "$delay" == "0" ]]; then
-      pass "Screen lock delay is 0 (instant) for $1 [$_DE_FAMILY]"
+      _emit_pass "Screen lock delay is 0 (instant) for $1 [$_DE_FAMILY]"
     else
-      fail "Screen lock delay is ${delay}s for $1 (should be 0) [$_DE_FAMILY]"
+      _emit_fail "Screen lock delay is ${delay}s for $1 (should be 0) [$_DE_FAMILY]"
     fi
   }
   case "$_DE_FAMILY" in
@@ -5585,7 +5988,7 @@ check_desktop_session() {
     cinnamon) _gsettings_for_users  "org.cinnamon.desktop.screensaver" "lock-delay"          _de_lock_delay_cb ;;
   esac
   [[ "$found_lock_delay" -eq 0 && "$_DE_FAMILY" != "unknown" ]] && \
-    info "No active $_DE_FAMILY sessions found for lock-delay check"
+    _emit_info "No active $_DE_FAMILY sessions found for lock-delay check"
 
   local found_idle=0
   _de_idle_cb() {
@@ -5599,11 +6002,11 @@ check_desktop_session() {
       kde|xfce) delay=$((raw * 60)) ;;
     esac
     if [[ "$delay" == "0" ]]; then
-      warn "Idle timeout disabled for $1 (screen never blanks) [$_DE_FAMILY]"
+      _emit_warn "Idle timeout disabled for $1 (screen never blanks) [$_DE_FAMILY]"
     elif [[ "$delay" -le 300 ]]; then
-      pass "Idle timeout is ${delay}s for $1 [$_DE_FAMILY]"
+      _emit_pass "Idle timeout is ${delay}s for $1 [$_DE_FAMILY]"
     else
-      fail "Idle timeout is ${delay}s for $1 (should be ≤ 300) [$_DE_FAMILY]"
+      _emit_fail "Idle timeout is ${delay}s for $1 (should be ≤ 300) [$_DE_FAMILY]"
     fi
   }
   case "$_DE_FAMILY" in
@@ -5614,7 +6017,7 @@ check_desktop_session() {
     cinnamon) _gsettings_for_users  "org.cinnamon.desktop.session"   "idle-delay"      _de_idle_cb ;;
   esac
   [[ "$found_idle" -eq 0 && "$_DE_FAMILY" != "unknown" ]] && \
-    info "No active $_DE_FAMILY sessions found for idle-delay check"
+    _emit_info "No active $_DE_FAMILY sessions found for idle-delay check"
 
   local found_lock_suspend=0
   _de_lock_suspend_cb() {
@@ -5622,8 +6025,8 @@ check_desktop_session() {
     local val
     val=$(echo "$3" | xargs | tr '[:upper:]' '[:lower:]')
     case "$val" in
-      true|1)  pass "Lock on suspend enabled for $1 [$_DE_FAMILY]" ;;
-      false|0) fail "Lock on suspend disabled for $1 [$_DE_FAMILY]" ;;
+      true|1)  _emit_pass "Lock on suspend enabled for $1 [$_DE_FAMILY]" ;;
+      false|0) _emit_fail "Lock on suspend disabled for $1 [$_DE_FAMILY]" ;;
     esac
   }
   case "$_DE_FAMILY" in
@@ -5643,7 +6046,7 @@ check_desktop_session() {
       ;;
   esac
   [[ "$found_lock_suspend" -eq 0 && "$_DE_FAMILY" != "unknown" ]] && \
-    info "No active $_DE_FAMILY sessions found for lock-on-suspend check"
+    _emit_info "No active $_DE_FAMILY sessions found for lock-on-suspend check"
 
   local found_notif=0
   _de_notif_cb() {
@@ -5654,15 +6057,15 @@ check_desktop_session() {
       gnome|cinnamon)
         # show-in-lock-screen=false → notifications hidden (good)
         case "$val" in
-          false|0) pass "Lock screen notifications hidden for $1 [$_DE_FAMILY]" ;;
-          true|1)  warn "Lock screen shows notification previews for $1 [$_DE_FAMILY]" ;;
+          false|0) _emit_pass "Lock screen notifications hidden for $1 [$_DE_FAMILY]" ;;
+          true|1)  _emit_warn "Lock screen shows notification previews for $1 [$_DE_FAMILY]" ;;
         esac
         ;;
       kde)
         # plasmanotifyrc DoNotDisturb/WhenScreenLocked=true → notifications hidden (good)
         case "$val" in
-          true|1)  pass "Lock screen notifications hidden for $1 [KDE DND]" ;;
-          false|0) warn "Lock screen shows notifications for $1 [KDE DND]" ;;
+          true|1)  _emit_pass "Lock screen notifications hidden for $1 [KDE DND]" ;;
+          false|0) _emit_warn "Lock screen shows notifications for $1 [KDE DND]" ;;
         esac
         ;;
     esac
@@ -5673,7 +6076,7 @@ check_desktop_session() {
     cinnamon) _gsettings_for_users  "org.cinnamon.desktop.notifications" "display-notifications-on-lock-screen" _de_notif_cb ;;
   esac
   [[ "$found_notif" -eq 0 && "$_DE_FAMILY" != "unknown" ]] && \
-    info "Lock screen notification check not available for $_DE_FAMILY"
+    _emit_info "Lock screen notification check not available for $_DE_FAMILY"
 
   local autologin_found=0
   for conf in /etc/gdm*/custom.conf /etc/gdm*/daemon.conf; do
@@ -5681,31 +6084,31 @@ check_desktop_session() {
     if grep -qi '^\s*AutomaticLoginEnable[[:space:]]*=[[:space:]]*true' "$conf" 2>/dev/null; then
       local autouser
       autouser=$(grep -iP '^\s*AutomaticLogin\s*=(?!Enable)' "$conf" | head -1 | cut -d= -f2 | xargs)
-      fail "Auto-login enabled in $conf${autouser:+ (user: $autouser)}"
+      _emit_fail "Auto-login enabled in $conf${autouser:+ (user: $autouser)}"
       autologin_found=1
     fi
   done
-  [[ "$autologin_found" -eq 0 ]] && pass "No GDM auto-login configured"
+  [[ "$autologin_found" -eq 0 ]] && _emit_pass "No GDM auto-login configured"
 
   local guest_found=0
   if [[ -d /etc/lightdm ]]; then
     if grep -rqs '^\s*allow-guest[[:space:]]*=[[:space:]]*true' /etc/lightdm/; then
-      fail "LightDM guest account enabled"
+      _emit_fail "LightDM guest account enabled"
       guest_found=1
     fi
   fi
   for conf in /etc/gdm*/custom.conf; do
     [[ -f "$conf" ]] || continue
     if grep -qi '^\s*TimedLoginEnable[[:space:]]*=[[:space:]]*true' "$conf" 2>/dev/null; then
-      warn "GDM timed login enabled in $conf"
+      _emit_warn "GDM timed login enabled in $conf"
       guest_found=1
     fi
   done
-  [[ "$guest_found" -eq 0 ]] && pass "No guest/timed login enabled"
+  [[ "$guest_found" -eq 0 ]] && _emit_pass "No guest/timed login enabled"
 
   local remote_found=0
   if systemctl is-active --quiet gnome-remote-desktop.service 2>/dev/null; then
-    warn "gnome-remote-desktop service is active"
+    _emit_warn "gnome-remote-desktop service is active"
     remote_found=1
   fi
   if command -v ss &>/dev/null; then
@@ -5716,22 +6119,22 @@ check_desktop_session() {
     local vnc_local
     vnc_local=$(ss -tlnp 2>/dev/null | grep -E ':590[0-9]|:3389' | grep -E '127\.0\.0\.1|::1' | head -3)
     if [[ -n "$vnc_external" ]]; then
-      warn "VNC/RDP port listening EXTERNALLY"
+      _emit_warn "VNC/RDP port listening EXTERNALLY"
       remote_found=1
     elif [[ -n "$vnc_local" ]]; then
-      info "VNC/RDP port listening on localhost only (likely qemu SPICE/VNC console)"
+      _emit_info "VNC/RDP port listening on localhost only (likely qemu SPICE/VNC console)"
     fi
   fi
   _gs_rdp_cb() {
     local val
     val=$(echo "$3" | xargs)
     if [[ "$val" == "true" ]]; then
-      warn "GNOME RDP sharing enabled for $1"
+      _emit_warn "GNOME RDP sharing enabled for $1"
       remote_found=1
     fi
   }
   _gsettings_for_users "org.gnome.desktop.remote-desktop.rdp" "enable" _gs_rdp_cb
-  [[ "$remote_found" -eq 0 ]] && pass "No remote desktop services detected"
+  [[ "$remote_found" -eq 0 ]] && _emit_pass "No remote desktop services detected"
 
   local total_autostart=0 user_autostart=0
   local sys_count=0
@@ -5745,14 +6148,14 @@ check_desktop_session() {
     if [[ "$ucount" -gt 0 ]]; then
       user_autostart=$((user_autostart + ucount))
       total_autostart=$((total_autostart + ucount))
-      [[ "$ucount" -gt 10 ]] && warn "$user has $ucount autostart programs"
+      [[ "$ucount" -gt 10 ]] && _emit_warn "$user has $ucount autostart programs"
     fi
   done < /etc/passwd
 
   if [[ "$total_autostart" -gt 20 ]]; then
-    warn "$total_autostart total autostart entries (${sys_count} system, ${user_autostart} user)"
+    _emit_warn "$total_autostart total autostart entries (${sys_count} system, ${user_autostart} user)"
   else
-    info "$total_autostart autostart entries (${sys_count} system, ${user_autostart} user)"
+    _emit_info "$total_autostart autostart entries (${sys_count} system, ${user_autostart} user)"
   fi
 
   local found_switch=0
@@ -5764,15 +6167,15 @@ check_desktop_session() {
       gnome|cinnamon)
         # disable-user-switching=true → restricted (good for kiosk/lab)
         case "$val" in
-          true|1)  pass "User switching restricted for $1 [$_DE_FAMILY]" ;;
-          false|0) info "User switching allowed for $1 [$_DE_FAMILY]" ;;
+          true|1)  _emit_pass "User switching restricted for $1 [$_DE_FAMILY]" ;;
+          false|0) _emit_info "User switching allowed for $1 [$_DE_FAMILY]" ;;
         esac
         ;;
       kde)
         # KDE Action Restrictions/action/start_new_session: false=restricted (good)
         case "$val" in
-          false|0) pass "User switching restricted for $1 [KDE]" ;;
-          true|1)  info "User switching allowed for $1 [KDE]" ;;
+          false|0) _emit_pass "User switching restricted for $1 [KDE]" ;;
+          true|1)  _emit_info "User switching allowed for $1 [KDE]" ;;
         esac
         ;;
     esac
@@ -5783,7 +6186,7 @@ check_desktop_session() {
     cinnamon) _gsettings_for_users  "org.cinnamon.desktop.lockdown" "disable-user-switching"     _de_switch_cb ;;
   esac
   [[ "$found_switch" -eq 0 && "$_DE_FAMILY" != "unknown" ]] && \
-    info "No user-switching policy found for $_DE_FAMILY sessions"
+    _emit_info "No user-switching policy found for $_DE_FAMILY sessions"
 
   local userlist_checked=0
   for conf in /etc/gdm*/custom.conf /etc/gdm*/daemon.conf; do
@@ -5808,16 +6211,16 @@ check_desktop_session() {
       [[ "$val" == "true" ]] && userlist_disabled=1
     fi
     if [[ "$userlist_disabled" -eq 1 ]]; then
-      pass "User list hidden on login screen"
+      _emit_pass "User list hidden on login screen"
     else
       if lsblk -o TYPE 2>/dev/null | grep -q crypt; then
-        info "User list visible on login screen (LUKS encryption limits physical access risk)"
+        _emit_info "User list visible on login screen (LUKS encryption limits physical access risk)"
       else
-        warn "User list visible on login screen (attackers can enumerate users)"
+        _emit_warn "User list visible on login screen (attackers can enumerate users)"
       fi
     fi
   else
-    info "GDM not found — skipping user-list check"
+    _emit_info "GDM not found — skipping user-list check"
   fi
 }
 
@@ -5838,12 +6241,12 @@ check_media_privacy() {
       name=$(cat "/sys/class/video4linux/$(basename "$dev")/name" 2>/dev/null)
       [[ -n "$name" ]] && cam_names="${cam_names:+$cam_names, }$name"
     done
-    info "$cam_count webcam device(s) found${cam_names:+ ($cam_names)}"
+    _emit_info "$cam_count webcam device(s) found${cam_names:+ ($cam_names)}"
     if lsmod 2>/dev/null | grep -q uvcvideo; then
-      info "uvcvideo kernel module loaded"
+      _emit_info "uvcvideo kernel module loaded"
     fi
   else
-    pass "No webcam devices found"
+    _emit_pass "No webcam devices found"
   fi
 
   local mic_checked=0
@@ -5857,9 +6260,9 @@ check_media_privacy() {
       if [[ -n "$vol" ]]; then
         mic_checked=1
         if echo "$vol" | grep -qi 'muted'; then
-          pass "Microphone muted for $user"
+          _emit_pass "Microphone muted for $user"
         else
-          info "Microphone active for $user: $vol"
+          _emit_info "Microphone active for $user: $vol"
         fi
       fi
     done < /etc/passwd
@@ -5874,19 +6277,23 @@ check_media_privacy() {
       if [[ -n "$muted" ]]; then
         mic_checked=1
         if [[ "$muted" == "yes" ]]; then
-          pass "Microphone muted for $user"
+          _emit_pass "Microphone muted for $user"
         else
-          info "Microphone not muted for $user"
+          _emit_info "Microphone not muted for $user"
         fi
       fi
     done < /etc/passwd
   fi
-  [[ "$mic_checked" -eq 0 ]] && info "Could not check microphone status (no wpctl/pactl or no active sessions)"
+  [[ "$mic_checked" -eq 0 ]] && _emit_info "Could not check microphone status (no wpctl/pactl or no active sessions)"
 
   local net_audio=0
   if pgrep -x pulseaudio &>/dev/null; then
-    if grep -rqs 'module-native-protocol-tcp' /etc/pulse/ /etc/pulseaudio/ 2>/dev/null; then
-      fail "PulseAudio network audio (module-native-protocol-tcp) enabled in config"
+    # F-258b: stock /etc/pulse/default.pa ships with `#load-module
+    # module-native-protocol-tcp` as a COMMENTED template — the previous loose
+    # grep matched commented lines and FAILed every default Fedora/Ubuntu
+    # install that still had pulseaudio. Anchor on first-non-whitespace ≠ '#'.
+    if grep -rqsE '^[[:space:]]*[^#[:space:]].*module-native-protocol-tcp' /etc/pulse/ /etc/pulseaudio/ 2>/dev/null; then
+      _emit_fail "PulseAudio network audio (module-native-protocol-tcp) enabled in config"
       net_audio=1
     fi
     while IFS=: read -r user _ uid _ _ _ shell; do
@@ -5895,18 +6302,18 @@ check_media_privacy() {
       [[ -S "/run/user/$uid/bus" ]] || continue
       if sudo -u "$user" XDG_RUNTIME_DIR="/run/user/$uid" \
         pactl list modules short 2>/dev/null | grep -q 'module-native-protocol-tcp'; then
-        fail "PulseAudio TCP module loaded for $user"
+        _emit_fail "PulseAudio TCP module loaded for $user"
         net_audio=1
       fi
     done < /etc/passwd
   fi
   if pgrep -x pipewire &>/dev/null; then
     if grep -rhE 'tcp:[0-9]|module-native-protocol-tcp' /etc/pipewire/ /usr/share/pipewire/ 2>/dev/null | grep -vE '^\s*#' | grep -qE 'tcp:[0-9]|module-native-protocol-tcp'; then
-      fail "PipeWire network audio protocol enabled in config"
+      _emit_fail "PipeWire network audio protocol enabled in config"
       net_audio=1
     fi
   fi
-  [[ "$net_audio" -eq 0 ]] && pass "No network audio modules detected"
+  [[ "$net_audio" -eq 0 ]] && _emit_pass "No network audio modules detected"
 
   # F-259: PipeWire remote-access detection.
   # The previous file-grep heuristic produced false positives on multi-line
@@ -5918,28 +6325,28 @@ check_media_privacy() {
   for confdir in /etc/pipewire /usr/share/pipewire; do
     [[ -d "$confdir" ]] || continue
     if grep -rqs '"access.allowed"' "$confdir/" 2>/dev/null; then
-      info "PipeWire access control rules found in $confdir"
+      _emit_info "PipeWire access control rules found in $confdir"
     fi
     # Explicit TCP socket in config = remote exposure intent.
     # Stricter regex: first non-whitespace MUST NOT be '#' (commented examples
     # in stock PipeWire configs use whitespace+# prefix, the previous loose
     # regex with `[^#]` could match a leading space too via backtracking).
     if grep -rhsE '^[[:space:]]*[^#[:space:]].*tcp:[0-9]+' "$confdir/" 2>/dev/null | grep -q .; then
-      warn "PipeWire config in $confdir declares a TCP socket — remote access enabled"
+      _emit_warn "PipeWire config in $confdir declares a TCP socket — remote access enabled"
       pw_remote=1
     fi
   done
   # Authoritative: TCP listener owned by pipewire process
   if ss -tlnp 2>/dev/null | grep -q 'pipewire'; then
-    warn "PipeWire listening on TCP"
+    _emit_warn "PipeWire listening on TCP"
     pw_remote=1
   fi
-  [[ "$pw_remote" -eq 0 ]] && pass "No PipeWire remote access detected"
+  [[ "$pw_remote" -eq 0 ]] && _emit_pass "No PipeWire remote access detected"
 
   if pgrep -f xdg-desktop-portal &>/dev/null; then
-    info "xdg-desktop-portal is running (screen sharing available when requested)"
+    _emit_info "xdg-desktop-portal is running (screen sharing available when requested)"
   else
-    info "xdg-desktop-portal not running"
+    _emit_info "xdg-desktop-portal not running"
   fi
 }
 
@@ -5951,16 +6358,16 @@ check_bluetooth_privacy() {
   header "41" "BLUETOOTH PRIVACY"
 
   if ! command -v bluetoothctl &>/dev/null || ! systemctl list-unit-files bluetooth.service &>/dev/null; then
-    info "Bluetooth not available on this system"
+    _emit_info "Bluetooth not available on this system"
     return
   fi
 
   local bt_active=0
   if systemctl is-active --quiet bluetooth.service 2>/dev/null; then
     bt_active=1
-    info "Bluetooth service is active"
+    _emit_info "Bluetooth service is active"
   else
-    pass "Bluetooth service is not running"
+    _emit_pass "Bluetooth service is not running"
   fi
 
   if [[ "$bt_active" -eq 0 ]]; then
@@ -5968,20 +6375,23 @@ check_bluetooth_privacy() {
   fi
 
   local bt_info
-  bt_info=$(timeout 3 bluetoothctl show 2>/dev/null)
+  # Force LC_ALL=C — bluetoothctl labels (Discoverable/Pairable) can be
+  # locale-translated on some BlueZ builds; the English-anchored greps below
+  # silently fail then. Defensive against the same locale-bug class as chage.
+  bt_info=$(LC_ALL=C timeout 3 bluetoothctl show 2>/dev/null)
   if [[ -z "$bt_info" ]]; then
-    warn "Could not query bluetooth controller (timeout or no adapter)"
+    _emit_warn "Could not query bluetooth controller (timeout or no adapter)"
     return
   fi
 
   local discoverable
   discoverable=$(echo "$bt_info" | grep -i 'Discoverable:' | awk '{print $2}')
   if [[ "$discoverable" == "yes" ]]; then
-    fail "Bluetooth is discoverable (visible to nearby devices)"
+    _emit_fail "Bluetooth is discoverable (visible to nearby devices)"
   elif [[ "$discoverable" == "no" ]]; then
-    pass "Bluetooth is not discoverable"
+    _emit_pass "Bluetooth is not discoverable"
   else
-    info "Could not determine discoverable status"
+    _emit_info "Could not determine discoverable status"
   fi
 
   local pairable
@@ -5989,27 +6399,27 @@ check_bluetooth_privacy() {
 
   local paired_count=0
   local paired_devices
-  paired_devices=$(timeout 3 bluetoothctl devices Paired 2>/dev/null || timeout 3 bluetoothctl paired-devices 2>/dev/null)
+  paired_devices=$(LC_ALL=C timeout 3 bluetoothctl devices Paired 2>/dev/null || LC_ALL=C timeout 3 bluetoothctl paired-devices 2>/dev/null)
   if [[ -n "$paired_devices" ]]; then
     paired_count=$(echo "$paired_devices" | grep -c 'Device')
   fi
-  info "$paired_count paired Bluetooth device(s)"
+  _emit_info "$paired_count paired Bluetooth device(s)"
 
   if [[ "$pairable" == "yes" ]]; then
     if [[ "$paired_count" -eq 0 ]]; then
       # F-262: pairable + 0 paired could be temporary setup mode (legitimate)
       # if discoverable is off. Tighten message to suggest review rather than
       # warn unconditionally.
-      info "Bluetooth pairable but 0 paired devices (active setup mode? — disable pairable when done)"
+      _emit_info "Bluetooth pairable but 0 paired devices (active setup mode? — disable pairable when done)"
     else
-      info "Bluetooth pairable with $paired_count paired device(s)"
+      _emit_info "Bluetooth pairable with $paired_count paired device(s)"
     fi
   elif [[ "$pairable" == "no" ]]; then
-    pass "Bluetooth pairing disabled"
+    _emit_pass "Bluetooth pairing disabled"
   fi
 
   if [[ "$paired_count" -eq 0 && "$pairable" != "yes" ]]; then
-    warn "Bluetooth active with no paired devices — consider disabling"
+    _emit_warn "Bluetooth active with no paired devices — consider disabling"
   fi
 }
 
@@ -6022,12 +6432,16 @@ check_keyring_security() {
 
   # F-263: extended password manager list (KeeWeb, Buttercup, qtpass, NordPass,
   # LessPass plus established ones).
+  # F-263b: use `type -P` (path-only) instead of `command -v`. `command -v`
+  # also matches shell functions/aliases — and this script defines a function
+  # named `pass()` for output formatting, which shadows the `pass` CLI tool.
+  # `type -P` only resolves through PATH and never matches functions.
   local pm_found=0
   local pm_list=""
   for pm in keepassxc keepass2 keepass keeweb bitwarden bitwarden-cli rbw \
             1password op pass gopass passmenu lesspass nordpass \
             buttercup qtpass enpass; do
-    if command -v "$pm" &>/dev/null; then
+    if [[ -n "$(type -P "$pm" 2>/dev/null)" ]]; then
       pm_found=1
       pm_list="${pm_list:+$pm_list, }$pm"
     fi
@@ -6041,9 +6455,9 @@ check_keyring_security() {
     pm_list="${pm_list:+$pm_list, }(snap)"
   fi
   if [[ "$pm_found" -eq 1 ]]; then
-    pass "Password manager installed: $pm_list"
+    _emit_pass "Password manager installed: $pm_list"
   else
-    warn "No password manager detected (consider keepassxc, bitwarden, or pass)"
+    _emit_warn "No password manager detected (consider keepassxc, bitwarden, or pass)"
   fi
 
   # F-264: Cross-DE keyring PAM detection — GNOME Keyring + KDE KWallet (pam_kwallet5)
@@ -6054,14 +6468,14 @@ check_keyring_security() {
     [[ -f "$pamfile" ]] || continue
     if grep -qs 'pam_gnome_keyring.so' "$pamfile"; then
       keyring_pam=1
-      info "GNOME Keyring auto-unlock configured in $(basename "$pamfile")"
+      _emit_info "GNOME Keyring auto-unlock configured in $(basename "$pamfile")"
     fi
     if grep -qs -E 'pam_kwallet5?\.so' "$pamfile"; then
       keyring_pam=1
-      info "KDE KWallet auto-unlock configured in $(basename "$pamfile")"
+      _emit_info "KDE KWallet auto-unlock configured in $(basename "$pamfile")"
     fi
   done
-  [[ "$keyring_pam" -eq 0 ]] && info "No keyring PAM auto-unlock found (GNOME Keyring/KWallet)"
+  [[ "$keyring_pam" -eq 0 ]] && _emit_info "No keyring PAM auto-unlock found (GNOME Keyring/KWallet)"
 
   local ssh_checked=0
   while IFS=: read -r user _ uid _ _ home shell; do
@@ -6081,13 +6495,13 @@ check_keyring_security() {
     if [[ -n "$effective" ]]; then
       ssh_checked=1
       if echo "$effective" | grep -qiE 'confirm|[0-9]'; then
-        pass "SSH AddKeysToAgent has timeout/confirm for $user"
+        _emit_pass "SSH AddKeysToAgent has timeout/confirm for $user"
       elif echo "$effective" | grep -qi 'yes'; then
-        warn "SSH AddKeysToAgent=yes for $user (keys persist until agent dies)"
+        _emit_warn "SSH AddKeysToAgent=yes for $user (keys persist until agent dies)"
       fi
     fi
   done < /etc/passwd
-  [[ "$ssh_checked" -eq 0 ]] && info "No AddKeysToAgent config found (keys persist by default when added)"
+  [[ "$ssh_checked" -eq 0 ]] && _emit_info "No AddKeysToAgent config found (keys persist by default when added)"
 
   local gpg_checked=0
   while IFS=: read -r user _ uid _ _ home shell; do
@@ -6100,15 +6514,15 @@ check_keyring_security() {
     ttl=$(grep -i 'default-cache-ttl' "$gpg_conf" 2>/dev/null | awk '{print $2}' | head -1)
     if [[ -n "$ttl" ]]; then
       if [[ "$ttl" -le 600 ]]; then
-        pass "GPG cache TTL is ${ttl}s for $user"
+        _emit_pass "GPG cache TTL is ${ttl}s for $user"
       else
-        warn "GPG cache TTL is ${ttl}s for $user (consider ≤ 600)"
+        _emit_warn "GPG cache TTL is ${ttl}s for $user (consider ≤ 600)"
       fi
     else
-      info "No GPG cache TTL set for $user (default: 600s)"
+      _emit_info "No GPG cache TTL set for $user (default: 600s)"
     fi
   done < /etc/passwd
-  [[ "$gpg_checked" -eq 0 ]] && info "No gpg-agent.conf found for any user"
+  [[ "$gpg_checked" -eq 0 ]] && _emit_info "No gpg-agent.conf found for any user"
 
   # F-267: subdirectory search for secret files (most .env files live in
   # project subdirs, not directly in home). _safe_find_home excludes
@@ -6123,13 +6537,13 @@ check_keyring_security() {
     local fperms
     fperms=$(stat -c '%a' "$f" 2>/dev/null)
     if (( (8#${fperms:-777} & 8#007) != 0 )); then
-      fail "Plaintext secret file (world-accessible $fperms): $f"
+      _emit_fail "Plaintext secret file (world-accessible $fperms): $f"
       secrets_found=1
     elif (( (8#${fperms:-777} & 8#070) != 0 )); then
-      warn "Plaintext secret file (group-accessible $fperms): $f"
+      _emit_warn "Plaintext secret file (group-accessible $fperms): $f"
       ((secrets_warn++))
     else
-      info "Plaintext secret file (private $fperms — consider encrypting): $f"
+      _emit_info "Plaintext secret file (private $fperms — consider encrypting): $f"
       ((secrets_info++))
     fi
   done < <(_safe_find_home -maxdepth 6 -type f -size +0c \
@@ -6145,11 +6559,11 @@ check_keyring_security() {
       local perms
       perms=$(stat -c '%a' "$home/.netrc" 2>/dev/null)
       if [[ "$perms" != "600" && "$perms" != "400" ]]; then
-        fail ".netrc has insecure permissions ($perms) for $user"
+        _emit_fail ".netrc has insecure permissions ($perms) for $user"
       fi
     fi
   done < /etc/passwd
-  [[ "$secrets_found" -eq 0 ]] && pass "No obvious plaintext secret files found"
+  [[ "$secrets_found" -eq 0 ]] && _emit_pass "No obvious plaintext secret files found"
 }
 
 # --- Run Security Sections (01-34) ---
@@ -6202,26 +6616,61 @@ check_bluetooth_privacy
 check_keyring_security
 
 # --- Firmware & Thunderbolt (independent of --skip keyring) ---
+# F-269: keep section_id stable for JSON consumers — these sub-checks
+# logically belong to "keyring" (last canonical section) rather than
+# inheriting whatever section_id was set last. Without this, the JSON
+# field ended up with mismatched section + section_id pairs.
 CURRENT_SECTION="FIRMWARE & THUNDERBOLT"
+CURRENT_SECTION_ID="keyring"
 if command -v fwupdmgr &>/dev/null; then
-  fw_output=$(timeout 15 fwupdmgr get-updates --no-unreported-check 2>/dev/null)
+  # LC_ALL=C — fwupdmgr translates "New version", "No upgrades" labels.
+  fw_output=$(LC_ALL=C timeout 15 fwupdmgr get-updates --no-unreported-check 2>/dev/null)
   fw_exit=$?
   if [[ $fw_exit -eq 0 && -n "$fw_output" ]]; then
     update_count=$(echo "$fw_output" | grep -cE '│|New version')
     if [[ "$update_count" -gt 0 ]]; then
-      warn "Firmware updates available (run: fwupdmgr update)"
+      _emit_warn "Firmware updates available (run: fwupdmgr update)"
     else
-      pass "Firmware is up to date"
+      _emit_pass "Firmware is up to date"
     fi
   elif [[ $fw_exit -eq 2 ]]; then
-    pass "Firmware is up to date"
+    _emit_pass "Firmware is up to date"
   elif echo "$fw_output" | grep -qiE 'no upgrades|no updates'; then
-    pass "Firmware is up to date"
+    _emit_pass "Firmware is up to date"
   else
-    info "Could not check firmware updates"
+    _emit_info "Could not check firmware updates"
+  fi
+
+  # v3.7: HSI (Host Security ID) — concrete firmware trust tier signal,
+  # not just "fwupd installed?". HSI:2+ = typical secure baseline,
+  # HSI:0 = fundamental issues. Adds real hardware-trust dimension.
+  # `fwupdmgr security` has no --no-history-check flag (that one belongs to
+  # `get-updates`). LC_ALL=C is mostly cosmetic here — the body labels remain
+  # locale-translated by fwupd's own translation domain, but the "HSI:N"
+  # prefix is English-stable so extraction works either way.
+  _HSI_OUTPUT=$(LC_ALL=C timeout 10 fwupdmgr security 2>&1)
+  _HSI_LEVEL=$(echo "$_HSI_OUTPUT" | grep -oE 'HSI:[0-9]' | head -1)
+  if [[ -n "$_HSI_LEVEL" ]]; then
+    case "$_HSI_LEVEL" in
+      "HSI:0") _emit_fail "Firmware Trust: $_HSI_LEVEL (fundamental issues — see fwupdmgr security)" ;;
+      "HSI:1") _emit_warn "Firmware Trust: $_HSI_LEVEL (basic protections only)" ;;
+      "HSI:2") _emit_pass "Firmware Trust: $_HSI_LEVEL (system-protected — secure baseline)" ;;
+      "HSI:3") _emit_pass "Firmware Trust: $_HSI_LEVEL (system-heavily-hardened)" ;;
+      "HSI:4"|"HSI:5") _emit_pass "Firmware Trust: $_HSI_LEVEL (maximum hardening)" ;;
+    esac
+    # Count attestation failures via the cross marker only — `FAIL` as a
+    # substring also occurs in benign body text (e.g. "FAIL-SAFE") and would
+    # over-count.
+    _HSI_FAILED=$(echo "$_HSI_OUTPUT" | grep -c '✘' || true)
+    _HSI_FAILED="${_HSI_FAILED:-0}"
+    if [[ "$_HSI_FAILED" -gt 0 ]]; then
+      _emit_info "Firmware: $_HSI_FAILED HSI attestations not passing (run: fwupdmgr security)"
+    fi
+  else
+    _emit_info "Firmware Trust: HSI level not reported (fwupd version too old?)"
   fi
 else
-  info "fwupdmgr not installed — cannot check firmware updates"
+  _emit_info "fwupdmgr not installed — cannot check firmware updates or HSI level"
 fi
 
 tb_found=0
@@ -6231,18 +6680,18 @@ for dev in /sys/bus/thunderbolt/devices/*/security; do
   level=$(cat "$dev" 2>/dev/null)
   devname=$(basename "$(dirname "$dev")")
   case "$level" in
-    none)  fail "Thunderbolt device $devname: security level NONE (DMA attacks possible)" ;;
-    user)  pass "Thunderbolt device $devname: user authorization required" ;;
-    secure) pass "Thunderbolt device $devname: secure connect (key verification)" ;;
-    dponly) pass "Thunderbolt device $devname: DisplayPort only (no PCIe tunneling)" ;;
-    *)     info "Thunderbolt device $devname: security level '$level'" ;;
+    none)  _emit_fail "Thunderbolt device $devname: security level NONE (DMA attacks possible)" ;;
+    user)  _emit_pass "Thunderbolt device $devname: user authorization required" ;;
+    secure) _emit_pass "Thunderbolt device $devname: secure connect (key verification)" ;;
+    dponly) _emit_pass "Thunderbolt device $devname: DisplayPort only (no PCIe tunneling)" ;;
+    *)     _emit_info "Thunderbolt device $devname: security level '$level'" ;;
   esac
 done
 if [[ "$tb_found" -eq 0 ]]; then
   if [[ -d /sys/bus/thunderbolt ]]; then
-    info "Thunderbolt bus present but no devices connected"
+    _emit_info "Thunderbolt bus present but no devices connected"
   else
-    info "No Thunderbolt controller detected"
+    _emit_info "No Thunderbolt controller detected"
   fi
 fi
 
@@ -6270,13 +6719,13 @@ fi
 
 # Rating
 if [[ "$SCORE" -ge 95 ]]; then
-  RATING="🏰 FORTRESS"
+  RATING="🏰 FULLY HARDENED"
   RATING_COLOR="$GRN"
 elif [[ "$SCORE" -ge 90 ]]; then
-  RATING="🛡️ EXCELLENT"
+  RATING="🛡️ WELL-HARDENED"
   RATING_COLOR="$GRN"
 elif [[ "$SCORE" -ge 80 ]]; then
-  RATING="🛡️ SOLID"
+  RATING="🛡️ MOSTLY-HARDENED"
   RATING_COLOR="$GRN"
 elif [[ "$SCORE" -ge 70 ]]; then
   RATING="⚠️  NEEDS WORK"
@@ -6295,7 +6744,7 @@ if $AI_MODE; then
   command -v flatpak &>/dev/null && _ai_ctx="${_ai_ctx}, Flatpak"
   $HAS_SELINUX && _ai_ctx="${_ai_ctx}, SELinux"
   $HAS_APPARMOR && _ai_ctx="${_ai_ctx}, AppArmor"
-  _AI_TEXT="I ran NoID Privacy for Linux v${NOID_PRIVACY_VERSION} — a 390+ check privacy & security audit.
+  _AI_TEXT="I ran NoID Privacy for Linux v${NOID_PRIVACY_VERSION} — a 390+ check hardening posture audit.
 Tool: https://github.com/NexusOne23/noid-privacy-linux
 
 System: ${DISTRO_PRETTY} ${KERNEL} ${DESKTOP_ENV}"
@@ -6387,8 +6836,14 @@ else
   printf "${BOLD}${WHT}║${RST}  ${YLW}⚠️  Warnings:${RST}        ${BOLD}$WARN${RST}\n"
   printf "${BOLD}${WHT}║${RST}  ${CYN}ℹ️  Info:${RST}             ${BOLD}$INFO${RST}\n"
   printf "${BOLD}${WHT}╠══════════════════════════════════════════════════════════════════════╣${RST}\n"
+  printf "${BOLD}${WHT}║${RST}  Hardening posture is your defense foundation — the layer\n"
+  printf "${BOLD}${WHT}║${RST}  attackers must defeat first. Complement with:\n"
+  printf "${BOLD}${WHT}║${RST}    ${GRN}✓${RST} AIDE / IMA   — file & kernel integrity\n"
+  printf "${BOLD}${WHT}║${RST}    ${GRN}✓${RST} auditd       — behavioral monitoring\n"
+  printf "${BOLD}${WHT}║${RST}    ${GRN}✓${RST} chkrootkit   — known-malware scanner\n"
+  printf "${BOLD}${WHT}╠══════════════════════════════════════════════════════════════════════╣${RST}\n"
   printf "${BOLD}${WHT}║${RST}  Score formula:     PASS×100 / (PASS + FAIL×2 + WARN)\n"
-  printf "${BOLD}${WHT}║${RST}  ${BOLD}SECURITY & PRIVACY SCORE:${RST}    ${RATING_COLOR}${BOLD}${SCORE}%% ${RATING}${RST}\n"
+  printf "${BOLD}${WHT}║${RST}  ${BOLD}HARDENING POSTURE SCORE:${RST}     ${RATING_COLOR}${BOLD}${SCORE}%% ${RATING}${RST}\n"
   printf "${BOLD}${WHT}║${RST}  Kernel:            %s\n" "$KERNEL"
   printf "${BOLD}${WHT}║${RST}  Uptime:            %s\n" "$(uptime -p 2>/dev/null || echo 'N/A')"
   printf "${BOLD}${WHT}║${RST}  Scan duration:     %s seconds\n" "$DURATION"
@@ -6396,6 +6851,24 @@ else
   echo ""
   printf "${CYN}Report generated: $NOW${RST}\n"
   printf "${CYN}by NexusOne23 — NoID Privacy for Linux v${NOID_PRIVACY_VERSION} | https://noid-privacy.com/linux.html${RST}\n"
+
+  # --- v3.9: Compliance coverage report (if --cis-l1 / --cis-l2 / --stig set) ---
+  if [[ -n "$COMPLIANCE_MODE" ]]; then
+    _NOID_DIR="$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")"
+    _COVERAGE_SCRIPT="$_NOID_DIR/scripts/coverage-report.sh"
+    if [[ -x "$_COVERAGE_SCRIPT" ]]; then
+      echo ""
+      printf "${BOLD}${MAG}━━━ COMPLIANCE COVERAGE (%s) ━━━${RST}\n" "$COMPLIANCE_MODE"
+      bash "$_COVERAGE_SCRIPT" "$COMPLIANCE_MODE" 2>/dev/null || \
+        printf "${YLW}⚠️  Coverage report unavailable — see Docs/CIS_RHEL9_MAPPING.md${RST}\n"
+      echo ""
+      printf "${CYN}Detail: Docs/CIS_RHEL9_MAPPING.md (mapping table)${RST}\n"
+      printf "${CYN}Note:   Run-time per-check coverage requires per-finding tagging${RST}\n"
+      printf "${CYN}        (planned for v3.10 — current is static doc-based summary).${RST}\n"
+    else
+      printf "${YLW}⚠️  Compliance flag set but scripts/coverage-report.sh not found${RST}\n"
+    fi
+  fi
 
   # --- AI Mode Output (uses _AI_TEXT built earlier) ---
   if $AI_MODE && [[ -n "$_AI_TEXT" ]]; then

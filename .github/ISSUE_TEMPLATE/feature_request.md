@@ -62,8 +62,10 @@ If you have an idea how to implement this:
 
 ```bash
 # Example check logic
-if [ -f /etc/some-config ]; then
-    grep -q "secure_setting" /etc/some-config && pass "Setting is secure" || fail "Setting is insecure"
+if [[ -f /etc/some-config ]]; then
+    grep -q "secure_setting" /etc/some-config \
+      && _emit_pass "Setting is secure" \
+      || _emit_fail "Setting is insecure"
 fi
 ```
 
