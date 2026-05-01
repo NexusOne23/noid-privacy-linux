@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 ###############################################################################
-#  NoID Privacy for Linux v3.6.0 — Hardening Posture Audit
+#  NoID Privacy for Linux v3.6.1 — Hardening Posture Audit
 #  Copyright (C) 2026 Fabio Mantegna (NexusOne23)
 #
 #  This program is free software: you can redistribute it and/or modify
@@ -21,7 +21,7 @@
 #  390+ checks across 42 sections
 #  Requires: root
 ###############################################################################
-NOID_PRIVACY_VERSION="3.6.0"
+NOID_PRIVACY_VERSION="3.6.1"
 set +e          # Don't exit on errors — we handle them ourselves
 
 # Bash 4+ required for associative arrays and other features
@@ -1274,9 +1274,21 @@ fi
 
 # SELinux Denials
 # Known-benign processes that routinely generate AVC denials as part of their normal operation:
-#   aide         — file integrity checks access many restricted paths
-#   usbguard-daemon — USB access control interacts with udev/systemd
-#   systemd-logind  — session management, normal boot-time interactions
+#   aide              — file integrity checks access many restricted paths
+#   usbguard-daemon   — USB access control interacts with udev/systemd
+#   systemd-logind    — session management, normal boot-time interactions
+#   rpm/fwupd         — package + firmware update hooks touch restricted paths
+#   gdm/gdm-x-session — display-manager startup quirks
+#   systemd-update    — update-engine probes restricted FS regions
+#   snapperd (F-289)  — Btrfs snapshot daemon: when iterating snapshot contents
+#                       containing podman/docker overlay storage, snapperd_t
+#                       hits container_ro_file_t with class=chr_file (Btrfs
+#                       snapshot mode-bit quirk for container-storage files).
+#                       Common after dnf transactions because Snapper's
+#                       pre/post DNF plugin creates fresh snapshots that
+#                       snapper-cleanup.timer scans next. SELinux correctly
+#                       blocks the cross-domain access; snapperd functions
+#                       fine without the getattr — the denials are noise.
 # Only warn if AVC denials come from OTHER (unexpected) processes.
 if require_cmd ausearch; then
   _SE_AVC_RAW=$(ausearch -m avc --start recent 2>/dev/null)
@@ -1286,11 +1298,11 @@ if require_cmd ausearch; then
   if [[ "$SE_DENIALS" -gt 0 ]]; then
     _SE_UNEXPECTED=$(echo "$_SE_AVC_RAW" \
       | grep -oP 'comm="\K[^"]+' \
-      | grep -cvE "^(aide|usbguard-daemon|usbguard|systemd-logind|rpm|gdm|gdm-x-session|fwupd|systemd-update)$" || true)
+      | grep -cvE "^(aide|usbguard-daemon|usbguard|systemd-logind|rpm|gdm|gdm-x-session|fwupd|systemd-update|snapperd)$" || true)
     _SE_UNEXPECTED=${_SE_UNEXPECTED//[^0-9]/}
     _SE_UNEXPECTED=${_SE_UNEXPECTED:-0}
     if [[ "$_SE_UNEXPECTED" -eq 0 ]]; then
-      _emit_info "SELinux: $SE_DENIALS AVC denials (recent) — aide/usbguard/logind only (MAC working correctly)"
+      _emit_info "SELinux: $SE_DENIALS AVC denials (recent) — known-benign sources only (aide/usbguard/logind/snapperd — MAC working correctly)"
     else
       _emit_warn "SELinux: $SE_DENIALS AVC denials ($_SE_UNEXPECTED from unexpected processes)"
     fi
@@ -1519,7 +1531,19 @@ sub_header "Firewall Logging"
 if require_cmd firewall-cmd && systemctl is-active firewalld &>/dev/null; then
   _FW_LOG_DENIED=$(firewall-cmd --get-log-denied 2>/dev/null || echo "off")
   if [[ "$_FW_LOG_DENIED" == "off" ]]; then
-    _emit_warn "Firewall logging: denied packets NOT logged (firewall-cmd --get-log-denied=off)"
+    # F-282 (v3.6.1): privacy-design override. Some hardened distros (NoID,
+    # Tails) intentionally disable LogDenied because every LAN-scan,
+    # NAT-probe, and stray broadcast otherwise lands in journal with
+    # src/dst IPs — continuous IP-tracking data on hostile networks.
+    # If the firewalld.conf comment documents this rationale, emit INFO
+    # instead of WARN. Marker phrases checked: "Privacy rationale",
+    # "privacy by design", "stray broadcast", "IP-tracking".
+    if [[ -f /etc/firewalld/firewalld.conf ]] && \
+       grep -qiE "privacy[ -]?(rationale|by[ -]design)|stray broadcast|IP[ -]tracking" /etc/firewalld/firewalld.conf 2>/dev/null; then
+      _emit_info "Firewall logging: denied packets NOT logged (privacy-by-design — toggle on demand via firewall-cmd --set-log-denied=all)"
+    else
+      _emit_warn "Firewall logging: denied packets NOT logged (firewall-cmd --get-log-denied=off)"
+    fi
   else
     _emit_pass "Firewall logging: denied packets logged (mode: $_FW_LOG_DENIED)"
   fi
@@ -2513,27 +2537,54 @@ else
   $JSON_MODE || awk -F: '$3==0 {print "       " $1}' /etc/passwd
 fi
 
-# Empty Passwords
-EMPTY_PW=$(awk -F: '$2 == "" {print $1}' /etc/shadow 2>/dev/null | wc -l)
+# Empty Passwords — F-273: severity coupled with PAM nullok presence.
+# An empty $2 field in /etc/shadow has two distinct meanings:
+#   (a) "No password set" (NP-state) — PAM rejects login when nullok absent.
+#       Common on Anaconda Live-ISOs (root + liveuser ship NP) and freshly
+#       provisioned systems where install-time setup is pending.
+#   (b) "Truly empty password" — exploitable iff PAM nullok is enabled.
+# Pre-scan PAM nullok first so the empty-PW finding can pick correct severity
+# AND the dedicated nullok finding below reuses the same scan (avoid double-grep).
+declare -A _NULLOK_FOUND_IN=()
+for PAM_FILE in /etc/pam.d/system-auth /etc/pam.d/password-auth; do
+  [[ -f "$PAM_FILE" ]] || continue
+  _nullok_line=$(grep -E '^[[:space:]]*[^#[:space:]].*nullok' "$PAM_FILE" 2>/dev/null | head -1)
+  [[ -n "$_nullok_line" ]] && _NULLOK_FOUND_IN["$(basename "$PAM_FILE")"]="$_nullok_line"
+done
+
+EMPTY_PW_USERS=$(awk -F: '$2 == "" {print $1}' /etc/shadow 2>/dev/null)
+EMPTY_PW=$(printf '%s' "$EMPTY_PW_USERS" | grep -c . 2>/dev/null || true)
+EMPTY_PW=${EMPTY_PW:-0}
+
 if [[ "$EMPTY_PW" -eq 0 ]]; then
   _emit_pass "No accounts with empty password"
+elif [[ "${#_NULLOK_FOUND_IN[@]}" -gt 0 ]]; then
+  # Worst case — empty $2 AND PAM nullok lets it authenticate
+  _emit_fail "$EMPTY_PW account(s) with empty password AND PAM nullok present — passwordless login enabled"
+  if ! $JSON_MODE; then
+    printf '%s\n' "$EMPTY_PW_USERS" | head -5 | while read -r _u; do
+      [[ -n "$_u" ]] && printf "       %s\n" "$_u"
+    done
+  fi
 else
-  _emit_fail "$EMPTY_PW accounts with empty password (no authentication required!)"
+  # Empty $2 but PAM blocks — NP-state. Live-ISO convention or pending setup.
+  _emit_info "$EMPTY_PW account(s) with no password set (NP-status, PAM blocks login — common on Live-ISOs / install-pending systems)"
+  if ! $JSON_MODE; then
+    printf '%s\n' "$EMPTY_PW_USERS" | head -5 | while read -r _u; do
+      [[ -n "$_u" ]] && printf "       %s\n" "$_u"
+    done
+  fi
 fi
 
-# PAM nullok — empty passwords accepted = critical risk on system-auth/password-auth.
-# Surface the offending line so users can audit (sometimes nullok is in
-# a non-pam_unix module like pam_localuser where the impact differs).
-# Skip commented lines.
+# PAM nullok — dedicated reporting per file (uses _NULLOK_FOUND_IN scanned above)
 for PAM_FILE in /etc/pam.d/system-auth /etc/pam.d/password-auth; do
-  if [[ -f "$PAM_FILE" ]]; then
-    _nullok_line=$(grep -E '^[[:space:]]*[^#[:space:]].*nullok' "$PAM_FILE" 2>/dev/null | head -1)
-    if [[ -n "$_nullok_line" ]]; then
-      _emit_fail "PAM nullok in $(basename "$PAM_FILE") — empty passwords allowed"
-      $JSON_MODE || printf "       %s\n" "${_nullok_line:0:100}"
-    else
-      _emit_pass "PAM nullok removed: $(basename "$PAM_FILE")"
-    fi
+  [[ -f "$PAM_FILE" ]] || continue
+  _pam_basename=$(basename "$PAM_FILE")
+  if [[ -n "${_NULLOK_FOUND_IN[$_pam_basename]:-}" ]]; then
+    _emit_fail "PAM nullok in $_pam_basename — empty passwords allowed"
+    $JSON_MODE || printf "       %s\n" "${_NULLOK_FOUND_IN[$_pam_basename]:0:100}"
+  else
+    _emit_pass "PAM nullok removed: $_pam_basename"
   fi
 done
 
@@ -2675,21 +2726,42 @@ if require_cmd pwck; then
   fi
 fi
 
-# Locked user accounts
+# Locked user accounts + NP (no-password) accounts.
+# F-275: passwd -S returns five status tokens — distinguish them all:
+#   L / LK : locked (passwd -l)
+#   NP     : no password set (Anaconda Live-ISO convention; PAM blocks login
+#            when nullok absent — see Empty-PW finding above for severity)
+#   P      : password set (regular account)
+#   NP and locked are reported as INFO; NP-state is also auditable so it
+#   surfaces in JSON output for downstream tooling.
+# LC_ALL=C: passwd -S output is locale-translatable; force C for parsing.
 sub_header "Account Status"
 _LOCKED_ACCOUNTS=0
+_NP_ACCOUNTS=0
+declare -a _NP_USERS=()
 while IFS=: read -r _lu_user _ _lu_uid _ _ _ _; do
   _is_human_uid "$_lu_uid" || continue
-  _lu_status=$(passwd -S "$_lu_user" 2>/dev/null | awk '{print $2}')
-  if [[ "$_lu_status" == "L" || "$_lu_status" == "LK" ]]; then
-    _emit_info "Account locked: $_lu_user"
-    ((_LOCKED_ACCOUNTS++))
-  fi
+  _lu_status=$(LC_ALL=C passwd -S "$_lu_user" 2>/dev/null | awk '{print $2}')
+  case "$_lu_status" in
+    L|LK)
+      _emit_info "Account locked: $_lu_user"
+      _LOCKED_ACCOUNTS=$((_LOCKED_ACCOUNTS + 1))
+      ;;
+    NP)
+      _NP_USERS+=("$_lu_user")
+      _NP_ACCOUNTS=$((_NP_ACCOUNTS + 1))
+      ;;
+  esac
 done < /etc/passwd
+
 if [[ "$_LOCKED_ACCOUNTS" -gt 0 ]]; then
   _emit_info "$_LOCKED_ACCOUNTS user account(s) locked"
 else
   _emit_pass "No locked user accounts"
+fi
+
+if [[ "$_NP_ACCOUNTS" -gt 0 ]]; then
+  _emit_info "$_NP_ACCOUNTS account(s) with no password set (NP-status, PAM-blocked: ${_NP_USERS[*]})"
 fi
 
 # Sudoers security
@@ -2779,13 +2851,49 @@ elif [[ "${#_UMASK_DISTINCT[@]}" -eq 1 ]]; then
     _emit_warn "Default umask: $UMASK_VAL (recommended: 027 or 077)"
   fi
 else
-  # Conflicting umask values — likely runtime confusion, report all
-  _conflict_summary=""
+  # F-274: distinguish intentional defense-in-depth split from runtime conflict.
+  # login.defs UMASK applies to non-interactive system processes (PAM-spawned
+  # sessions, dnf/rpm, systemd services); /etc/profile and profile.d/*.sh apply
+  # to interactive shells. A common hardened-but-compatible pattern is system=022
+  # (avoids dnf5 #1908 file-perm breakage on F41+) combined with interactive=027
+  # (user-data privacy on terminal-created files). When the interactive value
+  # is at-least-as-restrictive as login.defs AND interactive is in the
+  # recommended range (027/077), this is treated as intentional split (PASS).
+  _LOGIN_DEFS_UMASK="${_UMASK_BY_FILE[/etc/login.defs]:-}"
+  _INTERACTIVE_MAX_UMASK=""   # most-restrictive non-login.defs value (highest octal)
   for _file in "${!_UMASK_BY_FILE[@]}"; do
-    [[ -n "${_UMASK_BY_FILE[$_file]}" ]] && \
-      _conflict_summary+="${_file##*/}=${_UMASK_BY_FILE[$_file]}, "
+    [[ "$_file" == "/etc/login.defs" ]] && continue
+    _v="${_UMASK_BY_FILE[$_file]}"
+    [[ -z "$_v" ]] && continue
+    if [[ -z "$_INTERACTIVE_MAX_UMASK" ]]; then
+      _INTERACTIVE_MAX_UMASK="$_v"
+    else
+      _val_dec=$((8#${_v#0}))
+      _max_dec=$((8#${_INTERACTIVE_MAX_UMASK#0}))
+      [[ "$_val_dec" -gt "$_max_dec" ]] && _INTERACTIVE_MAX_UMASK="$_v"
+    fi
   done
-  _emit_warn "Default umask has CONFLICTING values across files: ${_conflict_summary%, } (last shell-init wins at runtime)"
+  _INTENTIONAL_SPLIT=0
+  if [[ -n "$_LOGIN_DEFS_UMASK" && -n "$_INTERACTIVE_MAX_UMASK" ]]; then
+    _ldef_dec=$((8#${_LOGIN_DEFS_UMASK#0}))
+    _imax_dec=$((8#${_INTERACTIVE_MAX_UMASK#0}))
+    if [[ "$_imax_dec" -ge "$_ldef_dec" ]] && \
+       [[ "$_INTERACTIVE_MAX_UMASK" =~ ^0*(27|77)$ ]]; then
+      _INTENTIONAL_SPLIT=1
+    fi
+  fi
+
+  if [[ "$_INTENTIONAL_SPLIT" -eq 1 ]]; then
+    _emit_pass "Default umask: system=$_LOGIN_DEFS_UMASK / interactive=$_INTERACTIVE_MAX_UMASK (intentional split — interactive shells stricter than system processes)"
+  else
+    # Genuine conflict — report all values
+    _conflict_summary=""
+    for _file in "${!_UMASK_BY_FILE[@]}"; do
+      [[ -n "${_UMASK_BY_FILE[$_file]}" ]] && \
+        _conflict_summary+="${_file##*/}=${_UMASK_BY_FILE[$_file]}, "
+    done
+    _emit_warn "Default umask has CONFLICTING values across files: ${_conflict_summary%, } (last shell-init wins at runtime)"
+  fi
 fi
 
 # Faillock
@@ -3571,9 +3679,25 @@ if require_cmd podman; then
   fi
 fi
 
+# F-287 (v3.6.1): split VM detection into libvirt-managed vs standalone qemu.
+# `virsh list` only sees libvirt-managed VMs — standalone qemu invocations
+# (livemedia-creator during ISO builds, direct `qemu-system-*` calls, CI
+# runners) are invisible to virsh. Counting them via pgrep complements the
+# libvirt path and surfaces unmanaged VM activity that previously appeared
+# as "Running VMs: 0" while a qemu process consumed 100%+ CPU.
+_VM_LIBVIRT=0
 if require_cmd virsh; then
-  VM_COUNT=$(virsh list --all 2>/dev/null | grep -cE "running|paused" | ccount)
-  _emit_info "Running VMs: $VM_COUNT"
+  _VM_LIBVIRT=$(virsh list --all 2>/dev/null | grep -cE "running|paused" | ccount)
+  _emit_info "Running VMs (libvirt-managed): $_VM_LIBVIRT"
+fi
+_QEMU_TOTAL=0
+if require_cmd pgrep; then
+  _QEMU_TOTAL=$(pgrep -c -f '^qemu-system-' 2>/dev/null || true)
+  _QEMU_TOTAL=${_QEMU_TOTAL:-0}
+fi
+if [[ "$_QEMU_TOTAL" -gt "$_VM_LIBVIRT" ]]; then
+  _VM_STANDALONE=$(( _QEMU_TOTAL - _VM_LIBVIRT ))
+  _emit_info "Standalone qemu-system processes: $_VM_STANDALONE (not libvirt-managed — e.g. livemedia-creator, direct qemu)"
 fi
 
 # F-148: severity-tiered classification of user.max_user_namespaces
@@ -3620,6 +3744,24 @@ _journal_filter='sudo|password is required|auth could not identify|systemd-cored
 _journal_filter+='| (qemu|libvirt|virtlogd|virtnetworkd|conmon|systemd-machined|virtqemud|virt-pki-validate)\['
 _journal_filter+='| [a-z]+_[a-z]+\[[0-9]+\]'  # Docker/Podman auto-names: adjective_noun[PID]
 _journal_filter+='| (phpsite|php-fpm|nodejs|gunicorn|uwsgi|wsgi)\['
+# F-290: known-benign host-noise patterns that are not security signals.
+#   - binfmt_misc.mount: F43+ kernel quirk where systemd retries the
+#     mount every few minutes and fails. The Section 30 binfmt_misc
+#     check separately verifies that no non-native formats are
+#     registered, so the missing mount-point is purely cosmetic.
+#   - dbus-broker "Ignoring duplicate name": triggered when a DBus
+#     service is shipped twice (e.g. our GOA hard-mask leaves the
+#     original *.service file alongside the masked override). Broker
+#     does the right thing — keeps the first, discards the second.
+#   - dracut "No /dev/log or logger included for syslog logging":
+#     warning emitted during initramfs *assembly* (not runtime). The
+#     resulting initramfs boots fine; this is a packaging-time hint
+#     for embedded-target builds, not a host issue.
+# Pattern includes word-boundary on the source unit to avoid false
+# matches in unrelated message bodies.
+_journal_filter+='|Failed to mount proc-sys-fs-binfmt_misc'
+_journal_filter+='|dbus-broker-launch\[[0-9]+\]: Ignoring duplicate name'
+_journal_filter+='|dracut\[[0-9]+\]: No .[^[:space:]]+/dev/log'
 _journal_raw=$(journalctl -p err --since "1 hour ago" --no-pager -q 2>/dev/null \
   | grep -E "^[A-Z][a-z]{2} ")
 JOURNAL_ERR=$(echo "$_journal_raw" | grep -cvE "$_journal_filter" || true)
@@ -3693,8 +3835,15 @@ fi
 
 # LC_ALL=C — journalctl translates the size suffix and may emit comma decimals
 # on de_DE/fr_FR (e.g. "280,0M") which the dot-only regex below cannot parse.
+# F-286 (v3.6.1): label the measurement source. `journalctl --disk-usage`
+# reports the size systemd accounts for (active + archived journal files,
+# excluding fragmentation). Section 38 separately reports the raw filesystem
+# size of /var/log/journal via `du -sb` which can differ noticeably (du
+# includes filesystem-level overhead). Two different measurements, both valid
+# — the labels now make the source explicit so users don't think the script
+# is contradicting itself.
 JOURNAL_STORAGE=$(LC_ALL=C journalctl --disk-usage 2>/dev/null | grep -oP '\d+\.?\d*[GMKT]' | head -1)
-_emit_info "Journal disk usage: ${JOURNAL_STORAGE:-unknown}"
+_emit_info "Journal storage (journalctl --disk-usage): ${JOURNAL_STORAGE:-unknown}"
 
 # Systemd Journal Forwarding (new)
 JOURNAL_FWD=$(grep -i "ForwardToSyslog" /etc/systemd/journald.conf 2>/dev/null | grep -v "^#" | head -1)
@@ -4864,10 +5013,10 @@ if [[ -f /proc/sys/kernel/tainted ]]; then
   elif [[ -f /sys/module/module/parameters/sig_enforce ]] && \
        [[ "$(cat /sys/module/module/parameters/sig_enforce 2>/dev/null)" == "Y" ]]; then
     _SIG_ENFORCED=true
-    _SIG_REASON="runtime (likely Secure Boot)"
+    _SIG_REASON="runtime — likely Secure Boot"
   elif grep -qw "module.sig_enforce=1" /proc/cmdline 2>/dev/null; then
     _SIG_ENFORCED=true
-    _SIG_REASON="runtime (kernel cmdline)"
+    _SIG_REASON="runtime — kernel cmdline"
   fi
   if $_SIG_ENFORCED; then
     _emit_pass "Kernel module signing: enforced ($_SIG_REASON)"
@@ -4883,16 +5032,23 @@ shopt -u nullglob
 KERNEL_COUNT="${#_boot_kernels[@]}"
 _emit_info "Installed kernels: $KERNEL_COUNT"
 
-# systemd-analyze blame top 5 (new)
+# Boot Security Analysis — rescue/emergency shell sulogin check.
+# F-285 (v3.6.1): emit a positive PASS when no risky rescue shells are found,
+# so the sub-header always has at least one finding underneath. Previously
+# the for-loop was silent on hardened systems (sulogin protected) → empty
+# sub-header in the report. Sub-header is now also conditional on systemd
+# being present.
 if require_cmd systemd-analyze; then
   sub_header "Boot Security Analysis"
-  # Check for rescue/emergency shell (only report if NOT using sulogin for password protection)
+  _rescue_risk=0
   for _rescue_unit in rescue.service emergency.service; do
     _rescue_exec=$(systemctl show -p ExecStart "$_rescue_unit" 2>/dev/null | grep -oP 'path=\K[^;]+' || true)
     if [[ -n "$_rescue_exec" && "$_rescue_exec" != *sulogin* ]]; then
       _emit_info "${_rescue_unit%.service} shell: no password required (physical access risk)"
+      _rescue_risk=$((_rescue_risk + 1))
     fi
   done
+  [[ "$_rescue_risk" -eq 0 ]] && _emit_pass "Rescue/emergency shells: password-protected (sulogin)"
 fi
 
 }
@@ -4914,8 +5070,15 @@ if require_cmd rpm; then
   else
     RPM_VERIFY_ALL=$(echo "$RPM_VA_OUTPUT" | grep -cE "^..5" || true)
     RPM_VERIFY_ALL=${RPM_VERIFY_ALL:-0}
+    # F-281 (v3.6.1): exclude OS-image branding/identity overrides — these are
+    # legitimately modified by hardened-distro builds (NoID, Qubes, secureblue,
+    # Kicksecure, Tails) for branding/cosmetic reasons, not malicious tampering.
+    # Files: /usr/lib/os-release (distro identity), /usr/lib/issue & issue.net
+    # (login banner), /usr/share/anaconda/pixmaps/* (installer artwork),
+    # /usr/share/icons/*/apps/anaconda.png (installer icon),
+    # /usr/share/pixmaps/{fedora,system}-logo*.png (desktop branding).
     RPM_VERIFY_BIN=$(echo "$RPM_VA_OUTPUT" | grep -E "^..5" | grep -v " c " \
-      | grep -cvE "\.pyc\b|/__pycache__/|/usr/lib/issue" || true)
+      | grep -cvE "\.pyc\b|/__pycache__/|/usr/lib/(issue|os-release)|/usr/share/(anaconda/pixmaps|icons/.*/apps/anaconda\.png|pixmaps/(fedora|system)-logo)" || true)
     RPM_VERIFY_BIN=${RPM_VERIFY_BIN:-0}
     if [[ "$RPM_VERIFY_ALL" -eq 0 ]]; then
       _emit_pass "RPM verify: all package files intact"
@@ -5938,9 +6101,9 @@ check_data_privacy() {
     jsize="$(du -sb "$journal_dir" 2>/dev/null | cut -f1)"
     jsize="${jsize:-0}"
     if [[ "$jsize" -gt 536870912 ]]; then
-      _emit_warn "Persistent journal is $(_human_size "$jsize") — may contain sensitive data"
+      _emit_warn "Persistent journal /var/log/journal is $(_human_size "$jsize") on disk — may contain sensitive data"
     else
-      _emit_info "Persistent journal is $(_human_size "$jsize")"
+      _emit_info "Persistent journal /var/log/journal is $(_human_size "$jsize") on disk"
     fi
   else
     _emit_pass "No persistent journal (logs in volatile memory only)"
@@ -6463,11 +6626,42 @@ check_keyring_security() {
   fi
 
   # F-264: Cross-DE keyring PAM detection — GNOME Keyring + KDE KWallet (pam_kwallet5)
+  # F-288 (v3.6.1): suppress *autologin* PAM entries when auto-login is not
+  # actually enabled. The gdm-autologin and sddm-autologin PAM files ship by
+  # default on most distros but the configured auto-unlock is only effective
+  # during an active auto-login session. Reporting them when auto-login is
+  # disabled was misleading ("you have auto-unlock + autologin — sounds like
+  # a leak" — when in fact auto-login is off and the file is dormant).
+  local _autologin_active=0
+  for conf in /etc/gdm*/custom.conf /etc/gdm*/daemon.conf; do
+    [[ -f "$conf" ]] || continue
+    if grep -qiE '^\s*AutomaticLoginEnable\s*=\s*true' "$conf" 2>/dev/null; then
+      _autologin_active=1
+      break
+    fi
+  done
+  if [[ "$_autologin_active" -eq 0 ]] && [[ -d /etc/sddm.conf.d || -f /etc/sddm.conf ]]; then
+    for conf in /etc/sddm.conf /etc/sddm.conf.d/*.conf; do
+      [[ -f "$conf" ]] || continue
+      # SDDM autologin marker: User= under [Autologin] section
+      if awk '/^\[Autologin\]/{f=1; next} /^\[/{f=0} f && /^[[:space:]]*User[[:space:]]*=/{print; exit}' \
+           "$conf" 2>/dev/null | grep -qE '=[[:space:]]*[^[:space:]]'; then
+        _autologin_active=1
+        break
+      fi
+    done
+  fi
+
   local keyring_pam=0
   for pamfile in /etc/pam.d/gdm-password /etc/pam.d/gdm-autologin /etc/pam.d/login \
                  /etc/pam.d/lightdm /etc/pam.d/sddm /etc/pam.d/sddm-autologin \
                  /etc/pam.d/kde /etc/pam.d/kdm; do
     [[ -f "$pamfile" ]] || continue
+    # Skip *autologin* PAM files when auto-login is not actually enabled —
+    # config exists but is dormant (default Fedora/Ubuntu state).
+    if [[ "$pamfile" == *autologin* && "$_autologin_active" -eq 0 ]]; then
+      continue
+    fi
     if grep -qs 'pam_gnome_keyring.so' "$pamfile"; then
       keyring_pam=1
       _emit_info "GNOME Keyring auto-unlock configured in $(basename "$pamfile")"

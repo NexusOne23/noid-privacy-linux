@@ -7,6 +7,198 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.6.1] - 2026-04-30 / 2026-05-01
+
+### 🐛 Live-ISO False-Positives + Reporting-Quality Patch (11 fixes)
+
+Two passes shipped under the same v3.6.1 tag:
+- **2026-04-30** — five context-aware classification fixes (F-273/274/275/281/282)
+  surfaced by running v3.6.0 against a Fedora 44 Live-ISO build. All
+  semantically-incorrect findings that were always-bugs but only became
+  visible when audited against a system type other than a long-running
+  hardened workstation install.
+- **2026-05-01** — six reporting-quality fixes (F-285/286/287/288/289/290)
+  surfaced by line-by-line review of v3.6.1 audit output on a fully-hardened
+  Fedora 43 host. None are security-affecting; they are clearer labels,
+  smarter classification of known-benign noise sources, and elimination
+  of cosmetic glitches that confused users into thinking the script
+  contradicts itself.
+
+No detection logic was weakened in either pass.
+
+#### Fixed — Classification (2026-04-30)
+
+- **F-273 — Empty-PW finding ignored PAM nullok context** (Section 11
+  Authentication & Accounts). The check `awk -F: '$2 == ""'` matched any
+  shadow entry with an empty password field, including NP-status (no-password)
+  accounts. NP is the standard Anaconda Live-ISO convention for `root` and
+  `liveuser` (PAM rejects login when nullok is absent — the dedicated nullok
+  finding two lines below already verified this). Severity is now coupled
+  with PAM nullok presence: empty-$2 + nullok-set → FAIL (real risk),
+  empty-$2 + nullok-absent → INFO ("NP-status, PAM blocks login — common
+  on Live-ISOs / install-pending systems"). Pre-scan refactored into a
+  shared `_NULLOK_FOUND_IN[]` map so the empty-PW classification and the
+  dedicated nullok finding don't double-grep PAM files.
+
+- **F-274 — Umask conflict ignored intentional defense-in-depth split**
+  (Section 11 Authentication & Accounts → Default umask). Multiple distinct
+  umask values across `/etc/login.defs` + `/etc/profile` + `/etc/profile.d/*.sh`
+  always emitted "CONFLICTING values across files (last shell-init wins at
+  runtime)" — but the common hardened-but-compatible pattern of `system=022`
+  (avoids dnf5 #1908 file-permission breakage on F41+) combined with
+  `interactive=027` (privacy on terminal-created files) is a deliberate
+  hierarchy, not a bug. New logic: when the most-restrictive interactive
+  umask is at-least-as-restrictive as login.defs AND falls in the recommended
+  range (027 / 077), the split is reported as PASS ("intentional split —
+  interactive shells stricter than system processes"). Genuinely arbitrary
+  conflicts (e.g. `/etc/profile=077` + `/etc/bashrc=022`) still WARN.
+
+- **F-275 — passwd -S NP-status was unhandled in Account-Status check**
+  (Section 11 Authentication & Accounts → Account Status). The locked-account
+  scan only matched `L` and `LK` tokens, silently dropping `NP` (no-password).
+  Combined with F-273, a Live-ISO `liveuser` would fire as `_emit_fail` on
+  empty-PW but be invisible in the locked-account roster — inconsistent view
+  of the same account. NP is now reported as INFO with the affected usernames:
+  "N account(s) with no password set (NP-status, PAM-blocked: user1 user2)".
+  The `passwd -S` invocation also gained `LC_ALL=C` so the second-token
+  parsing is locale-stable (Bug Pattern #1 anti-regression — the original
+  was a latent locale bug that hadn't surfaced because the L/LK string
+  comparison happened to be locale-stable in practice).
+
+- **F-281 — RPM verify mis-flagged hardened-distro branding overrides as
+  binary tampering** (Section 28 File Integrity → Critical Binary Integrity).
+  The `rpm -Va` post-process excluded `/usr/lib/issue` and `*.pyc` from the
+  binary-modified count but missed other OS-image branding/identity files
+  that hardened distros (NoID, Tails, Qubes, secureblue, Kicksecure)
+  legitimately overwrite for cosmetic reasons: `/usr/lib/os-release`
+  (distro identity), `/usr/lib/issue.net` (network login banner),
+  `/usr/share/anaconda/pixmaps/*` (installer artwork),
+  `/usr/share/icons/*/apps/anaconda.png` (installer icon),
+  `/usr/share/pixmaps/{fedora,system}-logo*.png` (desktop branding).
+  These were counted as "binaries with changed checksums!" alongside actual
+  ELF tampering risks, inflating false-positive FAIL count to 18 on a fresh
+  NoID Live-ISO build. Exclusion regex extended to cover all six branding
+  paths; security-relevant ELF/script tampering still surfaces unchanged.
+
+- **F-282 — Firewall logging WARN ignored privacy-by-design rationale**
+  (Section 4 Firewall → Firewall Logging). `firewall-cmd --get-log-denied=off`
+  always emitted WARN, but some hardened distros (NoID, Tails) intentionally
+  disable LogDenied because every LAN-scan, NAT-probe and stray broadcast
+  otherwise lands in journal with src/dst IPs and ports — continuous
+  IP-tracking data on hostile networks (cafe Wi-Fi, hotel networks). The
+  rationale is documented in `/etc/firewalld/firewalld.conf` comments. New
+  logic: if the firewalld.conf comment block contains marker phrases
+  ("Privacy rationale", "privacy by design", "stray broadcast", "IP-tracking"),
+  the off-state is reported as INFO ("privacy-by-design — toggle on demand
+  via firewall-cmd --set-log-denied=all") instead of WARN. Genuine misconfig
+  (LogDenied=off without privacy rationale comment) still WARNs.
+
+#### Fixed — Reporting Quality (2026-05-01)
+
+- **F-285 — Section 33 emitted an empty `Boot Security Analysis`
+  sub-header on hardened systems**. The sub-header was unconditionally
+  printed before a for-loop that only emitted findings when
+  `rescue.service` / `emergency.service` lacked `sulogin` (i.e. only on
+  insecure systems). On any properly hardened distro (Fedora default,
+  RHEL, NoID) the loop ran silently → user saw a header followed by
+  nothing, which reads like a parse error. New behavior: positive
+  `_emit_pass "Rescue/emergency shells: password-protected (sulogin)"`
+  emit when no risky shell is found, so the sub-header always carries
+  at least one finding.
+
+- **F-286 — Sections 19 and 38 reported journal sizes that appeared
+  to contradict each other** (e.g. "Journal disk usage: 250.9M" vs
+  "Persistent journal is 520MiB"). Both numbers are correct — they
+  measure different things: `journalctl --disk-usage` is systemd's
+  accounting of active+archived journal *content*, while `du -sb
+  /var/log/journal` is the raw filesystem footprint including overhead.
+  Two different lenses, both valid. Labels now make the source explicit:
+  "Journal storage (journalctl --disk-usage)" and "Persistent journal
+  /var/log/journal is N on disk" — users can no longer interpret the
+  delta as a script bug.
+
+- **F-287 — Section 18 missed standalone qemu-system processes**.
+  `Running VMs: 0` would emit even when `qemu-system-x86_64` was running
+  at 126% CPU — because `virsh list` only sees libvirt-managed VMs.
+  Standalone qemu invocations (livemedia-creator during ISO builds,
+  CI runners, direct power-user qemu-system calls) were invisible to
+  the audit. Now reports `Running VMs (libvirt-managed): N` plus a
+  separate `Standalone qemu-system processes: M` finding when pgrep
+  detects qemu instances unaccounted for by virsh. ISO-build workflows
+  no longer create the false impression that nothing is running.
+
+- **F-288 — Section 42 reported "GNOME Keyring auto-unlock configured
+  in gdm-autologin" even when auto-login was disabled**. The
+  `gdm-autologin` PAM file ships by default on every Fedora install
+  regardless of whether `AutomaticLoginEnable=true` is actually set.
+  Reporting the auto-unlock entry on a system without active auto-login
+  was misleading ("you have keyring auto-unlock + autologin → leak"
+  — when in fact auto-login is off and the file is dormant). Now
+  pre-detects `AutomaticLoginEnable=true` (GDM) or `User=` under
+  `[Autologin]` (SDDM) and skips `*autologin*` PAM files when no active
+  auto-login is configured. Real auto-login setups still surface
+  the keyring finding correctly.
+
+- **F-289 — Section 02 SELinux denials counter missed `snapperd` as
+  a known-benign source**. Whenever Snapper's pre/post DNF plugin
+  creates fresh Btrfs snapshots, the `snapper-cleanup.timer` then scans
+  them and `snapperd_t` hits `container_ro_file_t` files inside any
+  podman/docker overlay-storage that lives on the snapshotted root
+  (mode-bit quirk classifies them as `chr_file`). SELinux correctly
+  blocks the cross-domain access — snapperd functions fine without the
+  `getattr` — but the previous whitelist (aide/usbguard/logind/rpm/
+  gdm/fwupd/systemd-update) didn't recognize the pattern, so a fresh
+  dnf transaction reliably triggered a "AVC denials from unexpected
+  processes" WARN even though the MAC was working as intended. Whitelist
+  extended to include `snapperd`; bursts of identical-pattern AVCs from
+  Snapper-driven snapshot scans no longer appear as security signal.
+
+- **F-290 — Section 19 Journal-error counter missed three known-benign
+  host-noise patterns**. After a recent kernel/dnf cycle the report
+  could show `Journal errors (1h): 16 (review with: journalctl ...)` —
+  but inspection showed all 16 entries were noise:
+  (1) Fedora 43+ `binfmt_misc.mount` retry-loop (10× per hour, kernel
+  quirk; the separate Section 30 `binfmt_misc registered formats`
+  check verifies actual binfmt state),
+  (2) `dbus-broker-launch: Ignoring duplicate name` for services that
+  exist twice when our hardening hard-masks DBus services without
+  removing the original `*.service` files (broker correctly keeps
+  the first, drops the second),
+  (3) `dracut[NNN]: No /dev/log or logger included for syslog logging`
+  which is an *initramfs-assembly-time* warning during kernel updates
+  — the resulting initramfs boots fine. Filter regex extended for all
+  three patterns; the libvirt `virtstoraged: cannot open directory`
+  errors are intentionally NOT filtered because they signal an
+  actionable user misconfig (storage-pool autostart with missing path).
+
+#### Cosmetic (2026-05-01)
+
+- Module-signing message no longer prints with double-parens
+  ("enforced (runtime (likely Secure Boot))" → "enforced (runtime —
+  likely Secure Boot)"). Reads cleaner; same information.
+
+### Notes
+
+- v3.6.0 tag remains untouched at commit `6a7cb28`. v3.6.1 is shipped via
+  a new tag — no further force-moves on v3.6.0 (it has been force-moved
+  three times already during release night).
+- No new bug patterns. F-273/274/275/281/282 are all instances of the
+  long-standing meta-lesson: "context-aware severity beats hardcoded
+  severity". A future v3.7 architectural change (Live-ISO mode detection)
+  will systematize this further; v3.6.1 is the targeted patch for these
+  five concrete miss-classifications.
+- Lint patterns 1–8 still pass; no new patterns added (these are logic fixes,
+  not API-surface changes).
+- BATS test-suite extended with regression tests for F-273/274/275 —
+  new file `tests/unit/test_classification_severity.bats` (14 tests across
+  the three classification fixes) plus four new fixtures
+  (`shadow-np-accounts.txt`, `shadow-passworded.txt`, `pam-with-nullok.txt`,
+  `pam-no-nullok.txt`). F-281 and F-282 are exclusion-regex / phrase-match
+  fixes too narrow to warrant dedicated unit tests; verified via live-test
+  against the originating Live-ISO build.
+
+---
+
 ## [3.6.0] - 2026-04-30
 
 ### 🎯 Posture-Communication, Detection-Depth, Engineering-Discipline & Compliance — Four-Tier Sprint
