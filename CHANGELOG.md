@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.6.1] - 2026-04-30 / 2026-05-01 / 2026-05-02
 
-### 🐛 Live-ISO False-Positives + Reporting-Quality + Engineering Audit + Self-Audit + Live-Audit Self-Review + Cosmetic Polish + Display Polish + Output Transparency (57 fixes)
+### 🐛 Live-ISO False-Positives + Reporting-Quality + Engineering Audit + Self-Audit + Live-Audit Self-Review + Cosmetic Polish + Display Polish + Output Transparency + Sticky-WARN Fix (58 fixes)
 
 Three passes shipped under the same v3.6.1 tag:
 - **2026-04-30** — five context-aware classification fixes (F-273/274/275/281/282)
@@ -641,6 +641,25 @@ detection or scoring logic.
   surfaced now as `Service masked: switcheroo-control` PASS line,
   consistent with cups/avahi/bluetooth pattern. When running on a hybrid
   laptop: emits `running (desktop default — GPU power switching)` INFO.
+
+#### Fixed — Sticky-WARN Logic Bug (2026-05-03)
+
+- **F-337 — AIDE-check WARN sticky for 7 days after old drift event**
+  (Section 30 Advanced Hardening → AIDE Integrity Status). Previous logic
+  ran `journalctl -u aide-check.service --since '7 days ago' -n 10` and
+  grepped the entire 10-line window for drift markers (`changes detected`,
+  `new files`, etc). Result: even after the user updated the AIDE database
+  AND ran a clean fresh check, OLD drift-detected entries from prior runs
+  still matched the regex within the 7-day window — WARN remained sticky
+  for up to 7 days regardless of current DB state. Replaced with
+  authoritative `systemctl show -p ExecMainStatus --value` query: AIDE's
+  actual exit code from the LAST run only. Exit 0 = clean → PASS, non-zero
+  = drift → WARN with exit code visible (`AIDE exit=7` per bitmask 1+2+4
+  = added+removed+changed). A fresh clean re-run now flips PASS/WARN
+  immediately, no 7-day lag. Bonus: guard changed from `systemctl cat`
+  (requires unit currently loaded) to `ExecMainStartTimestamp` non-empty
+  check — works for on-demand timer-spawned services that aren't currently
+  loaded in systemctl's working set.
 
 ### Notes
 

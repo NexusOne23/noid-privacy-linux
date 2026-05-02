@@ -5031,26 +5031,40 @@ fi
 # NOID_AIDE_LIVE=1. Without this, "AIDE installed" was a placebo signal.
 sub_header "AIDE Integrity Status"
 if require_cmd aide; then
-  # 1. Last scheduled-run status from journal — try common service names
-  _AIDE_JOURNAL=""
+  # F-337 (v3.6.1): switch from 7-day journal-grep to authoritative systemctl
+  # show ExecMainStatus (AIDE's actual exit code from the LAST run). Previous
+  # logic used `journalctl -u <unit> --since '7 days ago' -n 10` and grepped
+  # for drift markers — but old drift-detected entries from prior runs would
+  # match the regex even after a fresh clean run, leaving the WARN sticky
+  # for 7 days. systemctl show only exposes the LAST run's exit code, so a
+  # clean re-run flips PASS/WARN immediately.
+  # AIDE exit-code semantics: 0=clean, bitmask 1=added | 2=removed | 4=changed
+  # (exit 7 = all three categories), 14=warning, etc. Any non-zero = drift.
+  _AIDE_LAST_STATUS=""
+  _AIDE_LAST_TIME=""
+  # F-337: iterate units and probe ExecMainStartTimestamp directly. Don't use
+  # `systemctl cat` as guard — it requires the unit to be currently loaded
+  # (LoadState=loaded), which fails silently for on-demand timer-spawned
+  # services like aide-check.service. systemctl show returns the cached
+  # last-run state regardless of current load state.
   for _aide_unit in aide-check.service aide.service aidecheck.service; do
-    _AIDE_JOURNAL=$(journalctl -u "$_aide_unit" --since '7 days ago' -n 10 --no-pager 2>/dev/null)
-    [[ -n "$_AIDE_JOURNAL" ]] && break
+    _candidate_time=$(systemctl show "$_aide_unit" -p ExecMainStartTimestamp --value 2>/dev/null)
+    if [[ -n "$_candidate_time" && "$_candidate_time" != "n/a" && "$_candidate_time" != "0" ]]; then
+      _AIDE_LAST_TIME="$_candidate_time"
+      _AIDE_LAST_STATUS=$(systemctl show "$_aide_unit" -p ExecMainStatus --value 2>/dev/null)
+      break
+    fi
   done
-  if [[ -n "$_AIDE_JOURNAL" ]]; then
-    # Drift markers are distro-specific. Fedora's aide-check.service emits
-    # the literal "Changes Detected"/"New files"/"Files modified" via the
-    # notify-send wrapper; raw `aide --check` log lines say "added"/"removed"/
-    # "changed"/"mismatch". Cover both.
-    if echo "$_AIDE_JOURNAL" | grep -qiE 'all files match|0 differences|exit_code=0|status: ok|exit-code=0'; then
+  if [[ -n "$_AIDE_LAST_TIME" && "$_AIDE_LAST_TIME" != "n/a" && "$_AIDE_LAST_TIME" != "0" ]]; then
+    if [[ "$_AIDE_LAST_STATUS" == "0" ]]; then
       _emit_pass "AIDE: last scheduled check clean (no changes)"
-    elif echo "$_AIDE_JOURNAL" | grep -qiE 'changes detected|new files|files (modified|added|removed|changed)|added|removed|changed|mismatch'; then
-      _emit_warn "AIDE: last scheduled check found changes — review journalctl -u aide-check"
+    elif [[ -n "$_AIDE_LAST_STATUS" && "$_AIDE_LAST_STATUS" != "0" ]]; then
+      _emit_warn "AIDE: last scheduled check found changes (AIDE exit=$_AIDE_LAST_STATUS) — review journalctl -u aide-check"
     else
       _emit_info "AIDE: last scheduled check ran (status unclear — review journal)"
     fi
   else
-    _emit_info "AIDE: no scheduled check in journal (last 7 days) — schedule via systemd timer"
+    _emit_info "AIDE: no scheduled check yet — schedule via systemd timer"
   fi
 
   # 2. Optional fresh check via NOID_AIDE_LIVE=1 (slow: can take minutes)
