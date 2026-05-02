@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.6.1] - 2026-04-30 / 2026-05-01 / 2026-05-02
 
-### 🐛 Live-ISO False-Positives + Reporting-Quality + Engineering Audit + Self-Audit + Live-Audit Self-Review (41 fixes)
+### 🐛 Live-ISO False-Positives + Reporting-Quality + Engineering Audit + Self-Audit + Live-Audit Self-Review (42 fixes)
 
 Three passes shipped under the same v3.6.1 tag:
 - **2026-04-30** — five context-aware classification fixes (F-273/274/275/281/282)
@@ -468,21 +468,30 @@ collectively raise the code-quality floor and align practice with policy.
   "No default audio source for $user (no microphone hardware)". pactl
   branch also got a consistent `awk '/^Mute:/'` extraction.
 
-- **F-320 — systemd-analyze score tier classification: float-compare via awk**
+- **F-320 — systemd-analyze score tier: float-compare via awk (truncation fix)**
   (Section 25 Systemd Security → _USER_SVCS tier). Previous form
   `SCORE_INT=$(echo "$SCORE" | cut -d. -f1)` truncated the decimal
   before integer comparison — `4.5 → "4" → -le 4 → PASS`,
-  `7.8 → "7" → -le 7 → INFO`. This misclassified boundary scores
-  against systemd-analyze's actual tier semantics:
-  - `<4.0`   = SAFE/OK         → PASS (well-sandboxed)
-  - `4.0-7.0` = MEDIUM/EXPOSED  → INFO
-  - `≥7.0`   = UNSAFE/DANGEROUS → WARN (high exposure)
-  Live-observed regressions before fix: NetworkManager 7.8 was INFO
-  (should WARN), fwupd 4.5 was PASS "well-sandboxed" (should INFO),
-  switcheroo-control 7.6 was INFO (should WARN). Now uses awk float
-  comparison `awk -v s="$SCORE" 'BEGIN { exit !(s < 4.0) }'` — three
-  services correctly re-classified, no rating-tier regression (98%
-  stable; WARN count rises by 2 but math-correct vs systemd intent).
+  `7.8 → "7" → -le 7 → INFO`. Replaced with `awk -v s="$SCORE"
+  'BEGIN { exit !(s < N) }'` (POSIX-portable float compare, same
+  pattern as F-157). Boundary values corrected in F-321 — see below.
+
+- **F-321 — systemd-analyze tier boundaries aligned with systemd's own semantics**
+  (Section 25 Systemd Security → _USER_SVCS tier). F-320 correctly fixed
+  the truncation bug but used boundary `< 4.0` for PASS — this misclassified
+  4.5 as INFO whereas systemd-analyze itself reports 4.5 as "OK" tier.
+  Per systemd source `src/analyze/analyze-security.c`:
+  - `exposure ≥ 90` (score ≥ 9.0) = DANGEROUS → WARN
+  - `exposure ≥ 70` (score ≥ 7.0) = UNSAFE    → WARN
+  - `exposure ≥ 50` (score ≥ 5.0) = MEDIUM    → INFO
+  - `exposure ≥ 10` (score ≥ 1.0) = OK        → PASS
+  - `exposure < 10` (score < 1.0) = SAFE      → PASS
+  Final boundaries: `<5.0 → PASS`, `5.0-7.0 → INFO`, `≥7.0 → WARN`.
+  Live-observed: fwupd 4.5 now correctly PASS "well-sandboxed" (matches
+  systemd's "OK" tier). NetworkManager 7.8 + switcheroo-control 7.6
+  remain WARN (correct per systemd "UNSAFE"). 98% score unchanged.
+  Lesson logged: when re-tiering an integer-truncation bug, verify
+  boundary against the source's own categorization, not a guess.
 
 ### Notes
 

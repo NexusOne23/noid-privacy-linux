@@ -4378,14 +4378,17 @@ if require_cmd systemd-analyze; then
       fi
     fi
   done
-  # F-320 (v3.6.1): float-compare via awk. Previous form `cut -d. -f1` truncated
-  # the decimal — 4.5→4 (PASS), 7.8→7 (INFO) — misclassifying boundary scores
-  # against systemd-analyze's actual tier semantics:
-  #   <4.0   = SAFE/OK         → PASS (well-sandboxed)
-  #   4.0-7.0 = MEDIUM/EXPOSED  → INFO
-  #   ≥7.0   = UNSAFE/DANGEROUS → WARN (high exposure)
-  # Live-observed regressions: NetworkManager 7.8 was INFO (should WARN),
-  # fwupd 4.5 was PASS "well-sandboxed" (should INFO).
+  # F-320 + F-321 (v3.6.1): float-compare via awk with systemd-analyze's actual
+  # tier boundaries (from src/analyze/analyze-security.c):
+  #   exposure ≥ 90 (score ≥ 9.0) = DANGEROUS  → WARN
+  #   exposure ≥ 70 (score ≥ 7.0) = UNSAFE     → WARN
+  #   exposure ≥ 50 (score ≥ 5.0) = MEDIUM     → INFO
+  #   exposure ≥ 10 (score ≥ 1.0) = OK         → PASS
+  #   exposure < 10 (score < 1.0) = SAFE       → PASS
+  # F-320 fixed cut -d. -f1 integer-truncation (e.g. 7.8→"7" misclassified)
+  # but used wrong PASS boundary 4.0; F-321 corrects to 5.0 to match systemd's
+  # own "OK" tier — fwupd 4.5 is "OK"-tier per systemd, was incorrectly flagged
+  # as INFO under F-320. Final mapping: <5.0 → PASS, 5.0-7.0 → INFO, ≥7.0 → WARN.
   _HIGH_EXPOSURE=0
   for SVC in $_USER_SVCS; do
     SCORE=$(LC_ALL=C systemd-analyze security "$SVC" 2>/dev/null | tail -1 | grep -oP '\d+\.\d+' || echo "N/A")
@@ -4394,7 +4397,7 @@ if require_cmd systemd-analyze; then
       _emit_info "systemd-security $SVC: $SCORE (unit inactive — score irrelevant)"
       continue
     fi
-    if awk -v s="$SCORE" 'BEGIN { exit !(s < 4.0) }'; then
+    if awk -v s="$SCORE" 'BEGIN { exit !(s < 5.0) }'; then
       _emit_pass "systemd-security $SVC: $SCORE (well-sandboxed)"
     elif awk -v s="$SCORE" 'BEGIN { exit !(s < 7.0) }'; then
       _emit_info "systemd-security $SVC: $SCORE"
