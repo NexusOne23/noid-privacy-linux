@@ -1145,8 +1145,10 @@ if require_cmd systemd-analyze; then
   BOOT_TIME=$(systemd-analyze 2>/dev/null | head -1)
   _emit_info "Boot: $BOOT_TIME"
 
-  # Top 5 slowest boot services
-  sub_header "Top 5 slowest boot services"
+  # F-329 (v3.6.1): label says "services" but systemd-analyze blame returns
+  # all unit types (.device, .mount, .target, .service, .socket, .timer).
+  # Renamed to "units" for accuracy.
+  sub_header "Top 5 slowest boot units"
   if ! $JSON_MODE; then
     while read -r line; do
       printf "       %s\n" "$line"
@@ -2320,6 +2322,12 @@ sub_header "UDP"
 declare -A _UDP_KEY_COUNT=()
 declare -A _UDP_KEY_LINE=()
 declare -a _UDP_KEY_ORDER=()
+# F-328 (v3.6.1): per-PROC accumulator for collapsed firewall-blocked summary.
+# Repeating "externally bound, but firewall/kill-switch blocks" on every wsdd
+# listener (often 10+ on multi-interface systems) clutters the output. Detail
+# lines now keep the address but drop the long annotation; a single per-PROC
+# summary line at the section end states the firewall-blocked verdict once.
+declare -A _UDP_EXT_BLOCKED_PROCS=()
 while read -r line; do
   [[ -z "$line" ]] && continue
   ADDR=$(echo "$line" | awk '{print $4}')
@@ -2358,12 +2366,19 @@ for key in "${_UDP_KEY_ORDER[@]}"; do
           _emit_info "UDP $ADDR (kernel — no WireGuard interfaces found)${_multi_suffix}"
         fi
       elif has_firewall_block_on_phys; then
-        _emit_info "UDP $ADDR ($PROC) — externally bound, but firewall/kill-switch blocks${_multi_suffix}"
+        _emit_info "UDP $ADDR ($PROC) — externally bound${_multi_suffix}"
+        _UDP_EXT_BLOCKED_PROCS[$PROC]=$((${_UDP_EXT_BLOCKED_PROCS[$PROC]:-0} + 1))
       else
         _emit_warn "UDP $ADDR ($PROC) — external${_multi_suffix}"
       fi
       ;;
   esac
+done
+# F-328: per-PROC summary instead of repeating annotation on every listener
+for _ext_proc in "${!_UDP_EXT_BLOCKED_PROCS[@]}"; do
+  _ext_n="${_UDP_EXT_BLOCKED_PROCS[$_ext_proc]}"
+  [[ "$_ext_n" -eq 1 ]] && _ext_word="listener" || _ext_word="listeners"
+  _emit_info "  └─ ${_ext_proc}: ${_ext_n} ${_ext_word} above are firewall/kill-switch blocked"
 done
 
 # Connections to unusual ports
@@ -3119,12 +3134,29 @@ else
 fi
 
 # Swappiness
+# F-330 (v3.6.1): detect ZRAM-only swap so the annotation reflects in-memory
+# compression vs disk I/O semantics — high swappiness with ZRAM-only swap is
+# RAM compression, NOT "more data written to disk", so no recovery risk.
 _SWAPPINESS=$(sysctl -n vm.swappiness 2>/dev/null || echo "N/A")
 if [[ "$_SWAPPINESS" != "N/A" ]]; then
+  _swap_zram_only=false
+  if command -v swapon &>/dev/null; then
+    _swap_devs=$(swapon --noheadings --show=NAME 2>/dev/null || true)
+    if [[ -n "$_swap_devs" ]] && ! echo "$_swap_devs" | grep -qv '^/dev/zram'; then
+      _swap_zram_only=true
+    fi
+  fi
+  if [[ "$_swap_zram_only" == "true" ]]; then
+    _zram_note=" — ZRAM-only (in-memory compression, no disk I/O)"
+  else
+    _zram_note=""
+  fi
   if [[ "$_SWAPPINESS" -le 10 ]]; then
-    _emit_pass "Swappiness: $_SWAPPINESS (low — minimal swap usage)"
+    _emit_pass "Swappiness: $_SWAPPINESS (low — minimal swap usage)${_zram_note}"
   elif [[ "$_SWAPPINESS" -le 60 ]]; then
-    _emit_info "Swappiness: $_SWAPPINESS (default range)"
+    _emit_info "Swappiness: $_SWAPPINESS (default range)${_zram_note}"
+  elif [[ "$_swap_zram_only" == "true" ]]; then
+    _emit_info "Swappiness: $_SWAPPINESS (high — aggressive RAM compression via ZRAM, no disk I/O)"
   else
     _emit_warn "Swappiness: $_SWAPPINESS (high — more data written to disk, recovery risk)"
   fi
@@ -3586,7 +3618,21 @@ if require_cmd chkrootkit; then
     fi
   fi
 else
-  _emit_info "chkrootkit not installed — skipped (recommended over rkhunter for 2026)"
+  # F-334 (v3.6.1): conditional recommendation strength based on whether the
+  # system already has modern integrity coverage. AIDE (file FIM) + IMA
+  # (kernel-runtime measurements) cover most rootkit-relevant surface; in that
+  # case chkrootkit is supplemental, not critical.
+  _ima_active=false
+  _aide_ready=false
+  [[ -e /sys/kernel/security/integrity/ima/runtime_measurements_count ]] && _ima_active=true
+  if [[ -s /var/lib/aide/aide.db.gz ]] || [[ -s /var/lib/aide/aide.db ]]; then
+    _aide_ready=true
+  fi
+  if $_ima_active && $_aide_ready; then
+    _emit_info "chkrootkit not installed — supplemental only (AIDE + IMA already provide integrity coverage)"
+  else
+    _emit_info "chkrootkit not installed — recommended (modern alternative to unmaintained rkhunter)"
+  fi
 fi
 
 # Suspect Cron Jobs — F-133: when cron.deny restricts users, `crontab -l -u`
@@ -3622,7 +3668,8 @@ for CRONDIR in /etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/cron.weekly /et
     _cron_files=("$CRONDIR"/*)
     shopt -u nullglob
     COUNT="${#_cron_files[@]}"
-    _emit_info "$CRONDIR: $COUNT entries"
+    [[ "$COUNT" -eq 1 ]] && _ent="entry" || _ent="entries"
+    _emit_info "$CRONDIR: $COUNT $_ent"
   fi
 done
 
@@ -3813,6 +3860,12 @@ fi
 if [[ "$_QEMU_TOTAL" -gt "$_VM_LIBVIRT" ]]; then
   _VM_STANDALONE=$(( _QEMU_TOTAL - _VM_LIBVIRT ))
   _emit_info "Standalone qemu-system processes: $_VM_STANDALONE (not libvirt-managed — e.g. livemedia-creator, direct qemu)"
+else
+  # F-332 (v3.6.1): emit symmetric zero-line so the user can see both checks ran
+  # (libvirt + standalone). Previously skip-when-zero hid the standalone-qemu
+  # check entirely, leaving readers unsure whether "Running VMs: 0" covered all
+  # qemu invocations or just libvirt-managed ones.
+  _emit_pass "Standalone qemu-system processes: 0 (no unmanaged qemu detected)"
 fi
 
 # F-148: severity-tiered classification of user.max_user_namespaces
@@ -4329,7 +4382,9 @@ while read -r USER_HOME; do
     AUTH_KEYS=$(wc -l "$USER_HOME/.ssh/authorized_keys" 2>/dev/null | awk '{print $1}' || true)
     AUTH_KEYS=${AUTH_KEYS:-0}
     if [[ "$KEY_COUNT" -gt 0 ]] || [[ "$AUTH_KEYS" -gt 0 ]]; then
-      _emit_info "SSH keys for $_ssh_user: $KEY_COUNT keys, $AUTH_KEYS authorized"
+      [[ "$KEY_COUNT" -eq 1 ]] && _kw="key" || _kw="keys"
+      [[ "$AUTH_KEYS" -eq 1 ]] && _aw="authorized key" || _aw="authorized"
+      _emit_info "SSH keys for $_ssh_user: $KEY_COUNT $_kw, $AUTH_KEYS $_aw"
     fi
   fi
 done < <(_iter_user_homes)
@@ -4392,6 +4447,12 @@ check_systemd() {
 
 if require_cmd systemd-analyze; then
   sub_header "systemd-analyze security"
+  # F-333 (v3.6.1): explicit classification note up-front so readers understand
+  # why services with similar scores are reported differently — security/hardware
+  # services with high scores are infrastructure-required (cannot be sandboxed
+  # without breaking core function); user-facing services with high scores are
+  # actual hardening regressions because they CAN be sandboxed.
+  _emit_info "Score tiers: <5.0=PASS, 5.0-7.0=INFO, ≥7.0=WARN (per systemd src). Security/hardware services bypass tier check — high scores expected (root/HW access required)"
   # Security services (need root — high score expected and acceptable)
   _SECURITY_SVCS="sshd firewalld fail2ban auditd usbguard chronyd"
   # Hardware/display services (inherently need broad access — high score expected)
@@ -5835,20 +5896,36 @@ check_network_privacy() {
   should_skip "netprivacy" && return
   header "37" "NETWORK PRIVACY"
 
-  local nm_wifi_rand=""
-  local conf_file
-  for conf_file in /etc/NetworkManager/NetworkManager.conf /etc/NetworkManager/conf.d/*.conf; do
-    [[ -f "$conf_file" ]] || continue
-    local val
-    val="$(sed -n '/^\[device\]/,/^\[/{ s/^wifi\.scan-rand-mac-address[[:space:]]*=[[:space:]]*//p; }' "$conf_file" 2>/dev/null)"
-    [[ -n "$val" ]] && nm_wifi_rand="$val"
-  done
-  if [[ "$nm_wifi_rand" == "yes" || "$nm_wifi_rand" == "true" ]]; then
-    _emit_pass "WiFi scan MAC randomization enabled"
-  elif [[ "$nm_wifi_rand" == "no" || "$nm_wifi_rand" == "false" ]]; then
-    _emit_fail "WiFi scan MAC randomization disabled"
+  # F-331 (v3.6.1): skip WiFi MAC randomization check when no WiFi adapter
+  # is present (ethernet-only or WiFi disabled in firmware). Reporting "not
+  # configured" on a system that has no WiFi hardware is misleading noise.
+  local _has_wifi=false
+  if command -v nmcli &>/dev/null && nmcli -t -f TYPE device 2>/dev/null | grep -q '^wifi$'; then
+    _has_wifi=true
+  fi
+  if ! $_has_wifi; then
+    for _netif in /sys/class/net/*/wireless; do
+      [[ -e "$_netif" ]] && _has_wifi=true && break
+    done
+  fi
+  if ! $_has_wifi; then
+    _emit_pass "WiFi scan MAC randomization: N/A (no WiFi adapter present)"
   else
-    _emit_info "WiFi scan MAC randomization not configured (default: yes since NM 1.4)"
+    local nm_wifi_rand=""
+    local conf_file
+    for conf_file in /etc/NetworkManager/NetworkManager.conf /etc/NetworkManager/conf.d/*.conf; do
+      [[ -f "$conf_file" ]] || continue
+      local val
+      val="$(sed -n '/^\[device\]/,/^\[/{ s/^wifi\.scan-rand-mac-address[[:space:]]*=[[:space:]]*//p; }' "$conf_file" 2>/dev/null)"
+      [[ -n "$val" ]] && nm_wifi_rand="$val"
+    done
+    if [[ "$nm_wifi_rand" == "yes" || "$nm_wifi_rand" == "true" ]]; then
+      _emit_pass "WiFi scan MAC randomization enabled"
+    elif [[ "$nm_wifi_rand" == "no" || "$nm_wifi_rand" == "false" ]]; then
+      _emit_fail "WiFi scan MAC randomization disabled"
+    else
+      _emit_info "WiFi scan MAC randomization not configured (default: yes since NM 1.4)"
+    fi
   fi
 
   # F-232b: cloned-mac-address can live in three places:

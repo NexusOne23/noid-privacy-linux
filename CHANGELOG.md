@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.6.1] - 2026-04-30 / 2026-05-01 / 2026-05-02
 
-### 🐛 Live-ISO False-Positives + Reporting-Quality + Engineering Audit + Self-Audit + Live-Audit Self-Review + Cosmetic Polish (47 fixes)
+### 🐛 Live-ISO False-Positives + Reporting-Quality + Engineering Audit + Self-Audit + Live-Audit Self-Review + Cosmetic Polish + Display Polish (55 fixes)
 
 Three passes shipped under the same v3.6.1 tag:
 - **2026-04-30** — five context-aware classification fixes (F-273/274/275/281/282)
@@ -536,6 +536,83 @@ collectively raise the code-quality floor and align practice with policy.
   excludes orphan .journal files, Btrfs CoW + snapshots inflate du, fs
   block-alignment slack, compression accounting differences). None
   indicate a bug; it's how journal storage works.
+
+#### Fixed — Display Polish (2026-05-02)
+
+Eight cosmetic display-quality fixes found by line-by-line review of
+the F-322..F-326 audit output. None affect detection or scoring logic;
+all reduce visual noise, fix grammar at n=1, and add explanatory context
+where users were forced to cross-reference multiple sections to
+understand a single value.
+
+- **F-327 — Grammar plural-handling for n=1**
+  (Section 15 Rootkit Scan + Section 23 Crypto). Cron-directory entry
+  counter and SSH key counter both rendered "1 entries" / "1 keys"
+  when the count was 1. Now ternary-conditional: `entry`/`entries`,
+  `key`/`keys`, `authorized key`/`authorized` based on the count.
+
+- **F-328 — UDP repetitive firewall-blocked annotation collapsed**
+  (Section 8 Open Ports → UDP). On systems with wsdd (multi-interface
+  GNOME network browsing helper), 10+ identical "externally bound, but
+  firewall/kill-switch blocks" annotations cluttered the section. Detail
+  lines now keep the address with short `(externally bound)` annotation;
+  a single per-PROC summary line at the section end states the
+  firewall-blocked verdict once: `└─ wsdd: 11 listeners above are
+  firewall/kill-switch blocked`.
+
+- **F-329 — "Top 5 slowest boot services" relabeled to "units"**
+  (Section 1 Kernel & Boot). `systemd-analyze blame` returns all unit
+  types (`.device`, `.mount`, `.target`, `.service`, `.socket`,
+  `.timer`), not just services. Label was misleading on systems where
+  the top-5 slowest were devices (e.g. `dev-tpmrm0.device`,
+  `sys-module-fuse.device`).
+
+- **F-330 — Swappiness annotation reflects ZRAM-only context**
+  (Section 12 Filesystem Security). Previously emitted
+  `Swappiness: 100 (high — more data written to disk, recovery risk)`
+  even when all swap devices were `/dev/zram*` (in-memory compression,
+  zero disk I/O). Now detects ZRAM-only swap via `swapon --show=NAME`
+  and annotates accordingly: `(default range) — ZRAM-only (in-memory
+  compression, no disk I/O)`. High swappiness with ZRAM-only swap
+  downgrades from WARN to INFO since there is no recovery risk.
+
+- **F-331 — WiFi MAC randomization check skipped on no-WiFi systems**
+  (Section 37 Network Privacy). `WiFi scan MAC randomization not
+  configured` emitted as INFO even on ethernet-only systems with no
+  WiFi adapter. Now detects WiFi presence via NetworkManager
+  (`nmcli -t -f TYPE device | grep wifi`) and `/sys/class/net/*/wireless`
+  fallback. Without an adapter: emits PASS `N/A (no WiFi adapter
+  present)` instead of misleading INFO.
+
+- **F-332 — Standalone qemu zero-state line emitted symmetrically**
+  (Section 18 Containers & Virtualization). F-287 added standalone
+  qemu detection but skipped the emit when the count was zero, leaving
+  readers unsure whether `Running VMs (libvirt-managed): 0` covered
+  all qemu invocations. Now emits a symmetric PASS line `Standalone
+  qemu-system processes: 0 (no unmanaged qemu detected)` so both
+  detection paths are visible.
+
+- **F-333 — systemd-security score-tier classification note**
+  (Section 25 Systemd Security → systemd-analyze security). Previous
+  output reported `firewalld: 7.3 (security service, needs root)` as
+  INFO and `NetworkManager: 7.8 (high exposure)` as WARN, with no
+  explanation for why services with similar scores were treated
+  differently. Up-front note added: `Score tiers: <5.0=PASS,
+  5.0-7.0=INFO, ≥7.0=WARN (per systemd src). Security/hardware
+  services bypass tier check — high scores expected (root/HW access
+  required)`. Makes the classification logic visible without forcing
+  users to read the source.
+
+- **F-334 — chkrootkit recommendation strength conditional on
+  integrity-stack presence** (Section 15 Rootkit & Malware Scan).
+  When AIDE database is initialized AND IMA runtime measurements are
+  active, the system already has modern integrity coverage; chkrootkit
+  becomes supplemental rather than critical. Now detects both via
+  `/sys/kernel/security/integrity/ima/runtime_measurements_count` and
+  `/var/lib/aide/aide.db.gz` and softens the message: `chkrootkit not
+  installed — supplemental only (AIDE + IMA already provide integrity
+  coverage)` vs the previous always-pushy `recommended over rkhunter
+  for 2026`.
 
 ### Notes
 
