@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.6.1] - 2026-04-30 / 2026-05-01 / 2026-05-02
 
-### 🐛 Live-ISO False-Positives + Reporting-Quality + Engineering Audit + Self-Audit (28 fixes)
+### 🐛 Live-ISO False-Positives + Reporting-Quality + Engineering Audit + Self-Audit + Live-Audit Self-Review (40 fixes)
 
 Three passes shipped under the same v3.6.1 tag:
 - **2026-04-30** — five context-aware classification fixes (F-273/274/275/281/282)
@@ -36,6 +36,19 @@ Three passes shipped under the same v3.6.1 tag:
   form), one `((var += N))` slipped past Pattern 9 which only matched
   `((var++))`. All three are lint-coverage extensions plus the missed
   source sites — no new bug categories.
+- **2026-05-02 (live-audit self-review)** — twelve display + detection
+  improvements (F-308..F-319) found by line-by-line review of full
+  audit output on a 98% FULLY HARDENED Fedora 43 host. Categories:
+  ARP total/breakdown math consistency (F-308), service grouping for
+  bluetooth.service+socket (F-309), inactive-unit annotation in
+  systemd-analyze (F-310), POSIX `/bin/sh` removed from legacy-shell
+  list (F-311), `who` semantics fixed sessions vs users (F-312),
+  PipeWire env-vars expansion (F-313), ZRAM display dedupe (F-314),
+  GOA D-Bus services added to RPM-verify exclusion (F-315), journal
+  storage cross-reference between S19↔S38 (F-316), wsdd listener
+  counter for transparency (F-317), bluetooth.service detection via
+  authoritative `systemctl show` API (F-318), wpctl/pactl stderr
+  capture + no-mic-hardware detection (F-319).
 
 No detection logic was weakened in any pass.
 
@@ -330,6 +343,130 @@ collectively raise the code-quality floor and align practice with policy.
   matches `free` followed by zero or more `-flag` arguments before the
   pipe. Verified against positive-test fixture (`free -h | awk`,
   `free -m -h | awk`) — both now caught.
+
+#### Fixed — Live-Audit Self-Review (2026-05-02)
+
+- **F-308 — ARP entries math: total now equals sum of breakdown**
+  (Section 5 VPN & Network). Output `ARP entries: 1 total (0 reachable,
+  0 stale, 0 failed)` left users wondering where the missing entry
+  went. PERMANENT/NOARP/NONE/INCOMPLETE/PROBE/DELAY entries weren't
+  counted in any of the three breakdown buckets. New `$ARP_OTHER`
+  count = `total - reachable - stale - failed` (clamped to ≥0)
+  catches all remaining states. Output now reads
+  `1 total (0 reachable, 0 stale, 0 failed, 1 other)` — math consistent.
+
+- **F-309 — bluetooth.service + bluetooth.socket grouped as one entity**
+  (Section 7 Services & Daemons). Previously they reported as two
+  separate lines: "Service masked: bluetooth.service" + "Service off:
+  bluetooth.socket". This created the visual contradiction "service
+  masked but socket only off — is bluetooth disabled or not?" The two
+  units form one logical service (socket activates service); reporting
+  them grouped with strictest-state-wins semantics (ANY masked = group
+  reported as masked) cleanly conveys "Bluetooth: masked". The
+  `_SVC_GROUPS_DESKTOP` syntax was extended to support space-separated
+  unit aliases per entry, mirroring `_SVC_GROUPS_OFF` grouping.
+
+- **F-310 — systemd-analyze inactive-unit annotation**
+  (Section 25 Systemd Security). `systemd-analyze security` parses the
+  unit FILE regardless of runtime state — sshd reports score 9.6 even
+  when sshd.service is inactive (per Section 9). Users panic about a
+  high-exposure score that's actually irrelevant for a stopped unit.
+  All three service-class loops (_SECURITY_SVCS, _HARDWARE_SVCS,
+  _USER_SVCS) now check `systemctl is-active` first; inactive units
+  get `(unit inactive — score irrelevant)` annotation, and the
+  _USER_SVCS PASS/INFO/WARN tier is short-circuited to plain INFO
+  (an inactive unit can't be exploited regardless of file score).
+
+- **F-311 — `/bin/sh` removed from legacy-shell list**
+  (Section 34 System Integrity → Valid Shells). F-217 added `/bin/sh`
+  to the list intended for csh/tcsh/dash, but `/bin/sh` is the
+  universal POSIX shell symlink (`sh→bash` on RHEL/Fedora/Ubuntu,
+  `sh→dash` on Debian) required by countless `#!/bin/sh` scripts.
+  Listing it as "Legacy shell available" was misleading on every
+  Linux system that has a working POSIX environment. Now the list
+  is `/bin/csh /bin/tcsh /bin/dash` only.
+
+- **F-312 — `who` count semantics fixed: sessions vs unique users**
+  (Section 29 Recent Logins & Activity). `who | wc -l` counts SESSIONS
+  (one line per tty) not USERS — output "Currently logged in: 3 users"
+  on a system with one human user logged into 3 ttys is factually wrong.
+  Now reports both: "$N session(s) across $M unique user(s)" so the
+  distinction is explicit.
+
+- **F-313 — PipeWire/PulseAudio client gets DBUS_SESSION_BUS_ADDRESS**
+  (Section 40 Webcam & Audio Privacy). wpctl/pactl could fail silently
+  on F43+ when invoked via `sudo -u USER` with only `XDG_RUNTIME_DIR`
+  set — the PipeWire client library also wants the user's DBus session
+  bus address. Adding `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus`
+  matches the env pattern that gsettings/kreadconfig calls already use
+  in earlier sections. Defensive change — works on systems that didn't
+  need it before, fixes systems where it was the missing variable.
+
+- **F-314 — Swap ZRAM display dedupe**
+  (Section 13 Encryption & Crypto → Swap). Each ZRAM device emitted
+  its own INFO line inside the loop AND a PASS line after the loop
+  ("Swap: ZRAM only — no disk persistence risk"). For the typical
+  single-ZRAM-device case this was redundant. Loop now collects ZRAM
+  device names into `$SWAP_ZRAM_DEVS` for a single summary line that
+  includes the actual device names, e.g.:
+  `Swap: ZRAM only (/dev/zram0 — in-memory compression, no disk persistence)`.
+  Mixed setups (ZRAM + real disk swap) get a single combined info line
+  followed by the encryption verdict.
+
+- **F-315 — F-281 RPM-verify exclusion extended for GNOME Online Accounts**
+  (Section 34 System Integrity → Critical Binary Integrity). The F-281
+  exclusion list covered branding/identity files but missed the GOA
+  D-Bus service activation manifests at `/usr/share/dbus-1/services/
+  org.gnome.{Identity,OnlineAccounts}.service` which privacy-hardening
+  playbooks routinely override (Exec= → /bin/false) to prevent dormant
+  GOA D-Bus activation. Same exclusion-class as os-release: not
+  executable code, just activation metadata. NoID + similar hardening
+  distros no longer get a "binaries with changed checksums" WARN for
+  these legitimate overrides.
+
+- **F-316 — Journal storage cross-reference between Section 19 and 38**
+  (Sections 19 + 38). S19 reports `journalctl --disk-usage` (what
+  journald accounts for), S38 reports `du -sb /var/log/journal` (raw
+  filesystem size). The two numbers can differ by 30-50% depending on
+  fragmentation/holes. Without explicit cross-reference users assume
+  the script contradicts itself. Both messages now include
+  `(see Section N for the other view)` so the dual-measurement
+  intent is explicit.
+
+- **F-317 — wsdd listener-process counter when gvfsd-spawned**
+  (Section 7 Services & Daemons → wsdd). gvfsd-wsdd spawns wsdd
+  listener processes with `--no-host` (won't broadcast hostname). On
+  Section 8's port list these surface as multiple wsdd UDP entries,
+  visually contradicting Section 7's "wsdd standalone: not running".
+  S7 now reports the count of spawned listeners and explicitly points
+  to S8: `running — firewall-protected (spawned N wsdd listener
+  process(es), see Section 8)` — eliminates the apparent contradiction.
+
+- **F-318 — Bluetooth detection via authoritative `systemctl show` API**
+  (Section 41 Bluetooth Privacy). The original combined check
+  `command -v bluetoothctl && systemctl list-unit-files bluetooth.service`
+  used `list-unit-files` whose exit code can transient-fail rc=1 in
+  certain post-mask states even when the unit IS loaded (verified live:
+  `bluetoothctl` on PATH + unit shown as `masked enabled` by show).
+  Replaced with `systemctl show bluetooth.service -p UnitFileState
+  --value` which is the authoritative-and-stable API. Differentiated
+  INFO messages also tell users WHICH part is missing (bluetoothctl
+  vs unit-file). Bonus: when `UnitFileState=masked`, S41 now early-exits
+  with PASS "Bluetooth service masked (cannot start)" — semantically
+  correct.
+
+- **F-319 — wpctl/pactl stderr capture + no-mic-hardware detection**
+  (Section 40 Webcam & Audio Privacy → Microphone). On systems without
+  microphone hardware, wpctl emits `Translate ID error: '-1' is not a
+  valid ID` on STDERR (exit code 0), and the previous code's
+  `2>/dev/null` swallowed it — leaving `$vol` empty → `mic_checked=0`
+  → confusing "Could not check microphone status (no wpctl/pactl or
+  no active sessions)" message on perfectly-functional desktops that
+  simply have no mic. Both wpctl and pactl branches now use `2>&1` to
+  capture stderr, and detect the error patterns `invalid id|Translate
+  ID error|node not found|No such object` to emit a correct PASS:
+  "No default audio source for $user (no microphone hardware)". pactl
+  branch also got a consistent `awk '/^Mute:/'` extraction.
 
 ### Notes
 

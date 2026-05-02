@@ -1936,7 +1936,13 @@ ARP_COUNT=$(ip neigh show 2>/dev/null | wc -l)
 ARP_REACHABLE=$(ip neigh show nud reachable 2>/dev/null | wc -l)
 ARP_FAILED=$(ip neigh show nud failed 2>/dev/null | wc -l)
 ARP_STALE=$(ip neigh show nud stale 2>/dev/null | wc -l)
-_emit_info "ARP entries: $ARP_COUNT total ($ARP_REACHABLE reachable, $ARP_STALE stale, $ARP_FAILED failed)"
+# F-308 (v3.6.1): account for PERMANENT/NOARP/NONE/INCOMPLETE/PROBE/DELAY entries
+# in the math so total = sum of breakdown. Previously total could be > sum
+# (e.g. 1 total / 0 reachable + 0 stale + 0 failed) when a PERMANENT or NOARP
+# entry existed, leaving users to wonder where the missing entry went.
+ARP_OTHER=$(( ARP_COUNT - ARP_REACHABLE - ARP_STALE - ARP_FAILED ))
+[[ "$ARP_OTHER" -lt 0 ]] && ARP_OTHER=0
+_emit_info "ARP entries: $ARP_COUNT total ($ARP_REACHABLE reachable, $ARP_STALE stale, $ARP_FAILED failed, $ARP_OTHER other)"
 [[ "$ARP_FAILED" -gt 5 ]] && _emit_warn "ARP: $ARP_FAILED failed entries (possible LAN scanning attempts)"
 
 # Network Namespaces
@@ -2096,11 +2102,14 @@ _SVC_GROUPS_OFF=(
 # Desktop-relevant services: WARN with context on desktop, FAIL on server.
 # cups (printing), avahi (mDNS/discovery), bluetooth (laptops) are normal
 # desktop defaults and don't warrant FAIL diagnosis.
+# F-309 (v3.6.1): bluetooth.service + bluetooth.socket grouped — they're the
+# same logical entity (socket activates service). Reporting separately leads
+# to "service masked, socket off" inconsistencies that confuse users about
+# whether bluetooth is fully disabled.
 _SVC_GROUPS_DESKTOP=(
   "cups:printing"
   "avahi-daemon:Bonjour/mDNS discovery"
-  "bluetooth.service:Bluetooth"
-  "bluetooth.socket:Bluetooth"
+  "bluetooth.service bluetooth.socket:Bluetooth"
 )
 
 for _grp in "${_SVC_GROUPS_OFF[@]}"; do
@@ -2119,19 +2128,24 @@ for _grp in "${_SVC_GROUPS_OFF[@]}"; do
 done
 
 # Desktop-relevant services with context-aware severity
+# F-309: support space-separated unit aliases per entry (everything before the
+# LAST colon is the unit-list, after the last colon is context). ANY-active /
+# ANY-masked semantics — the strictest state of any alias drives the report.
 for _entry in "${_SVC_GROUPS_DESKTOP[@]}"; do
-  _svc="${_entry%%:*}"
+  _svc_list="${_entry%:*}"
   _ctx="${_entry##*:}"
-  if systemctl is-active "$_svc" &>/dev/null; then
+  _svc_canonical="${_svc_list%% *}"
+  # shellcheck disable=SC2086  # intentional word-split on space-separated aliases
+  if _service_active_any $_svc_list; then
     if $_IS_DESKTOP; then
-      _emit_info "Service running: $_svc (desktop default — $_ctx)"
+      _emit_info "Service running: $_svc_canonical (desktop default — $_ctx)"
     else
-      _emit_warn "Service running: $_svc (consider disabling on server — $_ctx)"
+      _emit_warn "Service running: $_svc_canonical (consider disabling on server — $_ctx)"
     fi
-  elif [[ "$(systemctl is-enabled "$_svc" 2>/dev/null)" == "masked" ]]; then
-    _emit_pass "Service masked: $_svc"
+  elif _service_masked_any $_svc_list; then
+    _emit_pass "Service masked: $_svc_canonical"
   else
-    _emit_pass "Service off: $_svc"
+    _emit_pass "Service off: $_svc_canonical"
   fi
 done
 
@@ -2162,11 +2176,17 @@ fi
 
 # gvfsd-wsdd is part of GNOME's gvfs — started on-demand for network browsing.
 # It is firewall-protected on hardened systems. Warn only if firewall is absent.
+# F-317 (v3.6.1): include the count of wsdd listener processes that gvfsd
+# spawned, so users understand the UDP listeners they see in Section 8 ports
+# come from this gvfsd subsystem (running with --no-host, won't broadcast
+# the hostname). Without this counter, Section 8's many wsdd UDP entries
+# look contradictory to Section 7's "wsdd standalone: not running".
 if pgrep -x gvfsd-wsdd &>/dev/null; then
+  _GVFSD_WSDD_PROCS=$(pgrep -x wsdd 2>/dev/null | wc -l)
   if systemctl is-active firewalld &>/dev/null || systemctl is-active ufw &>/dev/null; then
-    _emit_info "gvfsd-wsdd (GNOME network browsing): running — firewall-protected"
+    _emit_info "gvfsd-wsdd (GNOME network browsing): running — firewall-protected (spawned $_GVFSD_WSDD_PROCS wsdd listener process(es), see Section 8)"
   else
-    _emit_warn "gvfsd-wsdd running without active firewall — WS-Discovery exposed on LAN"
+    _emit_warn "gvfsd-wsdd running without active firewall — WS-Discovery exposed on LAN ($_GVFSD_WSDD_PROCS wsdd listener process(es) spawned)"
   fi
 fi
 
@@ -3239,11 +3259,15 @@ SWAP_DEVS=$(swapon --show=NAME --noheadings 2>/dev/null)
 if [[ "$SWAP_ACTIVE" -gt 0 ]]; then
   SWAP_ENCRYPTED=true
   SWAP_HAS_REAL=false
+  # F-314 (v3.6.1): collect ZRAM device names for a SINGLE summary line at
+  # the end. Previously each ZRAM device emitted its own INFO inside the
+  # loop AND a PASS message after — duplicate display for the same fact.
+  SWAP_ZRAM_DEVS=""
   while read -r swapdev; do
     [[ -z "$swapdev" ]] && continue
     # ZRAM is in-memory compression — not persistent storage, no encryption needed
     if [[ "$swapdev" =~ ^/dev/zram ]]; then
-      _emit_info "Swap: $swapdev is ZRAM (in-memory compression — no encryption needed)"
+      SWAP_ZRAM_DEVS+="$swapdev "
       continue
     fi
     SWAP_HAS_REAL=true
@@ -3265,11 +3289,15 @@ if [[ "$SWAP_ACTIVE" -gt 0 ]]; then
       fi
     fi
   done <<< "$SWAP_DEVS"
-  if ! $SWAP_HAS_REAL; then
+  if ! $SWAP_HAS_REAL && [[ -n "$SWAP_ZRAM_DEVS" ]]; then
+    _emit_pass "Swap: ZRAM only (${SWAP_ZRAM_DEVS% } — in-memory compression, no disk persistence)"
+  elif ! $SWAP_HAS_REAL; then
     _emit_pass "Swap: ZRAM only (in-memory — no disk persistence risk)"
   elif $SWAP_ENCRYPTED; then
+    [[ -n "$SWAP_ZRAM_DEVS" ]] && _emit_info "Swap: ZRAM ${SWAP_ZRAM_DEVS% } (in-memory) + encrypted disk swap"
     _emit_pass "Swap: encrypted"
   else
+    [[ -n "$SWAP_ZRAM_DEVS" ]] && _emit_info "Swap: ZRAM ${SWAP_ZRAM_DEVS% } (in-memory) + UNENCRYPTED disk swap"
     _emit_warn "Swap: NOT encrypted (memory contents at risk)"
   fi
 else
@@ -3889,7 +3917,11 @@ fi
 # — the labels now make the source explicit so users don't think the script
 # is contradicting itself.
 JOURNAL_STORAGE=$(LC_ALL=C journalctl --disk-usage 2>/dev/null | grep -oP '\d+\.?\d*[GMKT]' | head -1)
-_emit_info "Journal storage (journalctl --disk-usage): ${JOURNAL_STORAGE:-unknown}"
+# F-316 (v3.6.1): cross-reference Section 38 — both reports describe journal
+# storage but from different sources (journald-accounted vs filesystem du -sb).
+# Without explicit cross-reference, users see two different sizes and assume
+# the script contradicts itself.
+_emit_info "Journal storage (journalctl --disk-usage): ${JOURNAL_STORAGE:-unknown} — see Section 38 for filesystem-size view"
 
 # Systemd Journal Forwarding (new)
 JOURNAL_FWD=$(grep -i "ForwardToSyslog" /etc/systemd/journald.conf 2>/dev/null | grep -v "^#" | head -1)
@@ -4321,22 +4353,39 @@ if require_cmd systemd-analyze; then
   _HARDWARE_SVCS="gdm gdm3 thermald"
   # User-facing services (should be sandboxed — high score = problem)
   _USER_SVCS="NetworkManager ModemManager colord fwupd power-profiles-daemon switcheroo-control"
+  # F-310 (v3.6.1): annotate inactive units. systemd-analyze security parses
+  # the unit FILE regardless of runtime state — inactive units still get a
+  # score, which misleads users into thinking the score is a current concern.
+  # For _USER_SVCS the score-tier (PASS/INFO/WARN) is also short-circuited
+  # to INFO when inactive, since an inactive unit can't be exploited.
   for SVC in $_SECURITY_SVCS; do
     SCORE=$(LC_ALL=C systemd-analyze security "$SVC" 2>/dev/null | tail -1 | grep -oP '\d+\.\d+' || echo "N/A")
     if [[ "$SCORE" != "N/A" ]]; then
-      _emit_info "systemd-security $SVC: $SCORE (security service, needs root)"
+      if systemctl is-active "$SVC" &>/dev/null; then
+        _emit_info "systemd-security $SVC: $SCORE (security service, needs root)"
+      else
+        _emit_info "systemd-security $SVC: $SCORE (unit inactive — score irrelevant)"
+      fi
     fi
   done
   for SVC in $_HARDWARE_SVCS; do
     SCORE=$(LC_ALL=C systemd-analyze security "$SVC" 2>/dev/null | tail -1 | grep -oP '\d+\.\d+' || echo "N/A")
     if [[ "$SCORE" != "N/A" ]]; then
-      _emit_info "systemd-security $SVC: $SCORE (system service, needs hardware access)"
+      if systemctl is-active "$SVC" &>/dev/null; then
+        _emit_info "systemd-security $SVC: $SCORE (system service, needs hardware access)"
+      else
+        _emit_info "systemd-security $SVC: $SCORE (unit inactive — score irrelevant)"
+      fi
     fi
   done
   _HIGH_EXPOSURE=0
   for SVC in $_USER_SVCS; do
     SCORE=$(LC_ALL=C systemd-analyze security "$SVC" 2>/dev/null | tail -1 | grep -oP '\d+\.\d+' || echo "N/A")
     [[ "$SCORE" == "N/A" ]] && continue
+    if ! systemctl is-active "$SVC" &>/dev/null; then
+      _emit_info "systemd-security $SVC: $SCORE (unit inactive — score irrelevant)"
+      continue
+    fi
     SCORE_INT=$(echo "$SCORE" | cut -d. -f1)
     if [[ "$SCORE_INT" -le 4 ]]; then
       _emit_pass "systemd-security $SVC: $SCORE (well-sandboxed)"
@@ -4536,8 +4585,11 @@ if ! $JSON_MODE; then
   done < <(lastb -n 5 2>/dev/null | head -5)
 fi
 
-USERS_LOGGED=$(who | wc -l)
-_emit_info "Currently logged in: $USERS_LOGGED users"
+# F-312 (v3.6.1): `who` reports SESSIONS not USERS. One user with 3 ttys
+# shows as 3 lines. Distinguish session count from unique-user count.
+SESSIONS_LOGGED=$(who | wc -l)
+USERS_UNIQUE=$(who | awk '{print $1}' | sort -u | wc -l)
+_emit_info "Currently logged in: $SESSIONS_LOGGED session(s) across $USERS_UNIQUE unique user(s)"
 
 # F-186: sudo usage count exposes admin-activity rhythm. On multi-user systems
 # this leaks behavioral metadata when audit output is shared. Bucketize by
@@ -5122,8 +5174,14 @@ if require_cmd rpm; then
     # (login banner), /usr/share/anaconda/pixmaps/* (installer artwork),
     # /usr/share/icons/*/apps/anaconda.png (installer icon),
     # /usr/share/pixmaps/{fedora,system}-logo*.png (desktop branding).
+    # F-315 (v3.6.1): also exclude GNOME Online Accounts D-Bus service files —
+    # /usr/share/dbus-1/services/org.gnome.{Identity,OnlineAccounts}.service
+    # are routinely overridden by privacy-hardening playbooks (NoID hard-block,
+    # GrapheneOS-style desktop) to prevent dormant GOA D-Bus activation. The
+    # files are NOT executable code — they're activation manifests with Exec=
+    # pointing to /bin/false or similar. Same exclusion-class as os-release.
     RPM_VERIFY_BIN=$(echo "$RPM_VA_OUTPUT" | grep -E "^..5" | grep -v " c " \
-      | grep -cvE "\.pyc\b|/__pycache__/|/usr/lib/(issue|os-release)|/usr/share/(anaconda/pixmaps|icons/.*/apps/anaconda\.png|pixmaps/(fedora|system)-logo)" || true)
+      | grep -cvE "\.pyc\b|/__pycache__/|/usr/lib/(issue|os-release)|/usr/share/(anaconda/pixmaps|icons/.*/apps/anaconda\.png|pixmaps/(fedora|system)-logo)|/usr/share/dbus-1/services/org\.gnome\.(Identity|OnlineAccounts)\.service" || true)
     RPM_VERIFY_BIN=${RPM_VERIFY_BIN:-0}
     if [[ "$RPM_VERIFY_ALL" -eq 0 ]]; then
       _emit_pass "RPM verify: all package files intact"
@@ -5278,9 +5336,11 @@ if [[ -f /etc/shells ]]; then
   _SHELL_COUNT=$(grep -cvE "^#|^$" /etc/shells 2>/dev/null || true)
   _emit_info "Valid shells in /etc/shells: ${_SHELL_COUNT:-0}"
   # Check for insecure shells
-  # F-217: extended legacy-shell list includes csh/tcsh and bare sh/dash
-  # (non-interactive but listed in /etc/shells).
-  for _ishell in /bin/csh /bin/tcsh /bin/sh /bin/dash; do
+  # F-217: legacy-shell list includes csh/tcsh and bare dash.
+  # F-311 (v3.6.1): /bin/sh removed from list — it's the universal POSIX
+  # symlink (sh→bash on RHEL/Fedora/Ubuntu, sh→dash on Debian). Required
+  # by countless scripts via #!/bin/sh shebang, not "legacy" in any sense.
+  for _ishell in /bin/csh /bin/tcsh /bin/dash; do
     if grep -q "^${_ishell}$" /etc/shells 2>/dev/null; then
       _emit_info "Legacy shell available: $_ishell"
     fi
@@ -6145,10 +6205,13 @@ check_data_privacy() {
     local jsize
     jsize="$(du -sb "$journal_dir" 2>/dev/null | cut -f1)"
     jsize="${jsize:-0}"
+    # F-316 (v3.6.1): cross-reference Section 19 — du -sb reports raw bytes
+    # incl. fs-overhead; journalctl --disk-usage reports what journald accounts
+    # for. Both numbers are correct, just different measurements.
     if [[ "$jsize" -gt 536870912 ]]; then
-      _emit_warn "Persistent journal /var/log/journal is $(_human_size "$jsize") on disk — may contain sensitive data"
+      _emit_warn "Persistent journal /var/log/journal is $(_human_size "$jsize") on disk (filesystem du-sb view; journalctl --disk-usage in S19 may differ) — may contain sensitive data"
     else
-      _emit_info "Persistent journal /var/log/journal is $(_human_size "$jsize") on disk"
+      _emit_info "Persistent journal /var/log/journal is $(_human_size "$jsize") on disk (filesystem du-sb view; journalctl --disk-usage in S19 may differ)"
     fi
   else
     _emit_pass "No persistent journal (logs in volatile memory only)"
@@ -6459,6 +6522,16 @@ check_media_privacy() {
     _emit_pass "No webcam devices found"
   fi
 
+  # F-313 (v3.6.1): PipeWire/PulseAudio client need DBUS_SESSION_BUS_ADDRESS
+  # in addition to XDG_RUNTIME_DIR — pure XDG_RUNTIME_DIR was insufficient on
+  # F43+ where wpctl returns empty silently. Adding the bus addr matches what
+  # other check sections (gsettings, kreadconfig) already do via the same
+  # `unix:path=/run/user/$uid/bus` pattern.
+  # F-319 (v3.6.1): capture STDERR (2>&1 instead of 2>/dev/null) so we can
+  # detect "no default audio source" / "Translate ID error" messages that
+  # wpctl emits on stderr when there's no mic hardware. Previously these
+  # silent-stderr returns produced empty $vol → mic_checked=0 → confusing
+  # "Could not check microphone status" on systems that simply have no mic.
   local mic_checked=0
   if command -v wpctl &>/dev/null; then
     while IFS=: read -r user _ uid _ _ _ shell; do
@@ -6466,14 +6539,20 @@ check_media_privacy() {
       [[ "$shell" == */nologin || "$shell" == */false ]] && continue
       [[ -S "/run/user/$uid/bus" ]] || continue
       local vol
-      vol=$(sudo -u "$user" XDG_RUNTIME_DIR="/run/user/$uid" wpctl get-volume @DEFAULT_AUDIO_SOURCE@ 2>/dev/null)
-      if [[ -n "$vol" ]]; then
+      vol=$(sudo -u "$user" \
+        XDG_RUNTIME_DIR="/run/user/$uid" \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
+        wpctl get-volume @DEFAULT_AUDIO_SOURCE@ 2>&1)
+      if echo "$vol" | grep -qE '^Volume:'; then
         mic_checked=1
         if echo "$vol" | grep -qi 'muted'; then
           _emit_pass "Microphone muted for $user"
         else
           _emit_info "Microphone active for $user: $vol"
         fi
+      elif echo "$vol" | grep -qiE 'invalid id|Translate ID error|node not found|No such object'; then
+        mic_checked=1
+        _emit_pass "No default audio source for $user (no microphone hardware)"
       fi
     done < /etc/passwd
   elif command -v pactl &>/dev/null; then
@@ -6481,9 +6560,13 @@ check_media_privacy() {
       _is_human_uid "$uid" || continue
       [[ "$shell" == */nologin || "$shell" == */false ]] && continue
       [[ -S "/run/user/$uid/bus" ]] || continue
+      local muted_raw
+      muted_raw=$(sudo -u "$user" \
+        XDG_RUNTIME_DIR="/run/user/$uid" \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
+        pactl get-source-mute @DEFAULT_SOURCE@ 2>&1)
       local muted
-      muted=$(sudo -u "$user" XDG_RUNTIME_DIR="/run/user/$uid" \
-        pactl get-source-mute @DEFAULT_SOURCE@ 2>/dev/null | awk '{print $2}')
+      muted=$(echo "$muted_raw" | awk '/^Mute:/ {print $2; exit}')
       if [[ -n "$muted" ]]; then
         mic_checked=1
         if [[ "$muted" == "yes" ]]; then
@@ -6491,6 +6574,9 @@ check_media_privacy() {
         else
           _emit_info "Microphone not muted for $user"
         fi
+      elif echo "$muted_raw" | grep -qiE 'no such|not found|failure|invalid'; then
+        mic_checked=1
+        _emit_pass "No default audio source for $user (no microphone hardware)"
       fi
     done < /etc/passwd
   fi
@@ -6567,8 +6653,26 @@ check_bluetooth_privacy() {
   should_skip "btprivacy" && return
   header "41" "BLUETOOTH PRIVACY"
 
-  if ! command -v bluetoothctl &>/dev/null || ! systemctl list-unit-files bluetooth.service &>/dev/null; then
-    _emit_info "Bluetooth not available on this system"
+  # F-318 (v3.6.1): split bluetoothctl-presence and unit-file-existence into
+  # separate checks. `systemctl list-unit-files bluetooth.service` returns
+  # rc=1 in some transient post-mask states even though the unit is loaded
+  # (bluetoothctl is on PATH, unit IS masked + enabled per `systemctl show`).
+  # `systemctl show -p UnitFileState` is the authoritative API: returns the
+  # unit's persistent state (enabled/disabled/masked/static/not-found) without
+  # depending on list-unit-files's edge cases. Differentiated INFO messages
+  # also tell users WHICH part is missing.
+  if ! command -v bluetoothctl &>/dev/null; then
+    _emit_info "Bluetooth not available — bluetoothctl not installed"
+    return
+  fi
+  local _bt_unit_state
+  _bt_unit_state=$(systemctl show bluetooth.service -p UnitFileState --value 2>/dev/null)
+  if [[ -z "$_bt_unit_state" || "$_bt_unit_state" == "not-found" ]]; then
+    _emit_info "Bluetooth not available — bluetooth.service unit not present"
+    return
+  fi
+  if [[ "$_bt_unit_state" == "masked" ]]; then
+    _emit_pass "Bluetooth service masked (cannot start)"
     return
   fi
 
