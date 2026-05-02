@@ -2,7 +2,7 @@
 
 Section-by-section overview of what the audit checks and why it matters.
 
-> **Version:** 3.6.0 | **Total Checks:** 390+ | **Sections:** 42
+> **Version:** 3.6.1 | **Total Checks:** 390+ | **Sections:** 42
 
 > **Cross-distro coverage** — Optimized for Fedora 43+ / RHEL 9+. Debian 12+ / Ubuntu 24.04+, Arch, openSUSE Tumbleweed work but some checks may produce false positives (Snapper-aware, GNOME-centric). DE-aware checks cover GNOME, KDE Plasma 5/6, XFCE, MATE, Cinnamon (since v3.5.0). See `--help` for `--skip` options to suppress sections that don't apply.
 
