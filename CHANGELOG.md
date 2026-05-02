@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.6.1] - 2026-04-30 / 2026-05-01 / 2026-05-02
 
-### 🐛 Live-ISO False-Positives + Reporting-Quality + Engineering Audit + Self-Audit + Live-Audit Self-Review (40 fixes)
+### 🐛 Live-ISO False-Positives + Reporting-Quality + Engineering Audit + Self-Audit + Live-Audit Self-Review (41 fixes)
 
 Three passes shipped under the same v3.6.1 tag:
 - **2026-04-30** — five context-aware classification fixes (F-273/274/275/281/282)
@@ -467,6 +467,22 @@ collectively raise the code-quality floor and align practice with policy.
   ID error|node not found|No such object` to emit a correct PASS:
   "No default audio source for $user (no microphone hardware)". pactl
   branch also got a consistent `awk '/^Mute:/'` extraction.
+
+- **F-320 — systemd-analyze score tier classification: float-compare via awk**
+  (Section 25 Systemd Security → _USER_SVCS tier). Previous form
+  `SCORE_INT=$(echo "$SCORE" | cut -d. -f1)` truncated the decimal
+  before integer comparison — `4.5 → "4" → -le 4 → PASS`,
+  `7.8 → "7" → -le 7 → INFO`. This misclassified boundary scores
+  against systemd-analyze's actual tier semantics:
+  - `<4.0`   = SAFE/OK         → PASS (well-sandboxed)
+  - `4.0-7.0` = MEDIUM/EXPOSED  → INFO
+  - `≥7.0`   = UNSAFE/DANGEROUS → WARN (high exposure)
+  Live-observed regressions before fix: NetworkManager 7.8 was INFO
+  (should WARN), fwupd 4.5 was PASS "well-sandboxed" (should INFO),
+  switcheroo-control 7.6 was INFO (should WARN). Now uses awk float
+  comparison `awk -v s="$SCORE" 'BEGIN { exit !(s < 4.0) }'` — three
+  services correctly re-classified, no rating-tier regression (98%
+  stable; WARN count rises by 2 but math-correct vs systemd intent).
 
 ### Notes
 
