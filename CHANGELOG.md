@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.6.1] - 2026-04-30 / 2026-05-01 / 2026-05-02
 
-### 🐛 Live-ISO False-Positives + Reporting-Quality + Engineering Audit + Self-Audit + Live-Audit Self-Review + Cosmetic Polish + Display Polish (55 fixes)
+### 🐛 Live-ISO False-Positives + Reporting-Quality + Engineering Audit + Self-Audit + Live-Audit Self-Review + Cosmetic Polish + Display Polish + Output Transparency (57 fixes)
 
 Three passes shipped under the same v3.6.1 tag:
 - **2026-04-30** — five context-aware classification fixes (F-273/274/275/281/282)
@@ -613,6 +613,34 @@ understand a single value.
   installed — supplemental only (AIDE + IMA already provide integrity
   coverage)` vs the previous always-pushy `recommended over rkhunter
   for 2026`.
+
+#### Fixed — Output Transparency (2026-05-03)
+
+Two visibility improvements found by line-by-line review of post-display-polish
+audit output. Both surface previously-hidden information without changing
+detection or scoring logic.
+
+- **F-335 — SELinux AVC top-3 source breakdown when known-benign**
+  (Section 2 SELinux & MAC). Previously emitted `698 AVC denials (recent) —
+  known-benign sources only` with no per-process counts. When unusual volume
+  comes from a single benign source (e.g. snapperd iterating container-
+  storage paths in btrfs snapshots producing 1000+ getattr denials),
+  the user had to manually run `ausearch | grep -oP 'comm=...' | sort |
+  uniq -c` to find which whitelisted process was responsible. Now appended:
+  `(top: snapperd:1388 usbguard-daemon:8 — MAC working correctly)`.
+  Same breakdown also added to the unexpected-process WARN message for
+  symmetry. Volume-anomalies in benign sources are now visible in the
+  one-line emit, no manual investigation needed.
+
+- **F-336 — switcheroo-control added to desktop-services visibility group**
+  (Section 7 Services & Daemons). switcheroo-control is Fedora Workstation
+  default-enabled but functionally needed only on hybrid-graphics laptops
+  (Optimus / AMD APU + dGPU / Intel iGPU + dGPU). On single-GPU workstations
+  it's pure attack surface that can safely be masked. Previously, when
+  masked, the service was completely invisible in the audit output —
+  surfaced now as `Service masked: switcheroo-control` PASS line,
+  consistent with cups/avahi/bluetooth pattern. When running on a hybrid
+  laptop: emits `running (desktop default — GPU power switching)` INFO.
 
 ### Notes
 

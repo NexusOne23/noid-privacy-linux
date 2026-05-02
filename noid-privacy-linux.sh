@@ -1326,10 +1326,18 @@ if require_cmd ausearch; then
       | grep -cvE "^(aide|usbguard-daemon|usbguard|systemd-logind|rpm|gdm|gdm-x-session|fwupd|systemd-update|snapperd)$" || true)
     _SE_UNEXPECTED=${_SE_UNEXPECTED//[^0-9]/}
     _SE_UNEXPECTED=${_SE_UNEXPECTED:-0}
+    # F-335 (v3.6.1): when classified as known-benign, append top-3 source
+    # breakdown so unusual volume from a single benign source (e.g. snapperd
+    # iterating container-storage in snapshots → 1000+ denials) becomes
+    # visible without forcing the user to dig through ausearch manually.
+    _SE_TOP_SOURCES=$(echo "$_SE_AVC_RAW" \
+      | grep -oP 'comm="\K[^"]+' \
+      | sort | uniq -c | sort -rn | head -3 \
+      | awk '{printf "%s:%s ", $2, $1}' | sed 's/ $//')
     if [[ "$_SE_UNEXPECTED" -eq 0 ]]; then
-      _emit_info "SELinux: $SE_DENIALS AVC denials (recent) — known-benign sources only (aide/usbguard/logind/snapperd — MAC working correctly)"
+      _emit_info "SELinux: $SE_DENIALS AVC denials (recent) — known-benign sources only (top: ${_SE_TOP_SOURCES:-none} — MAC working correctly)"
     else
-      _emit_warn "SELinux: $SE_DENIALS AVC denials ($_SE_UNEXPECTED from unexpected processes)"
+      _emit_warn "SELinux: $SE_DENIALS AVC denials ($_SE_UNEXPECTED from unexpected processes — top: ${_SE_TOP_SOURCES:-none})"
     fi
   else
     _emit_pass "SELinux: 0 AVC denials (recent)"
@@ -2112,6 +2120,13 @@ _SVC_GROUPS_DESKTOP=(
   "cups:printing"
   "avahi-daemon:Bonjour/mDNS discovery"
   "bluetooth.service bluetooth.socket:Bluetooth"
+  # F-336 (v3.6.1): switcheroo-control surfaces only when laptop has hybrid
+  # graphics (NVIDIA Optimus / AMD APU + dGPU / Intel iGPU + dGPU). On
+  # single-GPU workstations or systems where the iGPU has no outputs it is
+  # pure attack surface — gets enabled by default in Fedora Workstation but
+  # can safely be masked. Surfacing it in this group means "masked" emits PASS
+  # (visible) and "running" emits INFO (desktop default — context-aware).
+  "switcheroo-control:GPU power switching (hybrid graphics laptops)"
 )
 
 for _grp in "${_SVC_GROUPS_OFF[@]}"; do
