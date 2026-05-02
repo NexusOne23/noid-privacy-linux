@@ -7,11 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [3.6.1] - 2026-04-30 / 2026-05-01
+## [3.6.1] - 2026-04-30 / 2026-05-01 / 2026-05-02
 
-### 🐛 Live-ISO False-Positives + Reporting-Quality Patch (11 fixes)
+### 🐛 Live-ISO False-Positives + Reporting-Quality + Engineering Audit (25 fixes)
 
-Two passes shipped under the same v3.6.1 tag:
+Three passes shipped under the same v3.6.1 tag:
 - **2026-04-30** — five context-aware classification fixes (F-273/274/275/281/282)
   surfaced by running v3.6.0 against a Fedora 44 Live-ISO build. All
   semantically-incorrect findings that were always-bugs but only became
@@ -23,8 +23,14 @@ Two passes shipped under the same v3.6.1 tag:
   smarter classification of known-benign noise sources, and elimination
   of cosmetic glitches that confused users into thinking the script
   contradicts itself.
+- **2026-05-02** — fourteen engineering-quality fixes (F-291..F-304) from
+  a complete line-by-line code review of the v3.6.1 codebase. Categories:
+  bash anti-pattern sweep (`((var++))` × 18 sites), missing locale
+  defenses (`LC_ALL=C` × 8 sites), edge-case hardening, comment-vs-code
+  alignment, timestamp format completeness, and lint-script extension
+  to catch all 14 categories preemptively in CI.
 
-No detection logic was weakened in either pass.
+No detection logic was weakened in any pass.
 
 #### Fixed — Classification (2026-04-30)
 
@@ -176,6 +182,108 @@ No detection logic was weakened in either pass.
 - Module-signing message no longer prints with double-parens
   ("enforced (runtime (likely Secure Boot))" → "enforced (runtime —
   likely Secure Boot)"). Reads cleaner; same information.
+
+#### Fixed — Engineering Audit (2026-05-02)
+
+A complete line-by-line code review of the v3.6.1 codebase surfaced a
+batch of latent bugs, inconsistencies, and missed-pattern adherence to
+the script's own bug-pattern documentation. All 14 are non-security but
+collectively raise the code-quality floor and align practice with policy.
+
+- **F-291 — `((var++))` post-increment swept across 18 sites**.
+  Our own `feedback_bash_double_paren_increment.md` documented that bash
+  post-increment returns rc=1 when the var was 0, which bombs under
+  `set -e` (BATS default, common CI). The lesson was applied only to
+  `_emit_pass_agg` in v3.6.0; the central `_emit_pass/fail/warn/info`
+  counters and 14 other sites kept the unsafe form. Now uniformly
+  `var=$((var + 1))` everywhere; safe under any `set -e` context.
+  Lint pattern 9 added to prevent regression.
+
+- **F-292 — F-273 number-conflict resolved**. Number was used for two
+  unrelated changes: (a) the v3.6.0 entrypoint.sh double-run integration
+  (eliminated), and (b) the v3.6.1 Empty-PW + nullok severity coupling.
+  Comments referencing the obsolete usage now say "F-272 era integration"
+  for clarity; the active F-273 retains its meaning for the classification fix.
+
+- **F-293 — SELinux ausearch missed USER_AVC denials**. The `-m avc`
+  flag matches kernel AVC entries only; DBus method-call denials and
+  PolicyKit authorization denials emit as `USER_AVC` instead and were
+  silently dropped from the count. Now scans both: `-m avc -m user_avc`.
+  On systems with active polkit/dbus denials, the AVC count will rise
+  to reflect reality; whitelist still suppresses known-benign sources.
+
+- **F-294 — Octal arithmetic edge case in umask comparison**.
+  `_val_dec=$((8#${_v#0}))` errored with "8#: invalid arithmetic" when
+  `_v="0"` (the strip leaves an empty string, then `8#` is a syntax
+  error). Refactored into `_umask_to_dec()` helper with
+  `${v:-0}` default — never errors, always returns sensible value.
+
+- **F-295 — Permissions octal-compare made explicit**. The bash
+  `[[ "$ACTUAL" -lt "$EXPECTED" ]]` form happened to work for "0640"
+  vs "0644" by interpreting them as decimal (so 640 < 644 — coincidence
+  matched the intent). Now uses explicit `$((8#…))` arithmetic so the
+  intent is unambiguous and the form survives values where decimal vs
+  octal would have diverged (e.g. "0007" decimal=7 vs octal=7 — same;
+  "0010" decimal=10 vs octal=8 — would have given wrong ordering).
+
+- **F-296 — `grep nameserver` on resolv.conf wasn't anchored**. The
+  pattern matched commented entries (`# nameserver 1.2.3.4`) and
+  reported them as active DNS servers. Anchored to
+  `^[[:space:]]*nameserver[[:space:]]` to skip comments. Lint pattern
+  11 added to prevent regression.
+
+- **F-297 — Faillock username counting used arbitrary `grep -B50`**.
+  On heavy-failure systems with >50 entries per user, the user header
+  scrolled out of the B-context window and was undercounted. Replaced
+  with a state-machine awk that tracks the current user header and
+  counts users with at least one dated failure entry — works regardless
+  of entry density per user.
+
+- **F-298 — Locale gaps: `LC_ALL=C` added at 8 missing sites**.
+  Memory has Bug Pattern #1 (locale-dependent command output parsing)
+  documented since v3.5, but eight invocations still missed the
+  defensive prefix: `systemd-analyze blame`, four `resolvectl status`
+  calls, `virsh list --all`, `free`, three `systemd-analyze security`.
+  All emit translated labels on de_DE/fr_FR/etc. that English-anchored
+  greps silently miss. Lint pattern 10 added to prevent regression.
+
+- **F-299 — Doppelte defensive `_DELETED_LOGS` assignment cleaned up**.
+  Two consecutive `${var:-0}` defaults (one with quotes, one without)
+  were redundant. Now a single line.
+
+- **F-300 — Lint script extended from 8 to 11 patterns**:
+  Pattern 9 detects `((var++))`,
+  Pattern 10 detects locale-sensitive tools without `LC_ALL=C`,
+  Pattern 11 detects unanchored `grep nameserver` on resolv.conf.
+
+- **F-301 — UNSIGNED_MODULE conditional benign-classification**.
+  The kernel-taint check classified `UNSIGNED_MODULE` (bit 8192) as
+  benign unconditionally — correct on systems with NVIDIA-akmod /
+  DKMS modules MOK-signed locally, but a contradiction when
+  `module.sig_enforce=Y` is active (the kernel claims it blocks
+  unsigned modules, yet one slipped through). Now conditionally
+  removes UNSIGNED_MODULE from the benign set when sig_enforce is
+  active, so the contradiction surfaces as a WARN for investigation.
+
+- **F-302 — Comment-vs-implementation mismatch in `_de_check_lock_on_suspend`**.
+  Inline comment claimed a fallback to `lock-enabled` when
+  `ubuntu-lock-on-suspend` is missing, but the dispatcher implemented
+  no such fallback (the actual fallback is in Section 39's wrapper).
+  Comment rewritten to reflect reality: dispatcher returns single
+  result, section-side wrappers handle fallback decisions.
+
+- **F-303 — JSON `timestamp` now includes timezone offset**. Previous
+  form (`%Y-%m-%dT%H:%M:%S`) was ambiguous between UTC and local time,
+  breaking downstream JSON consumers that need to compare audit runs
+  across hosts in different zones. Now full RFC 3339 / ISO 8601 form
+  (`%Y-%m-%dT%H:%M:%S%z` → `2026-05-02T09:19:35+0200`).
+
+- **F-304 — Updates WARN now tier'd by backlog magnitude**. Previously
+  emitted identical WARN message for both 1 update and 100 updates.
+  Now three tiers: 1-10 ("small backlog — apply when convenient"),
+  11-50 ("noticeable backlog — schedule update soon"), >50 ("heavy
+  backlog — system maintenance overdue"). Same severity (WARN) but
+  honest signal about how far behind the system actually is.
 
 ### Notes
 

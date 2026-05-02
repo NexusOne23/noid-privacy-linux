@@ -112,7 +112,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # --ai and --json now combine: JSON output includes ai_prompt as a field
-# (eliminates the entrypoint.sh double-run problem, F-273)
+# (eliminates the entrypoint.sh double-run problem — F-272 era integration).
 
 should_skip() {
   local section="$1" s
@@ -182,7 +182,7 @@ _json_escape() {
 # (e.g. `pass` from password-store, `info` from texinfo) when scanning $PATH
 # via `command -v`. v3.6 refactor of pass()/fail()/warn()/info().
 _emit_pass() {
-  ((PASS++))
+  PASS=$((PASS + 1))
   if $JSON_MODE; then
     JSON_FINDINGS+=("{\"severity\":\"PASS\",\"section\":\"$(_json_escape "$CURRENT_SECTION")\",\"section_id\":\"$(_json_escape "${CURRENT_SECTION_ID:-unknown}")\",\"message\":\"$(_json_escape "$1")\"}")
   else
@@ -190,7 +190,7 @@ _emit_pass() {
   fi
 }
 _emit_fail() {
-  ((FAIL++))
+  FAIL=$((FAIL + 1))
   FAIL_MSGS+=("$1")
   if $JSON_MODE; then
     JSON_FINDINGS+=("{\"severity\":\"FAIL\",\"section\":\"$(_json_escape "$CURRENT_SECTION")\",\"section_id\":\"$(_json_escape "${CURRENT_SECTION_ID:-unknown}")\",\"message\":\"$(_json_escape "$1")\"}")
@@ -199,7 +199,7 @@ _emit_fail() {
   fi
 }
 _emit_warn() {
-  ((WARN++))
+  WARN=$((WARN + 1))
   WARN_MSGS+=("$1")
   if $JSON_MODE; then
     JSON_FINDINGS+=("{\"severity\":\"WARN\",\"section\":\"$(_json_escape "$CURRENT_SECTION")\",\"section_id\":\"$(_json_escape "${CURRENT_SECTION_ID:-unknown}")\",\"message\":\"$(_json_escape "$1")\"}")
@@ -208,7 +208,7 @@ _emit_warn() {
   fi
 }
 _emit_info() {
-  ((INFO++))
+  INFO=$((INFO + 1))
   if $JSON_MODE; then
     JSON_FINDINGS+=("{\"severity\":\"INFO\",\"section\":\"$(_json_escape "$CURRENT_SECTION")\",\"section_id\":\"$(_json_escape "${CURRENT_SECTION_ID:-unknown}")\",\"message\":\"$(_json_escape "$1")\"}")
   else
@@ -594,11 +594,15 @@ _de_check_idle_delay() {
 }
 
 # DE-aware lock-on-suspend check. Boolean.
+# F-302: dispatch primarily checks ubuntu-lock-on-suspend (Ubuntu-specific
+# key). Upstream GNOME doesn't ship this key — callers needing the fallback
+# must implement it explicitly (see Section 39 _de_lock_suspend_cb). This
+# generic dispatcher returns a single result; the section-side wrapper is
+# responsible for deciding whether to follow up with lock-enabled.
 _de_check_lock_on_suspend() {
   local cb="$1"
   case "$_DE_FAMILY" in
     gnome)
-      # ubuntu-lock-on-suspend (Ubuntu) → fallback lock-enabled (upstream)
       _gsettings_for_users "org.gnome.desktop.screensaver" "ubuntu-lock-on-suspend" "$cb"
       ;;
     kde)
@@ -1039,10 +1043,25 @@ else
     [32768]="LIVEPATCH"    [65536]="AUX"            [131072]="RANDSTRUCT"
     [262144]="TEST"
   )
-  # Bits that indicate user choice rather than runtime trouble
+  # Bits that indicate user choice rather than runtime trouble.
+  # F-301: UNSIGNED_MODULE (8192) is contextually-benign: legitimate when
+  # paired with NVIDIA-akmod / DKMS modules MOK-signed on the user's host
+  # (RPM-signing isn't possible for locally-built kernel modules). But it's
+  # a contradiction when module.sig_enforce=Y/Force: the kernel claims it
+  # blocks unsigned modules, yet here's evidence one slipped through. That's
+  # either a Secure-Boot bypass attempt, a stale-MOK race, or a kernel-bug
+  # finding worth surfacing. Conditional removes UNSIGNED_MODULE from the
+  # benign set when sig_enforce is active.
   declare -a _TAINT_BENIGN=(1 4096 1024 65536 131072 32768 8192 262144)
   declare -A _TAINT_BENIGN_MAP=()
   for _b in "${_TAINT_BENIGN[@]}"; do _TAINT_BENIGN_MAP[$_b]=1; done
+  # If module signing is enforced, UNSIGNED_MODULE in taint = real anomaly
+  if [[ -f /sys/module/module/parameters/sig_enforce ]] && \
+     [[ "$(cat /sys/module/module/parameters/sig_enforce 2>/dev/null)" == "Y" ]]; then
+    unset '_TAINT_BENIGN_MAP[8192]'
+  elif grep -qw "module.sig_enforce=1" /proc/cmdline 2>/dev/null; then
+    unset '_TAINT_BENIGN_MAP[8192]'
+  fi
 
   _decoded=""
   _all_benign=true
@@ -1131,7 +1150,7 @@ if require_cmd systemd-analyze; then
   if ! $JSON_MODE; then
     while read -r line; do
       printf "       %s\n" "$line"
-    done < <(systemd-analyze blame 2>/dev/null | head -5)
+    done < <(LC_ALL=C systemd-analyze blame 2>/dev/null | head -5)
   fi
 fi
 
@@ -1291,8 +1310,12 @@ fi
 #                       fine without the getattr — the denials are noise.
 # Only warn if AVC denials come from OTHER (unexpected) processes.
 if require_cmd ausearch; then
-  _SE_AVC_RAW=$(ausearch -m avc --start recent 2>/dev/null)
-  SE_DENIALS=$(echo "$_SE_AVC_RAW" | grep -c "type=AVC" || true)
+  # F-293: include USER_AVC denials (DBus / PolicyKit / userspace AVC).
+  # Previously `-m avc` matched only kernel AVC entries, silently dropping
+  # USER_AVC events that surface DBus method-call denials and PolicyKit
+  # authorization denials — both are real MAC-blocked actions worth seeing.
+  _SE_AVC_RAW=$(ausearch -m avc -m user_avc --start recent 2>/dev/null)
+  SE_DENIALS=$(echo "$_SE_AVC_RAW" | grep -cE "type=(AVC|USER_AVC)" || true)
   SE_DENIALS=${SE_DENIALS//[^0-9]/}
   SE_DENIALS=${SE_DENIALS:-0}
   if [[ "$SE_DENIALS" -gt 0 ]]; then
@@ -1698,7 +1721,7 @@ else
 fi
 
 # DNS
-DNS_SERVERS=$(grep nameserver /etc/resolv.conf 2>/dev/null | awk '{print $2}' | tr '\n' ' ')
+DNS_SERVERS=$(grep -E '^[[:space:]]*nameserver[[:space:]]' /etc/resolv.conf 2>/dev/null | awk '{print $2}' | tr '\n' ' ')
 _emit_info "DNS servers: $DNS_SERVERS"
 
 # DNS over VPN check
@@ -1711,7 +1734,7 @@ while read -r DNS; do
   elif [[ "$DNS" == "127.0.0.53" || "$DNS" == "127.0.0.54" ]]; then
     STUB_DNS=true
   fi
-done < <(grep nameserver /etc/resolv.conf 2>/dev/null | awk '{print $2}')
+done < <(grep -E '^[[:space:]]*nameserver[[:space:]]' /etc/resolv.conf 2>/dev/null | awk '{print $2}')
 if $VPN_DNS; then
   _emit_pass "DNS via VPN (private/CGNAT range)"
 elif $STUB_DNS && $VPN_UP; then
@@ -1720,9 +1743,9 @@ elif $STUB_DNS && $VPN_UP; then
   # F-062b: also accept global IPv6 DNS servers (e.g. ProtonVPN's
   # 2a07:b944::2:1) when resolvectl reports them on a VPN interface.
   if require_cmd resolvectl; then
-    _UPSTREAM_DNS=$(resolvectl status 2>/dev/null | awk '/Current DNS Server/ {print $4; exit}')
+    _UPSTREAM_DNS=$(LC_ALL=C resolvectl status 2>/dev/null | awk '/Current DNS Server/ {print $4; exit}')
     if [[ -z "$_UPSTREAM_DNS" ]]; then
-      _UPSTREAM_DNS=$(resolvectl status 2>/dev/null | grep -A1 "DNS Servers" | tail -1 | awk '{print $1}')
+      _UPSTREAM_DNS=$(LC_ALL=C resolvectl status 2>/dev/null | grep -A1 "DNS Servers" | tail -1 | awk '{print $1}')
     fi
     _DNS_VIA_VPN=false
     # 1. IPv4 private/CGNAT ranges (covers OpenVPN/WireGuard internal nets)
@@ -1735,7 +1758,7 @@ elif $STUB_DNS && $VPN_UP; then
     # 2. Any address family: check which link owns this DNS — covers global
     #    IPv6 addresses that are still tunnel-routed (Proton 2a07:b944::2:1)
     if ! $_DNS_VIA_VPN && [[ -n "$_UPSTREAM_DNS" ]]; then
-      _DNS_LINK=$(resolvectl status 2>/dev/null | awk -v dns="$_UPSTREAM_DNS" '
+      _DNS_LINK=$(LC_ALL=C resolvectl status 2>/dev/null | awk -v dns="$_UPSTREAM_DNS" '
         /^Link [0-9]+ \(/ { iface=$3; gsub(/[()]/, "", iface) }
         ($0 ~ "Current DNS Server: " dns "$") || ($0 ~ "DNS Servers:.*" dns) { print iface; exit }
       ')
@@ -1765,7 +1788,7 @@ fi
 # (F-065: extend beyond resolvectl-only).
 _DNSSEC_FOUND=false
 if require_cmd resolvectl; then
-  _DNSSEC_STATUS=$(resolvectl status 2>/dev/null | grep -oP 'DNSSEC\s*[=:]\s*\K\S+' | head -1)
+  _DNSSEC_STATUS=$(LC_ALL=C resolvectl status 2>/dev/null | grep -oP 'DNSSEC\s*[=:]\s*\K\S+' | head -1)
   if [[ "$_DNSSEC_STATUS" == "yes" ]]; then
     _emit_pass "DNSSEC validation: enabled (systemd-resolved)"
     _DNSSEC_FOUND=true
@@ -1828,7 +1851,7 @@ if [[ -f /proc/net/if_inet6 ]]; then
     # Skip VPN interfaces — their IPv6 is tunnel-internal, not a leak.
     # Use the global $_VPN_IFACE_REGEX so new families auto-propagate here.
     echo "$_v6iface" | grep -qE "$_VPN_IFACE_REGEX" && continue
-    ((IPV6_GLOBAL++))
+    IPV6_GLOBAL=$((IPV6_GLOBAL + 1))
   done < /proc/net/if_inet6
   IPV6_TOTAL=$(wc -l < /proc/net/if_inet6)
   if [[ "$IPV6_GLOBAL" -gt 0 ]]; then
@@ -2681,7 +2704,7 @@ if ! $_CENTRAL_AUTH; then
     _max_val=$(LC_ALL=C chage -l "$_user" 2>/dev/null \
       | awk -F: '/Maximum/{gsub(/^[[:space:]]+|[[:space:]]+$/,"",$2); print $2; exit}')
     case "$_max_val" in
-      never|-1|99999) ((_NO_EXPIRE++)) ;;
+      never|-1|99999) _NO_EXPIRE=$((_NO_EXPIRE + 1)) ;;
     esac
     # Check for expired passwords
     _pw_expired=$(LC_ALL=C chage -l "$_user" 2>/dev/null | grep "Password expires" | grep -ciE "password must be changed|expired" || true)
@@ -2782,7 +2805,7 @@ if [[ -f /etc/sudoers ]]; then
       _sf_perms=$(stat -c %a "$_sf" 2>/dev/null)
       if [[ "$_sf_perms" != "440" && "$_sf_perms" != "400" ]]; then
         _emit_warn "sudoers.d/$(basename "$_sf"): permissions $_sf_perms (should be 440)"
-        ((_SUDOERSD_BAD++))
+        _SUDOERSD_BAD=$((_SUDOERSD_BAD + 1))
       fi
     done
     [[ "$_SUDOERSD_BAD" -eq 0 ]] && _emit_pass "sudoers.d drop-ins: all permissions correct"
@@ -2861,6 +2884,10 @@ else
   # recommended range (027/077), this is treated as intentional split (PASS).
   _LOGIN_DEFS_UMASK="${_UMASK_BY_FILE[/etc/login.defs]:-}"
   _INTERACTIVE_MAX_UMASK=""   # most-restrictive non-login.defs value (highest octal)
+  # F-294: octal-decode helper — strip leading zeros safely. The naive form
+  # `8#${_v#0}` errors with "8#: invalid arithmetic" when _v="0" (strip leaves
+  # empty string). Defaulting to 0 keeps the comparison sane.
+  _umask_to_dec() { local v="${1#0}"; echo "$((8#${v:-0}))"; }
   for _file in "${!_UMASK_BY_FILE[@]}"; do
     [[ "$_file" == "/etc/login.defs" ]] && continue
     _v="${_UMASK_BY_FILE[$_file]}"
@@ -2868,15 +2895,15 @@ else
     if [[ -z "$_INTERACTIVE_MAX_UMASK" ]]; then
       _INTERACTIVE_MAX_UMASK="$_v"
     else
-      _val_dec=$((8#${_v#0}))
-      _max_dec=$((8#${_INTERACTIVE_MAX_UMASK#0}))
+      _val_dec=$(_umask_to_dec "$_v")
+      _max_dec=$(_umask_to_dec "$_INTERACTIVE_MAX_UMASK")
       [[ "$_val_dec" -gt "$_max_dec" ]] && _INTERACTIVE_MAX_UMASK="$_v"
     fi
   done
   _INTENTIONAL_SPLIT=0
   if [[ -n "$_LOGIN_DEFS_UMASK" && -n "$_INTERACTIVE_MAX_UMASK" ]]; then
-    _ldef_dec=$((8#${_LOGIN_DEFS_UMASK#0}))
-    _imax_dec=$((8#${_INTERACTIVE_MAX_UMASK#0}))
+    _ldef_dec=$(_umask_to_dec "$_LOGIN_DEFS_UMASK")
+    _imax_dec=$(_umask_to_dec "$_INTERACTIVE_MAX_UMASK")
     if [[ "$_imax_dec" -ge "$_ldef_dec" ]] && \
        [[ "$_INTERACTIVE_MAX_UMASK" =~ ^0*(27|77)$ ]]; then
       _INTENTIONAL_SPLIT=1
@@ -2904,8 +2931,18 @@ if require_cmd faillock; then
   LOCKED=$(echo "$_FAILLOCK_OUT" | grep -cE "^[0-9]{4}-[0-9]{2}-[0-9]{2}" || true)
   LOCKED=${LOCKED:-0}
   if [[ "$LOCKED" -gt 0 ]]; then
-    # Count unique usernames with failures
-    _LOCKED_USERS=$(echo "$_FAILLOCK_OUT" | grep -B50 "^[0-9]\{4\}-" | grep -c "^[a-zA-Z].*:" || true)
+    # F-297: count unique usernames with failures via state-machine awk.
+    # Previous form `grep -B50 "^[0-9]\{4\}-"` was arbitrary — on heavy-failure
+    # systems with >50 entries per user, the user header scrolled out of the
+    # B-context window and was undercounted. State-machine tracks current user
+    # header and counts users that have ≥1 dated entry under them.
+    _LOCKED_USERS=$(echo "$_FAILLOCK_OUT" | awk '
+      /^[a-zA-Z][a-zA-Z0-9._-]*:$/ { user=$0; has_failure=0; next }
+      /^[0-9]{4}-[0-9]{2}-[0-9]{2}/ {
+        if (user != "" && !has_failure) { count++; has_failure=1 }
+      }
+      END { print count+0 }
+    ')
     _LOCKED_USERS=${_LOCKED_USERS:-0}
     _emit_warn "Faillock: $LOCKED failed attempt(s) across $_LOCKED_USERS account(s)"
   else
@@ -3104,8 +3141,11 @@ for FILE in "${!PERM_CHECKS[@]}"; do
     ACTUAL=$(stat -c %a "$FILE" 2>/dev/null)
     if (( (8#${ACTUAL:-777} & ~8#$EXPECTED) == 0 )); then
       # Annotate when stricter-than-expected (e.g. shadow=0 vs expected 640)
-      # to avoid users panicking at "Permissions /etc/shadow: 0" output (F-115)
-      if [[ "$ACTUAL" -lt "$EXPECTED" ]]; then
+      # to avoid users panicking at "Permissions /etc/shadow: 0" output (F-115).
+      # F-295: explicit octal compare via $((8#…)). The bash [[ -lt ]] form
+      # was actually treating these as decimal (so 0640 < 0644 worked by
+      # accident), making the intent unclear. Octal-explicit is unambiguous.
+      if [[ $((8#${ACTUAL:-777})) -lt $((8#$EXPECTED)) ]]; then
         _emit_pass "Permissions $FILE: $ACTUAL (stricter than recommended $EXPECTED)"
       else
         _emit_pass "Permissions $FILE: $ACTUAL"
@@ -3263,12 +3303,18 @@ fi
 
 if [[ "$UPDATES" == "0" ]]; then
   _emit_pass "System up to date (0 updates)"
-elif [[ "$UPDATES" != "?" ]] && [[ "$UPDATES" -le 10 ]]; then
-  _emit_warn "$UPDATES updates available"
-elif [[ "$UPDATES" != "?" ]]; then
-  _emit_warn "$UPDATES updates available!"
-else
+elif [[ "$UPDATES" == "?" ]]; then
   _emit_info "Could not check for updates"
+elif [[ "$UPDATES" -le 10 ]]; then
+  # F-304: tier the WARN — small backlog (1-10) is normal for daily maintenance,
+  # 11-50 is "noticeable backlog", >50 starts looking like maintenance neglect.
+  # Same severity (WARN) but the message differentiates so users get an honest
+  # signal of how far behind they actually are.
+  _emit_warn "$UPDATES updates available (small backlog — apply when convenient)"
+elif [[ "$UPDATES" -le 50 ]]; then
+  _emit_warn "$UPDATES updates available (noticeable backlog — schedule update soon)"
+else
+  _emit_warn "$UPDATES updates available (heavy backlog — system maintenance overdue)"
 fi
 
 # Security Updates
@@ -3687,7 +3733,7 @@ fi
 # as "Running VMs: 0" while a qemu process consumed 100%+ CPU.
 _VM_LIBVIRT=0
 if require_cmd virsh; then
-  _VM_LIBVIRT=$(virsh list --all 2>/dev/null | grep -cE "running|paused" | ccount)
+  _VM_LIBVIRT=$(LC_ALL=C virsh list --all 2>/dev/null | grep -cE "running|paused" | ccount)
   _emit_info "Running VMs (libvirt-managed): $_VM_LIBVIRT"
 fi
 _QEMU_TOTAL=0
@@ -3856,7 +3902,6 @@ fi
 # Deleted log files still in use (file handle open but file deleted — logs lost on restart)
 # shellcheck disable=SC2012  # ls -la inside -exec is the canonical way to surface (deleted) marker
 _DELETED_LOGS=$(find /proc/*/fd -lname '*/log/*' -exec ls -la {} \; 2>/dev/null | grep -c "(deleted)")
-_DELETED_LOGS="${_DELETED_LOGS:-0}"
 _DELETED_LOGS=${_DELETED_LOGS:-0}
 if [[ "$_DELETED_LOGS" -eq 0 ]]; then
   _emit_pass "No deleted log files in use"
@@ -3873,7 +3918,7 @@ if systemctl is-active rsyslog syslog-ng &>/dev/null; then
   _EMPTY_LOGS=0
   for _logf in /var/log/messages /var/log/syslog /var/log/auth.log /var/log/secure /var/log/kern.log; do
     if [[ -f "$_logf" && ! -s "$_logf" ]]; then
-      ((_EMPTY_LOGS++))
+      _EMPTY_LOGS=$((_EMPTY_LOGS + 1))
       _emit_warn "Empty log file: $_logf (logging may be broken)"
     fi
   done
@@ -3912,7 +3957,7 @@ MEM_AVAIL=$(free -h | awk '/^Mem:/ {print $7}')
 # F-158: use 'available' (column 7) instead of 'used' — Linux aggressively
 # caches files which inflates 'used'. 'available' is what apps can claim
 # without paging.
-MEM_AVAIL_PCT=$(free | awk '/^Mem:/ {printf "%.0f", ($7/$2)*100}')
+MEM_AVAIL_PCT=$(LC_ALL=C free | awk '/^Mem:/ {printf "%.0f", ($7/$2)*100}')
 _emit_info "RAM: $MEM_USED / $MEM_TOTAL (${MEM_AVAIL_PCT}% available, $MEM_AVAIL free)"
 if [[ "$MEM_AVAIL_PCT" -lt 5 ]]; then
   _emit_fail "RAM: only ${MEM_AVAIL_PCT}% available (critical)"
@@ -4277,20 +4322,20 @@ if require_cmd systemd-analyze; then
   # User-facing services (should be sandboxed — high score = problem)
   _USER_SVCS="NetworkManager ModemManager colord fwupd power-profiles-daemon switcheroo-control"
   for SVC in $_SECURITY_SVCS; do
-    SCORE=$(systemd-analyze security "$SVC" 2>/dev/null | tail -1 | grep -oP '\d+\.\d+' || echo "N/A")
+    SCORE=$(LC_ALL=C systemd-analyze security "$SVC" 2>/dev/null | tail -1 | grep -oP '\d+\.\d+' || echo "N/A")
     if [[ "$SCORE" != "N/A" ]]; then
       _emit_info "systemd-security $SVC: $SCORE (security service, needs root)"
     fi
   done
   for SVC in $_HARDWARE_SVCS; do
-    SCORE=$(systemd-analyze security "$SVC" 2>/dev/null | tail -1 | grep -oP '\d+\.\d+' || echo "N/A")
+    SCORE=$(LC_ALL=C systemd-analyze security "$SVC" 2>/dev/null | tail -1 | grep -oP '\d+\.\d+' || echo "N/A")
     if [[ "$SCORE" != "N/A" ]]; then
       _emit_info "systemd-security $SVC: $SCORE (system service, needs hardware access)"
     fi
   done
   _HIGH_EXPOSURE=0
   for SVC in $_USER_SVCS; do
-    SCORE=$(systemd-analyze security "$SVC" 2>/dev/null | tail -1 | grep -oP '\d+\.\d+' || echo "N/A")
+    SCORE=$(LC_ALL=C systemd-analyze security "$SVC" 2>/dev/null | tail -1 | grep -oP '\d+\.\d+' || echo "N/A")
     [[ "$SCORE" == "N/A" ]] && continue
     SCORE_INT=$(echo "$SCORE" | cut -d. -f1)
     if [[ "$SCORE_INT" -le 4 ]]; then
@@ -4299,7 +4344,7 @@ if require_cmd systemd-analyze; then
       _emit_info "systemd-security $SVC: $SCORE"
     else
       _emit_warn "systemd-security $SVC: $SCORE (high exposure — poor sandboxing)"
-      ((_HIGH_EXPOSURE++))
+      _HIGH_EXPOSURE=$((_HIGH_EXPOSURE + 1))
     fi
   done
   if [[ "$_HIGH_EXPOSURE" -eq 0 ]]; then
@@ -4422,7 +4467,7 @@ if systemctl is-active chronyd &>/dev/null || systemctl is-active chrony &>/dev/
     while read -r _cs_line; do
       # chronyc sources: field 3 is stratum, lines starting with ? or x are problematic
       if echo "$_cs_line" | grep -qE "^\?|^x"; then
-        ((_BAD_SOURCES++))
+        _BAD_SOURCES=$((_BAD_SOURCES + 1))
       fi
     done < <(chronyc sources 2>/dev/null | tail -n+3)
     if [[ "$_BAD_SOURCES" -gt 0 ]]; then
@@ -4689,7 +4734,7 @@ if [[ -d /proc/sys/fs/binfmt_misc ]]; then
   for _bf_entry in /proc/sys/fs/binfmt_misc/*; do
     [[ -e "$_bf_entry" ]] || continue
     case "$(basename "$_bf_entry")" in register|status) continue ;; esac
-    ((_BINFMT_COUNT++))
+    _BINFMT_COUNT=$((_BINFMT_COUNT + 1))
   done
   _BINFMT_COUNT=${_BINFMT_COUNT:-0}
   if [[ "$_BINFMT_COUNT" -eq 0 ]]; then
@@ -5167,24 +5212,24 @@ IFS=: read -ra PATH_DIRS <<< "$PATH"
 for DIR in "${PATH_DIRS[@]}"; do
   if [[ -z "$DIR" ]]; then
     _emit_fail "PATH contains empty entry (equivalent to '.' — privilege escalation risk)"
-    ((PATH_ISSUES++))
+    PATH_ISSUES=$((PATH_ISSUES + 1))
     continue
   fi
   if [[ "$DIR" == "." ]]; then
     _emit_fail "PATH contains '.' (current directory — privilege escalation risk)"
-    ((PATH_ISSUES++))
+    PATH_ISSUES=$((PATH_ISSUES + 1))
     continue
   fi
   if [[ "$DIR" != /* ]]; then
     _emit_fail "PATH contains relative entry: $DIR (privilege escalation risk)"
-    ((PATH_ISSUES++))
+    PATH_ISSUES=$((PATH_ISSUES + 1))
     continue
   fi
   # Skip symlinks (e.g. /sbin -> /usr/sbin on Fedora)
   [[ -L "$DIR" ]] && continue
   if [[ -d "$DIR" ]] && [[ "$(stat -c %a "$DIR" 2>/dev/null)" =~ [2367]$ ]]; then
     _emit_warn "World-writable directory in PATH: $DIR"
-    ((PATH_ISSUES++))
+    PATH_ISSUES=$((PATH_ISSUES + 1))
   fi
 done
 if [[ "$PATH_ISSUES" -eq 0 ]]; then
@@ -5564,7 +5609,7 @@ check_app_telemetry() {
       # High-risk patterns
       if echo "$perms" | grep -qE "filesystems=(host([;,[:space:]]|$)|.*[;,]host([;,[:space:]]|$))|filesystems=(host-os([;,[:space:]]|$)|.*[;,]host-os([;,[:space:]]|$))|filesystems=(home([;,[:space:]]|$)|.*[;,]home([;,[:space:]]|$))|org\.freedesktop\.Flatpak=talk"; then
         _emit_warn "Flatpak '$app' has high-risk permissions (host/home filesystem or Flatpak portal)"
-        ((dangerous++))
+        dangerous=$((dangerous + 1))
       fi
       # Medium-risk: raw device access (info, not warn)
       if echo "$perms" | grep -qE "devices=(all([;,[:space:]]|$)|.*[;,]all([;,[:space:]]|$))"; then
@@ -6737,10 +6782,10 @@ check_keyring_security() {
       secrets_found=1
     elif (( (8#${fperms:-777} & 8#070) != 0 )); then
       _emit_warn "Plaintext secret file (group-accessible $fperms): $f"
-      ((secrets_warn++))
+      secrets_warn=$((secrets_warn + 1))
     else
       _emit_info "Plaintext secret file (private $fperms — consider encrypting): $f"
-      ((secrets_info++))
+      secrets_info=$((secrets_info + 1))
     fi
   done < <(_safe_find_home -maxdepth 6 -type f -size +0c \
     \( -name ".env" -o -name ".env.local" -o -name ".env.production" \
@@ -6986,7 +7031,10 @@ fi
 if $JSON_MODE; then
   # --- JSON Output ---
   TOTAL=$((PASS + FAIL + WARN + INFO))
-  JSON_TIMESTAMP=$(date '+%Y-%m-%dT%H:%M:%S')
+  # F-303: include timezone offset (RFC 3339 / ISO 8601 full form). Without
+  # %z the timestamp was ambiguous between UTC and local time, breaking
+  # downstream JSON consumers that need to compare audit runs across hosts.
+  JSON_TIMESTAMP=$(date '+%Y-%m-%dT%H:%M:%S%z')
   printf '{\n'
   printf '  "version": "%s",\n' "$NOID_PRIVACY_VERSION"
   printf '  "timestamp": "%s",\n' "$JSON_TIMESTAMP"
@@ -7013,7 +7061,8 @@ if $JSON_MODE; then
     fi
   done
   printf '  ]'
-  # F-273: embed ai_prompt as JSON field when --ai was set
+  # Embed ai_prompt as JSON field when --ai was set (F-272 era integration —
+  # eliminates the entrypoint.sh double-run for action wrapper).
   if $AI_MODE && [[ -n "$_AI_TEXT" ]]; then
     printf ',\n  "ai_prompt": "%s"\n' "$(_json_escape "$_AI_TEXT")"
   else
