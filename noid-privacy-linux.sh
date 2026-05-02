@@ -2310,35 +2310,61 @@ while read -r line; do
 done < <(ss -tlnp 2>/dev/null | tail -n+2)
 
 sub_header "UDP"
+# F-322 (v3.6.1): dedupe identical (address, port, process) bindings into a
+# single line with "[×N multi-interface]" suffix. wsdd binds the same multicast
+# group (239.255.255.250:3702 / [ff02::c]:3702) per-interface, producing 3-6
+# visually identical entries that clutter the report. Each unique listener now
+# emits exactly one finding regardless of how many interfaces it's bound on —
+# duplicates are not additional security findings, just per-interface socket
+# instances of the same logical service.
+declare -A _UDP_KEY_COUNT=()
+declare -A _UDP_KEY_LINE=()
+declare -a _UDP_KEY_ORDER=()
 while read -r line; do
   [[ -z "$line" ]] && continue
   ADDR=$(echo "$line" | awk '{print $4}')
   PROC=$(echo "$line" | grep -oP 'users:\(\("\K[^"]+' || echo "kernel")
+  key="${ADDR}|${PROC}"
+  if [[ -z "${_UDP_KEY_LINE[$key]+x}" ]]; then
+    _UDP_KEY_ORDER+=("$key")
+    _UDP_KEY_LINE[$key]="$line"
+    _UDP_KEY_COUNT[$key]=1
+  else
+    _UDP_KEY_COUNT[$key]=$((${_UDP_KEY_COUNT[$key]} + 1))
+  fi
+done < <(ss -ulnp 2>/dev/null | tail -n+2)
+for key in "${_UDP_KEY_ORDER[@]}"; do
+  line="${_UDP_KEY_LINE[$key]}"
+  count="${_UDP_KEY_COUNT[$key]}"
+  ADDR=$(echo "$line" | awk '{print $4}')
+  PROC=$(echo "$line" | grep -oP 'users:\(\("\K[^"]+' || echo "kernel")
+  _multi_suffix=""
+  [[ "$count" -gt 1 ]] && _multi_suffix=" [×${count} multi-interface]"
   case "$(_classify_listener "$ADDR")" in
     loopback)
-      _emit_pass "UDP $ADDR ($PROC) — localhost only" ;;
+      _emit_pass "UDP $ADDR ($PROC) — localhost only${_multi_suffix}" ;;
     bridge)
-      _emit_info "UDP $ADDR ($PROC) — VM/container bridge (intra-host)" ;;
+      _emit_info "UDP $ADDR ($PROC) — VM/container bridge (intra-host)${_multi_suffix}" ;;
     vpn)
-      _emit_info "UDP $ADDR ($PROC) — VPN tunnel address" ;;
+      _emit_info "UDP $ADDR ($PROC) — VPN tunnel address${_multi_suffix}" ;;
     *)
       if echo "$PROC" | grep -qiE "wireguard|wg|vpn"; then
-        _emit_pass "UDP $ADDR (VPN/WireGuard)"
+        _emit_pass "UDP $ADDR (VPN/WireGuard)${_multi_suffix}"
       elif [[ "$PROC" == "kernel" ]]; then
         # Kernel-owned UDP sockets can be WireGuard, IPVS, conntrack, etc.
         if ip link show type wireguard 2>/dev/null | grep -q .; then
-          _emit_info "UDP $ADDR (kernel — likely WireGuard)"
+          _emit_info "UDP $ADDR (kernel — likely WireGuard)${_multi_suffix}"
         else
-          _emit_info "UDP $ADDR (kernel — no WireGuard interfaces found)"
+          _emit_info "UDP $ADDR (kernel — no WireGuard interfaces found)${_multi_suffix}"
         fi
       elif has_firewall_block_on_phys; then
-        _emit_info "UDP $ADDR ($PROC) — externally bound, but firewall/kill-switch blocks"
+        _emit_info "UDP $ADDR ($PROC) — externally bound, but firewall/kill-switch blocks${_multi_suffix}"
       else
-        _emit_warn "UDP $ADDR ($PROC) — external"
+        _emit_warn "UDP $ADDR ($PROC) — external${_multi_suffix}"
       fi
       ;;
   esac
-done < <(ss -ulnp 2>/dev/null | tail -n+2)
+done
 
 # Connections to unusual ports
 sub_header "Unusual destination ports"
@@ -2354,7 +2380,22 @@ UNUSUAL_PORTS=$(while read -r port; do
   esac
 done < <(ss -tnp state established 2>/dev/null | awk '{print $4}' | grep -oP ':\K\d+$' | sort -n | uniq))
 if [[ -n "$UNUSUAL_PORTS" ]]; then
-  _emit_info "Connections to non-standard ports: $(echo "$UNUSUAL_PORTS" | tr '\n' ' ')"
+  # F-324 (v3.6.1): annotate well-known app-internal ports so users don't
+  # treat them as suspicious. Map common privacy-tooling ports to their owner;
+  # everything else is shown as bare port number.
+  _annotated_ports=""
+  while read -r _p; do
+    [[ -z "$_p" ]] && continue
+    case "$_p" in
+      65432) _annotated_ports+="$_p (protonvpn-app control) " ;;
+      11434) _annotated_ports+="$_p (Ollama LLM) " ;;
+      9090)  _annotated_ports+="$_p (Cockpit web UI) " ;;
+      9443)  _annotated_ports+="$_p (Portainer / NetBox) " ;;
+      8000)  _annotated_ports+="$_p (Python http.server / Django dev) " ;;
+      *)     _annotated_ports+="$_p " ;;
+    esac
+  done <<< "$UNUSUAL_PORTS"
+  _emit_info "Connections to non-standard ports: ${_annotated_ports% }"
 else
   _emit_pass "All connections on standard ports"
 fi
@@ -4220,9 +4261,13 @@ if ! $JSON_MODE; then
 fi
 
 sub_header "Routing"
+# F-323 (v3.6.1): use 2-space prefix matching the network interfaces listing
+# directly above. Previous 7-space prefix was visually orphaned — this section
+# has its own sub_header but the per-line indentation should still match the
+# raw-data style used for interfaces (`  lo (UNKNOWN): ...`).
 if ! $JSON_MODE; then
   while read -r route; do
-    printf "       %s\n" "$route"
+    printf "  %s\n" "$route"
   done < <(ip route show 2>/dev/null)
 fi
 
@@ -4597,9 +4642,20 @@ fi
 
 # F-312 (v3.6.1): `who` reports SESSIONS not USERS. One user with 3 ttys
 # shows as 3 lines. Distinguish session count from unique-user count.
+# F-325 (v3.6.1): when unique-user count exceeds the number of human users
+# in /etc/passwd (typically 1 on personal desktops), the extra "user" is
+# almost always a display-manager pseudo-user (gdm/sddm/lightdm). Annotate
+# so users don't think a real second account is signed in.
 SESSIONS_LOGGED=$(who | wc -l)
 USERS_UNIQUE=$(who | awk '{print $1}' | sort -u | wc -l)
-_emit_info "Currently logged in: $SESSIONS_LOGGED session(s) across $USERS_UNIQUE unique user(s)"
+_HUMAN_USER_COUNT=$(awk -F: -v min="$_NOID_UID_MIN" -v max="$_NOID_UID_MAX" '
+  $3 >= min && $3 <= max && $7 !~ /\/(nologin|false)$/ {c++} END {print c+0}
+' /etc/passwd)
+if [[ "$USERS_UNIQUE" -gt "$_HUMAN_USER_COUNT" ]]; then
+  _emit_info "Currently logged in: $SESSIONS_LOGGED session(s) across $USERS_UNIQUE unique user(s) — extra over $_HUMAN_USER_COUNT human user(s) is likely a display-manager session (gdm/sddm/lightdm)"
+else
+  _emit_info "Currently logged in: $SESSIONS_LOGGED session(s) across $USERS_UNIQUE unique user(s)"
+fi
 
 # F-186: sudo usage count exposes admin-activity rhythm. On multi-user systems
 # this leaks behavioral metadata when audit output is shared. Bucketize by
@@ -6218,10 +6274,16 @@ check_data_privacy() {
     # F-316 (v3.6.1): cross-reference Section 19 — du -sb reports raw bytes
     # incl. fs-overhead; journalctl --disk-usage reports what journald accounts
     # for. Both numbers are correct, just different measurements.
+    # F-326 (v3.6.1): explain typical reasons for the S19↔S38 size discrepancy
+    # (often 30-50%): journald excludes orphaned/uncatalogued .journal files,
+    # while du counts them; Btrfs CoW + snapshots inflate du for
+    # /var/log/journal subvolumes; xfs/ext4 fs-block alignment adds slack;
+    # uncompressed user.persistent.journal files vs journald's compressed
+    # accounting. None of these differences indicate a bug.
     if [[ "$jsize" -gt 536870912 ]]; then
-      _emit_warn "Persistent journal /var/log/journal is $(_human_size "$jsize") on disk (filesystem du-sb view; journalctl --disk-usage in S19 may differ) — may contain sensitive data"
+      _emit_warn "Persistent journal /var/log/journal is $(_human_size "$jsize") on disk (filesystem du-sb view; differs from journalctl --disk-usage in S19 — typical fs-overhead/CoW/orphan-file delta) — may contain sensitive data"
     else
-      _emit_info "Persistent journal /var/log/journal is $(_human_size "$jsize") on disk (filesystem du-sb view; journalctl --disk-usage in S19 may differ)"
+      _emit_info "Persistent journal /var/log/journal is $(_human_size "$jsize") on disk (filesystem du-sb view; differs from journalctl --disk-usage in S19 — typical fs-overhead/CoW/orphan-file delta)"
     fi
   else
     _emit_pass "No persistent journal (logs in volatile memory only)"

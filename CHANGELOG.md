@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.6.1] - 2026-04-30 / 2026-05-01 / 2026-05-02
 
-### 🐛 Live-ISO False-Positives + Reporting-Quality + Engineering Audit + Self-Audit + Live-Audit Self-Review (42 fixes)
+### 🐛 Live-ISO False-Positives + Reporting-Quality + Engineering Audit + Self-Audit + Live-Audit Self-Review + Cosmetic Polish (47 fixes)
 
 Three passes shipped under the same v3.6.1 tag:
 - **2026-04-30** — five context-aware classification fixes (F-273/274/275/281/282)
@@ -492,6 +492,50 @@ collectively raise the code-quality floor and align practice with policy.
   remain WARN (correct per systemd "UNSAFE"). 98% score unchanged.
   Lesson logged: when re-tiering an integer-truncation bug, verify
   boundary against the source's own categorization, not a guess.
+
+#### Fixed — Cosmetic Polish (2026-05-02)
+
+- **F-322 — UDP listener dedup with multi-interface counter** (Section 8 Open
+  Ports → UDP). wsdd binds the same multicast group (`239.255.255.250:3702`,
+  `[ff02::c]:3702`) per network interface, producing 3-6 visually identical
+  ss entries that cluttered the report. UDP loop now collects `(address,
+  process)` keys into associative arrays, dedupes, and emits each unique
+  listener once with `[×N multi-interface]` suffix when N>1. Each unique
+  listener increments its severity counter exactly once (duplicates aren't
+  additional findings — they're per-interface socket instances of one
+  logical service).
+
+- **F-323 — Routing display indentation matches network interfaces above**
+  (Section 22 Network Interfaces → Routing). Interfaces listing uses
+  2-space prefix (`  lo (UNKNOWN): ...`); the Routing sub-block had a
+  visually orphaned 7-space prefix (`       default via ...`). Now
+  consistent 2-space across the whole section.
+
+- **F-324 — Non-standard port annotation for known privacy-tooling**
+  (Section 8 Open Ports → Unusual destination ports). Bare port number
+  `65432` left users guessing what it was. Common ports now annotated with
+  owner: `65432 (protonvpn-app control)`, `11434 (Ollama LLM)`,
+  `9090 (Cockpit web UI)`, `9443 (Portainer / NetBox)`,
+  `8000 (Python http.server / Django dev)`. Unknown ports still shown bare.
+
+- **F-325 — Display-manager session hint when unique-user count exceeds
+  human users** (Section 29 Recent Logins). When `who` shows more unique
+  users than there are human accounts in /etc/passwd (typically 1 on
+  personal desktops), the extra "user" is almost always a display-manager
+  pseudo-session (gdm/sddm/lightdm). Now annotated:
+  "extra over N human user(s) is likely a display-manager session
+  (gdm/sddm/lightdm)" — prevents users from suspecting an unexpected
+  second account is signed in.
+
+- **F-326 — Journal storage S19↔S38 discrepancy explanation expanded**
+  (Section 38 Data & Disk Privacy → Persistent journal). F-316 added a
+  cross-reference between Section 19's `journalctl --disk-usage` view and
+  Section 38's `du -sb /var/log/journal` view, but the typical 30-50%
+  delta still confused users. Message now includes the cause:
+  "fs-overhead/CoW/orphan-file delta" — the four common reasons (journald
+  excludes orphan .journal files, Btrfs CoW + snapshots inflate du, fs
+  block-alignment slack, compression accounting differences). None
+  indicate a bug; it's how journal storage works.
 
 ### Notes
 
