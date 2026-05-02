@@ -3951,9 +3951,9 @@ if [[ -n "$LOAD_1" ]]; then
   fi
 fi
 
-MEM_TOTAL=$(free -h | awk '/^Mem:/ {print $2}')
-MEM_USED=$(free -h | awk '/^Mem:/ {print $3}')
-MEM_AVAIL=$(free -h | awk '/^Mem:/ {print $7}')
+MEM_TOTAL=$(LC_ALL=C free -h | awk '/^Mem:/ {print $2}')
+MEM_USED=$(LC_ALL=C free -h | awk '/^Mem:/ {print $3}')
+MEM_AVAIL=$(LC_ALL=C free -h | awk '/^Mem:/ {print $7}')
 # F-158: use 'available' (column 7) instead of 'used' — Linux aggressively
 # caches files which inflates 'used'. 'available' is what apps can claim
 # without paging.
@@ -3967,8 +3967,8 @@ else
   _emit_pass "RAM: ${MEM_AVAIL_PCT}% available"
 fi
 
-SWAP_TOTAL=$(free -h | awk '/^Swap:/ {print $2}')
-SWAP_USED=$(free -h | awk '/^Swap:/ {print $3}')
+SWAP_TOTAL=$(LC_ALL=C free -h | awk '/^Swap:/ {print $2}')
+SWAP_USED=$(LC_ALL=C free -h | awk '/^Swap:/ {print $3}')
 if [[ "$SWAP_TOTAL" != "0B" ]] && [[ "$SWAP_TOTAL" != "0" ]]; then
   _emit_info "Swap: $SWAP_USED / $SWAP_TOTAL"
 else
@@ -4909,7 +4909,7 @@ while IFS=: read -r _huser _ _huid _ _ _hhome _; do
           printf "       %s\n" "${line:0:90}"
         done
       fi
-      ((_SUSPICIOUS_HIST += _SH_SUSP))
+      _SUSPICIOUS_HIST=$((_SUSPICIOUS_HIST + _SH_SUSP))
     fi
   done
 done < /etc/passwd

@@ -126,17 +126,23 @@ if [[ -n "$violations" ]]; then
   EXIT_CODE=1
 fi
 
-# --- Pattern 9: ((var++)) post-increment counter — bombs under set -e ---
-# bash post-increment expression returns rc=1 when var=0 (the OLD value).
+# --- Pattern 9: ((var <op>)) arithmetic returning value — bombs under set -e ---
+# Bash arithmetic-command returns rc=1 when result == 0:
+#   ((var++))   — post-increment, returns OLD value (false when OLD was 0)
+#   ((var--))   — post-decrement, returns OLD value (false when OLD was 0)
+#   ((var+=N))  — compound-assign, returns NEW value (false when NEW becomes 0)
+#   ((var-=N))  — same risk; ((var*=N))/((var/=N))/((var%=N)) too
 # Under set -e (BATS default, many CI scripts) this aborts the calling shell.
-# Use plain `var=$((var + 1))` form instead.
+# Use plain `var=$((var + N))` / `var=$((var - N))` form instead.
+# F-306 (v3.6.1): pattern extended from ++ only to all dangerous forms after
+# self-audit found `((_SUSPICIOUS_HIST += _SH_SUSP))` slipped through.
 # See: feedback_bash_double_paren_increment.md (memory pattern doc).
-echo "[9/11] Checking for ((var++)) post-increment counters..."
-violations=$(grep -nE '\(\([A-Za-z_][A-Za-z0-9_]*\+\+\)\)' "$SCRIPT" \
+echo "[9/11] Checking for ((var<op>)) arithmetic-command counters..."
+violations=$(grep -nE '\(\([A-Za-z_][A-Za-z0-9_]*[[:space:]]*(\+\+|--|[-+*/%]=)' "$SCRIPT" \
   | grep -vE '^[[:space:]]*[0-9]+:[[:space:]]*#' \
   || true)
 if [[ -n "$violations" ]]; then
-  echo "::error::((var++)) post-increment found — use 'var=\$((var + 1))' (rc=1 when var=0 bombs under set -e):"
+  echo "::error::((var<op>)) arithmetic-command found — use 'var=\$((var + N))' form (rc=1 when result=0 bombs under set -e):"
   echo "$violations" | sed 's/^/  /'
   EXIT_CODE=1
 fi
@@ -145,8 +151,13 @@ fi
 # Same locale-translation class as Pattern 8, separate tool list.
 # systemd-analyze score outputs / virsh status / resolvectl labels / free
 # columns are all locale-translatable on de_DE/fr_FR/etc systems.
+# F-307 (v3.6.1): the `free` sub-pattern previously required pipe directly
+# after `free<space>` and missed `free -h | awk` / `free -h -m | awk` forms.
+# Self-audit found 5 such sites parsing `^Mem:`/`^Swap:` headers that German
+# locale translates to `Speicher:`/`Auslag.:` — silently empty MEM_TOTAL etc.
+# Now matches free with any number of `-flag` args before the pipe.
 echo "[10/11] Checking for systemd-analyze / virsh / resolvectl / free without LC_ALL=C..."
-violations=$(grep -nE '\$\([^)]*\b(systemd-analyze[[:space:]]+(blame|security)|virsh[[:space:]]+list|resolvectl[[:space:]]+status|free[[:space:]]+\|)' "$SCRIPT" \
+violations=$(grep -nE '\$\([^)]*\b(systemd-analyze[[:space:]]+(blame|security)|virsh[[:space:]]+list|resolvectl[[:space:]]+status|free([[:space:]]+-[a-zA-Z]+)*[[:space:]]*\|)' "$SCRIPT" \
   | grep -vE 'LC_ALL=C' \
   | grep -vE '^[[:space:]]*[0-9]+:[[:space:]]*#' \
   || true)

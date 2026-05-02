@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.6.1] - 2026-04-30 / 2026-05-01 / 2026-05-02
 
-### 🐛 Live-ISO False-Positives + Reporting-Quality + Engineering Audit (25 fixes)
+### 🐛 Live-ISO False-Positives + Reporting-Quality + Engineering Audit + Self-Audit (28 fixes)
 
 Three passes shipped under the same v3.6.1 tag:
 - **2026-04-30** — five context-aware classification fixes (F-273/274/275/281/282)
@@ -29,6 +29,13 @@ Three passes shipped under the same v3.6.1 tag:
   defenses (`LC_ALL=C` × 8 sites), edge-case hardening, comment-vs-code
   alignment, timestamp format completeness, and lint-script extension
   to catch all 14 categories preemptively in CI.
+- **2026-05-02 (self-audit)** — three pattern-coverage defenses
+  (F-305/306/307) found by re-reading the v3.6.1 codebase end-to-end
+  after the F-291..F-304 batch landed. Five `free -h` parses still
+  missed `LC_ALL=C` (lint Pattern 10 didn't recognize `free -flag |`
+  form), one `((var += N))` slipped past Pattern 9 which only matched
+  `((var++))`. All three are lint-coverage extensions plus the missed
+  source sites — no new bug categories.
 
 No detection logic was weakened in any pass.
 
@@ -284,6 +291,45 @@ collectively raise the code-quality floor and align practice with policy.
   11-50 ("noticeable backlog — schedule update soon"), >50 ("heavy
   backlog — system maintenance overdue"). Same severity (WARN) but
   honest signal about how far behind the system actually is.
+
+#### Fixed — Self-Audit (2026-05-02)
+
+- **F-305 — Five `free -h` sites missed `LC_ALL=C`** (Section 20
+  Performance & Resources). The `MEM_TOTAL/MEM_USED/MEM_AVAIL/SWAP_TOTAL/
+  SWAP_USED` parsers used `free -h | awk '/^Mem:/ {print $N}'` without
+  locale defense. On de_DE/fr_FR systems `free` translates "Mem:" →
+  "Speicher:" and "Swap:" → "Auslag.:" — the awk header-anchor silently
+  fails and the variables become empty. Section 20 display then renders
+  "RAM:  /  (X% available,  free)" with empty values. Score remained
+  correct because line 3960's `MEM_AVAIL_PCT` already had `LC_ALL=C`
+  (added in F-298) — same fix-class as F-298, found by line-by-line
+  self-audit after F-291..F-304 patches landed. Sites: 3954/3955/3956
+  (Mem) and 3970/3971 (Swap).
+
+- **F-306 — Lint Pattern 9 extended to all dangerous arithmetic-command
+  forms**. Original pattern caught `((var++))` only, but `((var += N))`,
+  `((var -= N))`, `((var *= N))`, `((var /= N))`, `((var %= N))`, and
+  `((var--))` all share the same `rc=1 when result == 0` exit-code
+  semantics that aborts shells running under `set -e` (BATS, many CI
+  scripts). Self-audit found one site `((_SUSPICIOUS_HIST += _SH_SUSP))`
+  at noid-privacy-linux.sh:4912 that the F-291 lint had missed. The
+  site itself was BATS-safe (inside `if [[ "$_SH_SUSP" -gt 0 ]]; then`,
+  so result is always positive), but the pattern-coverage gap meant a
+  future regression could land undetected. Pattern regex extended from
+  `\(\(<id>\+\+\)\)` to `\(\(<id>[[:space:]]*(\+\+|--|[-+*/%]=)`.
+  Code-site at line 4912 also rewritten to plain `var=$((var + N))`
+  form for consistency with F-291 sweep policy.
+
+- **F-307 — Lint Pattern 10 `free` regex extended to allow flag arguments**.
+  Original sub-pattern `free[[:space:]]+\|` matched `free | awk` (pipe
+  directly after `free<space>`) but missed `free -h | awk` and
+  `free -h -m | awk` because the regex required the pipe immediately
+  after the first whitespace. Self-audit found the five F-305 sites
+  that the lint should have flagged preemptively in CI but didn't.
+  Pattern now uses `free([[:space:]]+-[a-zA-Z]+)*[[:space:]]*\|` which
+  matches `free` followed by zero or more `-flag` arguments before the
+  pipe. Verified against positive-test fixture (`free -h | awk`,
+  `free -m -h | awk`) — both now caught.
 
 ### Notes
 
