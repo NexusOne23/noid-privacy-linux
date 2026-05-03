@@ -5069,6 +5069,25 @@ if require_cmd aide; then
       _emit_pass "AIDE: last scheduled check clean (no changes)"
     elif [[ -n "$_AIDE_LAST_STATUS" && "$_AIDE_LAST_STATUS" != "0" ]]; then
       _emit_warn "AIDE: last scheduled check found changes (AIDE exit=$_AIDE_LAST_STATUS) — review journalctl -u aide-check"
+      # F-339 (v3.6.1): show top drift paths inline so user can immediately see
+      # if drift is benign (transient lockfiles, intentional config changes) or
+      # genuine integrity concern. Avoids forcing manual `journalctl -u aide-check`
+      # for every WARN. AIDE diff symbols: f+++=added, f---=removed, f...i...=changed.
+      if ! $JSON_MODE; then
+        while IFS= read -r _drift_line; do
+          [[ -z "$_drift_line" ]] && continue
+          _drift_marker="${_drift_line%%:*}"
+          _drift_path="${_drift_line##*: }"
+          case "$_drift_marker" in
+            *"+++"*) _drift_label="Added  " ;;
+            *"---"*) _drift_label="Removed" ;;
+            *)       _drift_label="Changed" ;;
+          esac
+          printf "       %s: %s\n" "$_drift_label" "$_drift_path"
+        done < <(journalctl -u "$_aide_unit" --since "$_AIDE_LAST_TIME" --no-pager 2>/dev/null \
+          | grep -oP 'aide\[\d+\]: \K[fd][+\-. ]{15,}: /\S+' \
+          | head -5)
+      fi
     else
       _emit_info "AIDE: last scheduled check ran (status unclear — review journal)"
     fi

@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.6.1] - 2026-04-30 / 2026-05-01 / 2026-05-02
 
-### 🐛 Live-ISO False-Positives + Reporting-Quality + Engineering Audit + Self-Audit + Live-Audit Self-Review + Cosmetic Polish + Display Polish + Output Transparency + Sticky-WARN Fix + Find-Performance Fix (59 fixes)
+### 🐛 Live-ISO False-Positives + Reporting-Quality + Engineering Audit + Self-Audit + Live-Audit Self-Review + Cosmetic Polish + Display Polish + Output Transparency + Sticky-WARN Fix + Find-Performance Fix + AIDE Drift Breakdown (60 fixes)
 
 Three passes shipped under the same v3.6.1 tag:
 - **2026-04-30** — five context-aware classification fixes (F-273/274/275/281/282)
@@ -641,6 +641,23 @@ detection or scoring logic.
   surfaced now as `Service masked: switcheroo-control` PASS line,
   consistent with cups/avahi/bluetooth pattern. When running on a hybrid
   laptop: emits `running (desktop default — GPU power switching)` INFO.
+
+#### Fixed — AIDE Drift Breakdown UX (2026-05-03)
+
+- **F-339 — AIDE drift WARN now shows top affected paths inline**
+  (Section 30 Advanced Hardening → AIDE Integrity Status). After F-337
+  fixed the sticky-WARN logic to show AIDE exit code, users still had
+  to manually run `journalctl -u aide-check` to see *what* drift was
+  detected — was it benign (transient gpg-agent lockfiles, intentional
+  config changes) or a genuine integrity concern? F-339 now extracts
+  drift paths from the last aide-check journal output and displays them
+  inline below the WARN, categorized by AIDE diff symbol:
+    `f+++++++++++++++++` → `Added`
+    `f-----------------` → `Removed`
+    `f   ...   i  . .  ` → `Changed`
+  Limited to top 5 paths so even large drift sets don't flood the audit
+  output. Analog to F-335 (SELinux top-3 source breakdown). Suppressed
+  in JSON_MODE to keep the structured output clean.
 
 #### Fixed — Find-Performance + Determinism (2026-05-03)
 
