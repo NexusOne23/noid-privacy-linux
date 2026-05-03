@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.6.1] - 2026-04-30 / 2026-05-01 / 2026-05-02
 
-### 🐛 Live-ISO False-Positives + Reporting-Quality + Engineering Audit + Self-Audit + Live-Audit Self-Review + Cosmetic Polish + Display Polish + Output Transparency + Sticky-WARN Fix + Find-Performance Fix + AIDE Drift Breakdown (60 fixes)
+### 🐛 Live-ISO False-Positives + Reporting-Quality + Engineering Audit + Self-Audit + Live-Audit Self-Review + Cosmetic Polish + Display Polish + Output Transparency + Sticky-WARN Fix + Find-Performance Fix + AIDE Drift Breakdown + Final Code-Review Polish (63 fixes)
 
 Three passes shipped under the same v3.6.1 tag:
 - **2026-04-30** — five context-aware classification fixes (F-273/274/275/281/282)
@@ -641,6 +641,42 @@ detection or scoring logic.
   surfaced now as `Service masked: switcheroo-control` PASS line,
   consistent with cups/avahi/bluetooth pattern. When running on a hybrid
   laptop: emits `running (desktop default — GPU power switching)` INFO.
+
+#### Fixed — Final Code-Review Polish (2026-05-03)
+
+Three fixes from a complete line-by-line code review of the v3.6.1
+codebase post-F-339. None affect detection or scoring; F-340 is a
+performance/consistency fix in line with F-338's prune-architecture,
+F-341a/b are cosmetic doc-corrections.
+
+- **F-340 — `/var/lib/gdm` exclusion moved into `_safe_find_root` prune list**
+  (helper function). Previously the unowned-files check (Section 12, line
+  3160) passed `-not -path '/var/lib/gdm/*'` as caller-side arg — which
+  is per-file evaluation, not directory pruning, identical to the
+  performance bug-class that F-338 fixed for the snapshot exclusions.
+  Moved to internal prune list so /var/lib/gdm is now skipped at
+  directory-entry boundary on all callers (current and future), removed
+  the redundant caller arg. Behavior unchanged (still excluded for
+  unowned-files), performance improved on systems with large gdm home
+  dirs (Atomic / Silverblue layered installs).
+
+- **F-341a — Header check count corrected: 390+ → 420+ (4 sites)**
+  (lines 21, 93, 989, 7310). The "Checks: 390+ across 42 sections"
+  string in the header banner, --help text, and AI-prompt was a
+  v3.5-era estimate. Post-F-336 / F-339 the actual check count is
+  consistently in the 420-425 range. Updated all 4 string references
+  for honesty.
+
+- **F-341b — Bash version requirement: 4.0 → 4.3**
+  (line 28). The script uses `${arr[-1]}` (negative array indices)
+  in Section 1's latest-kernel detection — a Bash 4.3+ feature, not
+  4.0+. On Bash 4.0-4.2 this silently emits "bad array subscript" and
+  the kernel detection would return empty. Other 4.0-only features
+  (associative arrays, mapfile, ${var^^}/${var,,}) still work; 4.3
+  is the binding minimum due to negative-index usage. Bash 4.3 was
+  released in 2014; modern distros all ship 5.x — this only affects
+  very old legacy systems but the version check should declare the
+  real requirement.
 
 #### Fixed — AIDE Drift Breakdown UX (2026-05-03)
 

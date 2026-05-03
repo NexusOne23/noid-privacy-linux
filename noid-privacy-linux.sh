@@ -18,15 +18,21 @@
 #
 #  https://noid-privacy.com/linux.html | https://github.com/NexusOne23/noid-privacy-linux
 #  Fedora / RHEL / Debian / Ubuntu — Full-Spectrum Audit
-#  390+ checks across 42 sections
+#  420+ checks across 42 sections
 #  Requires: root
 ###############################################################################
 NOID_PRIVACY_VERSION="3.6.1"
 set +e          # Don't exit on errors — we handle them ourselves
 
-# Bash 4+ required for associative arrays and other features
-if (( BASH_VERSINFO[0] < 4 )); then
-  echo "Error: Bash 4.0+ required (found ${BASH_VERSION})" >&2; exit 1
+# F-341 (v3.6.1): bumped from 4.0 to 4.3. The script uses ${arr[-1]} (negative
+# array indices, Section 1 latest-kernel detection line ~1228) which is a
+# Bash 4.3+ feature — Bash 4.0-4.2 emits "bad array subscript" and the kernel
+# version detection silently fails. Other 4.0-only features (associative
+# arrays, mapfile, ${var^^}/${var,,}) work down to 4.0, but the negative-index
+# usage is the binding minimum. Bash 4.3 was released in 2014; modern distros
+# all ship 5.x — this only affects very old legacy systems.
+if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3) )); then
+  echo "Error: Bash 4.3+ required (found ${BASH_VERSION})" >&2; exit 1
 fi
 
 # --- Argument Parsing ---
@@ -90,7 +96,7 @@ Examples:
   sudo NOID_RPM_BASELINE_INIT=1 bash noid-privacy-linux.sh
   sudo bash noid-privacy-linux.sh --verbose            # full PASS detail
 
-390+ checks. Requires root. Tested on Fedora 43, RHEL 9, Debian 12, Ubuntu 24.04.
+420+ checks. Requires root. Tested on Fedora 43, RHEL 9, Debian 12, Ubuntu 24.04.
 EOF
   exit 0
 }
@@ -710,6 +716,14 @@ _de_check_file_indexer() {
 # Caller args ("$@") expand in the -o branch with explicit -print since
 # implicit -print is suppressed once -prune is in the expression.
 _safe_find_root() {
+  # F-340 (v3.6.1): /var/lib/gdm exclusion moved into the helper-internal prune
+  # list. Was previously passed as caller-side `-not -path '/var/lib/gdm/*'`
+  # by the unowned-files check (Section 12), which is per-file evaluation —
+  # not directory pruning. Same Performance bug-class as F-338 fixed for the
+  # snapshot exclusions. /var/lib/gdm contains the gdm system-user's home
+  # whose ownership (gdm:gdm = uid 42 typically) trips -nouser/-nogroup
+  # FALSE POSITIVES on systems that haven't synced uid mapping (Atomic /
+  # Silverblue layered installs, container hosts).
   timeout 30 find / -xdev \
     \( -path '*/.snapshots/*' \
        -o -path '*/.timeshift/*' \
@@ -721,6 +735,7 @@ _safe_find_root() {
        -o -path '/var/lib/lxd/*' \
        -o -path '/var/lib/lxc/*' \
        -o -path '/var/lib/machines/*' \
+       -o -path '/var/lib/gdm/*' \
        -o -path '*/ostree/repo/objects/*' \
     \) -prune -o \( "$@" \) -print 2>/dev/null
 }
@@ -977,7 +992,7 @@ echo "╔═══════════════════════�
 echo "║  🛡️ NoID Privacy for Linux v${NOID_PRIVACY_VERSION} — Hardening Posture Audit"
 echo "║  $NOW | $HOSTNAME | $KERNEL"
 echo "║  Arch: $ARCH | Distro: $DISTRO_PRETTY"
-echo "║  Checks: 390+ across $TOTAL_SECTIONS sections"
+echo "║  Checks: 420+ across $TOTAL_SECTIONS sections"
 echo "╚══════════════════════════════════════════════════════════════════════╝"
 printf "${RST}\n"
 fi
@@ -3148,7 +3163,10 @@ fi
 unset _WW_RESULT
 
 # Unowned Files
-UNOWNED=$(_safe_find_root -not -path '/var/lib/gdm/*' \( -nouser -o -nogroup \) | wc -l)
+# F-340 (v3.6.1): /var/lib/gdm exclusion is now in _safe_find_root's internal
+# prune list (per-directory skip, not per-file evaluation). Caller no longer
+# needs to pass -not -path here.
+UNOWNED=$(_safe_find_root \( -nouser -o -nogroup \) | wc -l)
 if [[ "$UNOWNED" -eq 0 ]]; then
   _emit_pass "Unowned files: 0"
 elif [[ "$UNOWNED" -le 5 ]]; then
@@ -7295,7 +7313,7 @@ if $AI_MODE; then
   command -v flatpak &>/dev/null && _ai_ctx="${_ai_ctx}, Flatpak"
   $HAS_SELINUX && _ai_ctx="${_ai_ctx}, SELinux"
   $HAS_APPARMOR && _ai_ctx="${_ai_ctx}, AppArmor"
-  _AI_TEXT="I ran NoID Privacy for Linux v${NOID_PRIVACY_VERSION} — a 390+ check hardening posture audit.
+  _AI_TEXT="I ran NoID Privacy for Linux v${NOID_PRIVACY_VERSION} — a 420+ check hardening posture audit.
 Tool: https://github.com/NexusOne23/noid-privacy-linux
 
 System: ${DISTRO_PRETTY} ${KERNEL} ${DESKTOP_ENV}"
