@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.6.1] - 2026-04-30 / 2026-05-01 / 2026-05-02
 
-### 🐛 Live-ISO False-Positives + Reporting-Quality + Engineering Audit + Self-Audit + Live-Audit Self-Review + Cosmetic Polish + Display Polish + Output Transparency + Sticky-WARN Fix + Find-Performance Fix + AIDE Drift Breakdown + Final Code-Review Polish (63 fixes)
+### 🐛 Live-ISO False-Positives + Reporting-Quality + Engineering Audit + Self-Audit + Live-Audit Self-Review + Cosmetic Polish + Display Polish + Output Transparency + Sticky-WARN Fix + Find-Performance Fix + AIDE Drift Breakdown + Final Code-Review Polish + Repo-Wide Doc Sync (64 fixes)
 
 Three passes shipped under the same v3.6.1 tag:
 - **2026-04-30** — five context-aware classification fixes (F-273/274/275/281/282)
@@ -641,6 +641,41 @@ detection or scoring logic.
   surfaced now as `Service masked: switcheroo-control` PASS line,
   consistent with cups/avahi/bluetooth pattern. When running on a hybrid
   laptop: emits `running (desktop default — GPU power switching)` INFO.
+
+#### Fixed — Repo-Wide Documentation Sync (2026-05-03)
+
+- **F-342 — Documentation sync to v3.6.1 actual state** (cross-repo
+  cleanup of stale references found by repo-wide `.md`/`.yml`/`.sh`
+  audit). Fixes 4 categories of drift accumulated since v3.5.0:
+  * **"390+ checks" → "420+ checks"** (8 sites: README badge, README
+    intro, README quick-start, README sample-output header, README
+    comparison table, Docs/CHECKS.md header, action.yml description,
+    plus the 4 in-script sites already covered by F-341a).
+  * **"Bash 4+" → "Bash 4.3+"** (2 sites: README install table,
+    CONTRIBUTING.md requirements). Aligns with F-341b's runtime
+    version-check bump.
+  * **"8-pattern lint" → "11-pattern lint"** (4 sites: SECURITY.md
+    code-quality block, CONTRIBUTING.md testing block + lint-pattern
+    enumeration with explicit Pattern 9/10/11 docs, scripts/lint-api-
+    usage.sh header comment, ci.yml comments × 2). Reflects the F-291
+    + F-298 + F-296 extensions added in v3.6.1.
+  * **AIDE description in Docs/CHECKS.md** updated for F-337 + F-339:
+    journalctl-grep replaced with `systemctl show ExecMainStatus`
+    authoritative API + drift-breakdown inline emit.
+  * **README sample output** corrected: `460 (298 pass, 0 fail, 5
+    warn, 157 info)` → `420 (293 pass, 0 fail, 5 warn, 122 info)`
+    matching actual v3.6.1 output ranges.
+  * **SECURITY.md "Last Updated"** date bumped to 2026-05-03 (was
+    April 30, 2026), policy version to 1.6.1.
+  * **tests/README.md** "introduced in v3.8" corrected to v3.6 (v3.8
+    label was a future-tense anachronism — current is v3.6.1).
+  * **SECURITY.md supported-version table** for v3.6.x extended with
+    F-337/F-338 highlights so readers see the v3.6.1 improvements
+    surface-level.
+
+  No code changes. Pure documentation accuracy fix surfaced by the
+  complete repo audit (.md/.yml/.sh files cross-referenced against
+  actual script behavior + commit history).
 
 #### Fixed — Final Code-Review Polish (2026-05-03)
 

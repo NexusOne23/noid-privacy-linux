@@ -8,13 +8,13 @@
 [![Version](https://img.shields.io/badge/version-3.6.1-green.svg)](https://github.com/NexusOne23/noid-privacy-linux/releases)
 [![Pure Bash](https://img.shields.io/badge/pure-bash-4EAA25.svg?logo=gnu-bash&logoColor=white)](https://github.com/NexusOne23/noid-privacy-linux)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen.svg)](https://github.com/NexusOne23/noid-privacy-linux)
-[![Checks](https://img.shields.io/badge/checks-390%2B-orange.svg)](https://github.com/NexusOne23/noid-privacy-linux)
+[![Checks](https://img.shields.io/badge/checks-420%2B-orange.svg)](https://github.com/NexusOne23/noid-privacy-linux)
 [![CI](https://github.com/NexusOne23/noid-privacy-linux/actions/workflows/ci.yml/badge.svg)](https://github.com/NexusOne23/noid-privacy-linux/actions)
 [![GitHub Stars](https://img.shields.io/github/stars/NexusOne23/noid-privacy-linux?style=flat&logo=github)](https://github.com/NexusOne23/noid-privacy-linux/stargazers)
 [![Last Commit](https://img.shields.io/github/last-commit/NexusOne23/noid-privacy-linux?style=flat)](https://github.com/NexusOne23/noid-privacy-linux/commits)
 [![Website](https://img.shields.io/badge/Website-noid--privacy.com-0078D4?style=flat)](https://noid-privacy.com)
 
-**390+ checks · 42 sections · Pure Bash · AI-friendly remediation prompts**
+**420+ checks · 42 sections · Pure Bash · AI-friendly remediation prompts**
 **Optimized for Fedora/RHEL · Tested on Ubuntu/Debian · Best-effort on Arch/openSUSE/Mint/Pop!_OS**
 
 [Quick Start](#-quick-start) · [What it Checks](#-what-it-checks) · [AI Fixes](#-fix-with-ai) · [Comparison](#-comparison) · [Discussions](https://github.com/NexusOne23/noid-privacy-linux/discussions)
@@ -30,7 +30,7 @@ curl -fsSL https://github.com/NexusOne23/noid-privacy-linux/raw/main/noid-privac
 sudo bash noid-privacy-linux.sh --ai
 ```
 
-390+ privacy & security checks. Zero dependencies. The `--ai` flag generates a ready-to-paste prompt — hand it to ChatGPT, Claude, or Gemini to **fix every finding automatically**.
+420+ privacy & security checks. Zero dependencies. The `--ai` flag generates a ready-to-paste prompt — hand it to ChatGPT, Claude, or Gemini to **fix every finding automatically**.
 
 > **This tool is read-only.** It does not modify your system. No files changed, no configs touched, no services restarted.
 
@@ -145,7 +145,7 @@ $ sudo bash noid-privacy-linux.sh --ai
   NoID Privacy for Linux v3.6.1 — Hardening Posture Audit for Linux Desktops
   YYYY-MM-DD HH:MM:SS | mydesktop | 6.19.x-200.fc43.x86_64
   Arch: x86_64 | Distro: Fedora Linux 43 (Workstation Edition)
-  Checks: 390+ across 42 sections
+  Checks: 420+ across 42 sections
 
 ━━━ [01/42] KERNEL & BOOT INTEGRITY ━━━
   ✅ PASS  Secure Boot: ENABLED
@@ -163,7 +163,7 @@ $ sudo bash noid-privacy-linux.sh --ai
   ⚠️  WARN  google-chrome installed — Google telemetry risk
 
 ━━━ SUMMARY ━━━
-  Total checks:      460 (298 pass, 0 fail, 5 warn, 157 info)
+  Total checks:      420 (293 pass, 0 fail, 5 warn, 122 info)
 
   Hardening posture is your defense foundation — the layer
   attackers must defeat first. Complement with:
@@ -198,7 +198,7 @@ Exit codes:    0 = clean · 1 = FAIL present · 2 = WARN-only · 130/143 = inter
 | Feature | **NoID Privacy for Linux** | **Lynis** | **privacy.sexy** | **CIS Benchmark** |
 |---|:---:|:---:|:---:|:---:|
 | **Focus** | Privacy + Security for desktops | Server compliance | Script generator | Server compliance |
-| **Tests** | 390+ | 480+ | N/A | varies |
+| **Tests** | 420+ | 480+ | N/A | varies |
 | **Browser privacy** | ✅ | ❌ | ⚠️ Partial | ❌ |
 | **App telemetry** | ✅ | ❌ | ✅ | ❌ |
 | **DNS / VPN / MAC** | ✅ | ❌ | ❌ | ❌ |
@@ -221,7 +221,7 @@ Exit codes:    0 = clean · 1 = FAIL present · 2 = WARN-only · 130/143 = inter
 | Requirement | Details |
 |---|---|
 | **OS** | Fedora 39+, Ubuntu 22.04+, Debian 12+, RHEL 9+, Arch Linux, openSUSE, Mint, Pop!_OS |
-| **Shell** | Bash 4+ |
+| **Shell** | Bash 4.3+ |
 | **Privileges** | Root (`sudo`) for full system access |
 | **Dependencies** | None |
 

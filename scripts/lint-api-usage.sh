@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # Lint: forbid direct API calls that bypass the v3.8 capability layer
-# or repeat any of the 5 bug-pattern classes from the 2026-04 audit.
+# or repeat any of the 11 bug-pattern classes from the 2026-04..2026-05 audits
+# (extended from 5 to 11 patterns across v3.6.0 and v3.6.1).
 #
 # Run as part of CI to catch regressions where someone adds a new section
 # using firewall-cmd --get-policies directly instead of _fw_get_policies(),

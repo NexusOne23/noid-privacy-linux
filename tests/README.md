@@ -1,8 +1,8 @@
 # NoID Privacy for Linux — Test Suite
 
 This directory contains the BATS (Bash Automated Testing System) test-suite
-introduced in v3.8 to prevent regressions of the bug classes documented in
-the v3.5.0 → v3.6 audit.
+introduced in v3.6 to prevent regressions of the bug classes documented in
+the v3.5.0 → v3.6 audit (5 initial patterns; extended to 11 in v3.6.1).
 
 ## Layout
 

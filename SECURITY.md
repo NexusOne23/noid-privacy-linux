@@ -78,7 +78,7 @@ NoID Privacy for Linux is designed with security in mind:
 
 | Version | Supported          | Notes |
 | ------- | ------------------ | ----- |
-| 3.6.x   | ✅ Fully Supported | Current release — Hardening Posture rebrand, capability layer, BATS test-suite, 8-pattern API-lint, CIS L1/L2/STIG mapping, HSI integration |
+| 3.6.x   | ✅ Fully Supported | Current release — Hardening Posture rebrand, capability layer, BATS test-suite, 11-pattern API-lint (extended in v3.6.1), CIS L1/L2/STIG mapping, HSI integration, AIDE last-run authoritative (F-337), find-performance via -prune (F-338) |
 | 3.5.x   | ✅ Supported       | DE dispatcher (KDE/XFCE/MATE/Cinnamon), exit codes, signal handling, ShellCheck-clean — upgrade to 3.6.x recommended |
 | 3.4.x   | ⚠️ Limited Support  | Upgrade to 3.6.x recommended |
 | 3.3.x   | ⚠️ Limited Support  | Upgrade to 3.6.x recommended |
@@ -158,13 +158,20 @@ NoID Privacy for Linux is designed with security in mind:
   strings) and SC2329 (callback dispatch / signal traps). The CI gate
   enforces `--severity=warning`; style-level cleanliness is a v3.5.0
   improvement.
-- **API-Layer Lint** (since v3.6): `scripts/lint-api-usage.sh` enforces
-  8 anti-regression patterns covering the bug classes documented in
-  `feedback_noid_audit_bug_patterns.md` — direct firewalld API bypassing
-  capability layer, `systemctl is-masked` (non-existent verb), `grep -r`
-  on symlinked dirs, bare `pass()/fail()/warn()/info()` reintroductions,
-  `chage -l` without `LC_ALL=C`, hardcoded VPN-iface regex, `df -T NR==2`
-  wrap-vulnerable patterns, and `fwupdmgr`/`bluetoothctl` without `LC_ALL=C`.
+- **API-Layer Lint** (since v3.6, extended to 11 patterns in v3.6.1):
+  `scripts/lint-api-usage.sh` enforces anti-regression patterns covering the
+  bug classes documented in `feedback_noid_audit_bug_patterns.md` — direct
+  firewalld API bypassing capability layer, `systemctl is-masked`
+  (non-existent verb), `grep -r` on symlinked dirs, bare
+  `pass()/fail()/warn()/info()` reintroductions, `chage -l` without
+  `LC_ALL=C`, hardcoded VPN-iface regex, `df -T NR==2` wrap-vulnerable
+  patterns, `fwupdmgr`/`bluetoothctl` without `LC_ALL=C`, **`((var<op>))`
+  arithmetic-command counters that bomb under `set -e`** (Pattern 9, F-291
+  + F-306 extended to all `++`/`--`/`+=`/`-=`/`*=`/`/=`/`%=` forms),
+  **`systemd-analyze`/`virsh`/`resolvectl`/`free` without `LC_ALL=C`**
+  (Pattern 10, F-298 + F-307 extended `free` regex to `free -flag` forms),
+  and **unanchored `grep nameserver` on resolv.conf** (Pattern 11, F-296
+  catches commented entries reported as active DNS servers).
 - **BATS unit tests** (since v3.6): `tests/unit/` covers the bug-pattern
   classes via `bats` runner against `tests/fixtures/`.
 - **bash -n**: Syntax validation in CI across Ubuntu 22.04/24.04,
@@ -214,5 +221,5 @@ For licensing questions, see [LICENSE](LICENSE) or open a [Discussion](https://g
 
 ---
 
-**Last Updated**: April 30, 2026
-**Policy Version**: 1.6
+**Last Updated**: May 3, 2026
+**Policy Version**: 1.6.1

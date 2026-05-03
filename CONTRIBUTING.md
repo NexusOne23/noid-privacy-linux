@@ -42,7 +42,7 @@ Thank you for your interest in contributing to NoID Privacy for Linux! This guid
 ### Requirements
 
 - Linux desktop (Fedora 43+, Ubuntu 24.04+, Debian 12+)
-- Bash 4+
+- Bash 4.3+ (negative array indices required since v3.6.1)
 - Root access for testing (`sudo`)
 - Optional but recommended: [ShellCheck](https://www.shellcheck.net/)
 
@@ -218,8 +218,9 @@ If your checks don't fit any existing section, you can propose a new one:
 4. **Update documentation** (`README.md` skip-list, `Docs/CHECKS.md`,
    `Docs/CIS_RHEL9_MAPPING.md` if compliance-relevant)
 5. **Add a BATS regression test** under `tests/unit/` if the check
-   matches one of the 5 bug-pattern classes (locale/name-shadow/
-   grep-r/API-version/regex-globals)
+   matches one of the 11 bug-pattern classes (locale/name-shadow/
+   grep-r/API-version/regex-globals/((var<op>))-bombs/free-locale/
+   unanchored-grep-nameserver — extended from 5 to 11 in v3.6.1)
 6. **Update `--help`** skip-keyword list (alphabetical inside its tier
    — see existing format)
 
@@ -338,7 +339,7 @@ shellcheck --severity=warning noid-privacy-linux.sh
 bash scripts/lint-api-usage.sh noid-privacy-linux.sh
 ```
 
-The 8-pattern lint enforces:
+The 11-pattern lint enforces (extended from 8 patterns to 11 in v3.6.1):
 
 1. No direct firewalld policy API calls (use `_fw_get_policies`)
 2. No `systemctl is-masked` (use `_service_masked_any`)
@@ -348,6 +349,13 @@ The 8-pattern lint enforces:
 6. No hardcoded VPN-iface regex (use `$_VPN_IFACE_REGEX`)
 7. No `df -T … awk NR==2` (use `findmnt -no FSTYPE`)
 8. No `fwupdmgr`/`bluetoothctl` invocation without `LC_ALL=C`
+9. No `((var<op>))` arithmetic-command counters — use `var=$((var + N))` form
+   (F-291 + F-306: `((var++))` returns rc=1 when result==0, bombs under `set -e`)
+10. No `systemd-analyze`/`virsh`/`resolvectl`/`free` invocation without `LC_ALL=C`
+    (F-298 + F-307: locale-translatable labels silently break parsing)
+11. No unanchored `grep nameserver` on `/etc/resolv.conf` — must anchor
+    `^[[:space:]]*nameserver[[:space:]]` (F-296: matches commented entries
+    reported as active DNS servers)
 
 ### BATS Unit Tests
 
