@@ -700,20 +700,29 @@ _de_check_file_indexer() {
 #   contain full /usr/bin SUID trees that inflate counts massively on
 #   bootc/Silverblue/OCI-image-build systems
 # - OSTree object stores — content-addressed file objects carry original SUID
+# F-338 (v3.6.1): switch from `-not -path` (per-file evaluation, no subdir
+# pruning) to `-prune` (skips entire subdirs without descending). On btrfs
+# systems with many snapshots in /home/.snapshots/, the old pattern walked
+# 200+ snapshots × full home tree before filtering paths — often hitting
+# the 30s timeout and returning partial/empty results non-deterministically.
+# With -prune the snapshot subvolumes are skipped at directory-entry boundary,
+# typical 30s → 1-2s. Same applies to /var/lib/containers/storage etc.
+# Caller args ("$@") expand in the -o branch with explicit -print since
+# implicit -print is suppressed once -prune is in the expression.
 _safe_find_root() {
   timeout 30 find / -xdev \
-    -not -path '*/.snapshots/*' \
-    -not -path '*/.timeshift/*' \
-    -not -path '*/timeshift-btrfs/*' \
-    -not -path '*/.btrfs-snapshots/*' \
-    -not -path '*/.snapper/*' \
-    -not -path '/var/lib/containers/storage/*' \
-    -not -path '/var/lib/docker/*' \
-    -not -path '/var/lib/lxd/*' \
-    -not -path '/var/lib/lxc/*' \
-    -not -path '/var/lib/machines/*' \
-    -not -path '*/ostree/repo/objects/*' \
-    "$@" 2>/dev/null
+    \( -path '*/.snapshots/*' \
+       -o -path '*/.timeshift/*' \
+       -o -path '*/timeshift-btrfs/*' \
+       -o -path '*/.btrfs-snapshots/*' \
+       -o -path '*/.snapper/*' \
+       -o -path '/var/lib/containers/storage/*' \
+       -o -path '/var/lib/docker/*' \
+       -o -path '/var/lib/lxd/*' \
+       -o -path '/var/lib/lxc/*' \
+       -o -path '/var/lib/machines/*' \
+       -o -path '*/ostree/repo/objects/*' \
+    \) -prune -o \( "$@" \) -print 2>/dev/null
 }
 
 # Same exclusion pattern, scoped to /home and /root for secret/key scans.
@@ -730,15 +739,15 @@ _safe_find_home() {
   [[ -d /root ]] && _hd_args+=(/root)
   [[ "${#_hd_args[@]}" -eq 0 ]] && return 0
   timeout 30 find "${_hd_args[@]}" \
-    -not -path '*/.snapshots/*' \
-    -not -path '*/.timeshift/*' \
-    -not -path '*/node_modules/*' \
-    -not -path '*/.git/objects/*' \
-    -not -path '*/.cache/*' \
-    -not -path '*/.venv/*' \
-    -not -path '*/__pycache__/*' \
-    -not -path '*/target/*' \
-    "$@" 2>/dev/null
+    \( -path '*/.snapshots/*' \
+       -o -path '*/.timeshift/*' \
+       -o -path '*/node_modules/*' \
+       -o -path '*/.git/objects/*' \
+       -o -path '*/.cache/*' \
+       -o -path '*/.venv/*' \
+       -o -path '*/__pycache__/*' \
+       -o -path '*/target/*' \
+    \) -prune -o \( "$@" \) -print 2>/dev/null
 }
 
 # Content-based private key detection.

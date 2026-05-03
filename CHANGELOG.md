@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.6.1] - 2026-04-30 / 2026-05-01 / 2026-05-02
 
-### 🐛 Live-ISO False-Positives + Reporting-Quality + Engineering Audit + Self-Audit + Live-Audit Self-Review + Cosmetic Polish + Display Polish + Output Transparency + Sticky-WARN Fix (58 fixes)
+### 🐛 Live-ISO False-Positives + Reporting-Quality + Engineering Audit + Self-Audit + Live-Audit Self-Review + Cosmetic Polish + Display Polish + Output Transparency + Sticky-WARN Fix + Find-Performance Fix (59 fixes)
 
 Three passes shipped under the same v3.6.1 tag:
 - **2026-04-30** — five context-aware classification fixes (F-273/274/275/281/282)
@@ -641,6 +641,25 @@ detection or scoring logic.
   surfaced now as `Service masked: switcheroo-control` PASS line,
   consistent with cups/avahi/bluetooth pattern. When running on a hybrid
   laptop: emits `running (desktop default — GPU power switching)` INFO.
+
+#### Fixed — Find-Performance + Determinism (2026-05-03)
+
+- **F-338 — `_safe_find_home`/`_safe_find_root` non-deterministic via `-not -path` timeout**
+  (helper functions used by 5 callers across 4 sections). `-not -path` is a
+  per-file evaluation, not a directory pruning operator: find still descends
+  into excluded subdirs and only filters paths after stat'ing each entry.
+  On btrfs systems with many snapshots in `/home/.snapshots/` (~200+ on a
+  hardened-with-snapper Workstation), find walked all snapshots × full home
+  tree (~200GB) before filtering, hitting the 30s `timeout 30` limit and
+  returning partial/empty results — non-deterministic per audit run. Live
+  test on Fedora 43 host with 200+ snapshots: 30.033s timeout returning 0
+  matches; same query with `-prune` syntax: **6.7s returning correct 1
+  match**. Switched both helpers to `\( <prunes> \) -prune -o \( <args> \)
+  -print` pattern. Snapshots and container-storage subvolumes are now
+  skipped at directory-entry boundary, no descent. Bonus: ENV_FILES,
+  EXPOSED_KEYS, SUID_COUNT, SGID_COUNT, WW_COUNT, UNOWNED counts are now
+  deterministic across audit runs (previously varied based on traversal
+  timing-luck).
 
 #### Fixed — Sticky-WARN Logic Bug (2026-05-03)
 
