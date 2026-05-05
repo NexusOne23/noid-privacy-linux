@@ -5423,8 +5423,14 @@ if require_cmd rpm; then
     # branding, M99 Anaconda transaction-progress patch). All are identifier /
     # branding / privacy-disable manifests, NOT executable code. Equivalent
     # exclusion-class as os-release / fedora-logo (F-281 / F-315).
+    # F-348 (post v3.6.2 local commit, pre v3.6.3): NoID Build #128 VM-test
+    # found 2 binary-counted files NOT yet in exclusion: Anaconda WebUI Firefox
+    # profile templates `firefox-theme/{default,extlink,live}/user.js` modified
+    # by Module 16 Step 8 (Build #127 Bug #61 fix — telemetry-off, search.*=
+    # off, etc.). These are user.js prefs (config-like) shipped via the
+    # `anaconda-webui` RPM. Same exclusion-class as os-release / pixmaps.
     RPM_VERIFY_BIN=$(echo "$RPM_VA_OUTPUT" | grep -E "^..5" | grep -v " c " \
-      | grep -cvE "\.pyc\b|/__pycache__/|/usr/lib/(issue|os-release)|/etc/system-release|/usr/share/(anaconda/pixmaps|icons/.*/apps/anaconda\.png|pixmaps/(fedora|system)-logo)|/usr/share/dbus-1/services/org\.gnome\.(Identity|OnlineAccounts)\.service|/usr/share/anaconda/(gnome/(fedora-welcome|org\.fedoraproject\.welcome-screen\.desktop)|interactive-defaults\.ks)|/usr/share/applications/(liveinst|org\.mozilla\.firefox)\.desktop|/usr/share/gnome-initial-setup/vendor\.conf|/usr/share/dbus-1/services/.*(Tracker3.*|portal\.Tracker)\.service|/etc/xdg/autostart/(geoclue-demo-agent|org\.gnome\.Evolution-alarm-notify)\.desktop|/usr/share/gvfs/mounts/(dns-sd|wsdd)\.mount|/usr/share/plymouth/themes/bgrt/bgrt\.plymouth|/usr/lib64/firefox/distribution/distribution\.ini|/usr/lib64/python.*/site-packages/pyanaconda/modules/payloads/payload/dnf/transaction_progress\.py" || true)
+      | grep -cvE "\.pyc\b|/__pycache__/|/usr/lib/(issue|os-release)|/etc/system-release|/usr/share/(anaconda/pixmaps|icons/.*/apps/anaconda\.png|pixmaps/(fedora|system)-logo)|/usr/share/dbus-1/services/org\.gnome\.(Identity|OnlineAccounts)\.service|/usr/share/anaconda/(gnome/(fedora-welcome|org\.fedoraproject\.welcome-screen\.desktop)|interactive-defaults\.ks|firefox-theme/(default|extlink|live)/user\.js)|/usr/share/applications/(liveinst|org\.mozilla\.firefox)\.desktop|/usr/share/gnome-initial-setup/vendor\.conf|/usr/share/dbus-1/services/.*(Tracker3.*|portal\.Tracker)\.service|/etc/xdg/autostart/(geoclue-demo-agent|org\.gnome\.Evolution-alarm-notify)\.desktop|/usr/share/gvfs/mounts/(dns-sd|wsdd)\.mount|/usr/share/plymouth/themes/bgrt/bgrt\.plymouth|/usr/lib64/firefox/distribution/distribution\.ini|/usr/lib64/python.*/site-packages/pyanaconda/modules/payloads/payload/dnf/transaction_progress\.py" || true)
     RPM_VERIFY_BIN=${RPM_VERIFY_BIN:-0}
     if [[ "$RPM_VERIFY_ALL" -eq 0 ]]; then
       _emit_pass "RPM verify: all package files intact"
