@@ -3984,12 +3984,25 @@ _journal_filter+='| (phpsite|php-fpm|nodejs|gunicorn|uwsgi|wsgi)\['
 _journal_filter+='|Failed to mount proc-sys-fs-binfmt_misc'
 _journal_filter+='|dbus-broker-launch\[[0-9]+\]: Ignoring duplicate name'
 _journal_filter+='|dracut\[[0-9]+\]: No .[^[:space:]]+/dev/log'
-# F-346 (v3.6.2): activation-request failures for masked services (privacy-distro
-# pattern). When NoID masks ColorManager / nm_dispatcher / home1 / Avahi /
-# ModemManager / GeoClue2 etc. for privacy hardening, dbus-broker logs an
-# error each time a still-installed app pokes the masked bus name. The mask
-# IS the security guarantee — these errors confirm it works as intended.
-_journal_filter+="|dbus-broker-launch\[[0-9]+\]: Activation request for '[^']+' failed"
+# F-346 (v3.6.2): activation-request failures for SPECIFIC privacy-masked
+# services. When NoID/Tails/Kicksecure/secureblue masks GNOME-default services
+# for privacy hardening, dbus-broker logs an error each time a still-installed
+# app pokes the masked bus name. The mask IS the security guarantee.
+#
+# IMPORTANT: this is an EXPLICIT allow-list, NOT a wildcard. Adding a new
+# masked service to NoID requires extending this list — that is intentional,
+# so unexpected activation failures (e.g. crashed NetworkManager helper,
+# corrupted bus-name registration) still surface as real WARN findings.
+#
+# Service-name → masking rationale:
+#   ColorManager     — colord (color profile mgmt) masked: privacy
+#   nm_dispatcher    — NM-dispatcher masked: per-state-change script attack-surface
+#   home1            — systemd-homed masked: NoID uses static /home/<user>
+#   Avahi            — avahi-daemon masked: zero-conf network discovery off
+#   ModemManager1    — ModemManager masked: no cellular support needed
+#   GeoClue2         — geoclue2 service masked: location services off
+#   UPower           — defensive: NoID may mask in future for laptop-only privacy
+_journal_filter+="|dbus-broker-launch\[[0-9]+\]: Activation request for 'org\.freedesktop\.(ColorManager|nm_dispatcher|home1|Avahi|ModemManager1|GeoClue2|UPower)' failed"
 # F-347 (v3.6.2): gnome-keyring init noise — gkr-pam logs an error before
 # the daemon is ready (race during PAM init). Harmless: keyring functions
 # correctly post-init. Upstream gnome-keyring issue, not deployment-specific.
