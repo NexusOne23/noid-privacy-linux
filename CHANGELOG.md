@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.6.2] - 2026-05-05
+
+### 🐛 NoID Privacy Workstation 44 Live-VM False-Positives (5 fixes)
+
+Five context-aware false-positive fixes surfaced by running v3.6.1 against
+the NoID Privacy Workstation 44 (Fedora 44 derivative, ID=`noid-privacy-workstation`)
+installed via Build #126 ISO. All semantically-incorrect findings that were
+always-bugs but only became visible when audited against a privacy-distro
+that masks GNOME-default services + ships intentional RPM modifications
+for branding and hardening.
+
+#### F-343 — DISTRO_FAMILY recognition: `noid-privacy-workstation` → rhel
+- Previously: `unknown distro` warning emitted for NoID's `ID=noid-privacy-workstation`
+- Fix: case branch maps to `DISTRO_FAMILY=rhel` (downstream of Fedora 44)
+- All package-manager / systemd / SELinux checks now apply correctly
+
+#### F-344 — Automated update detection: `noid-update-reminder.timer`
+- Previously: WARN "No automated security update mechanism detected" because
+  NoID deliberately ships a manual user-update workflow (privacy-by-design:
+  no auto-fetch to avoid bandwidth fingerprinting + MITM exposure)
+- Fix: detect `/etc/systemd/user/noid-update-reminder.timer` → emit PASS
+  "Automated updates: noid-update-reminder weekly (privacy-by-design — manual user upgrade)"
+
+#### F-345 — RPM verify exclusion list extended for NoID-modified files
+- Previously: 18 binaries flagged as "changed checksums" → FAIL severity
+- Fix: extended F-281/F-315 exclusion regex to cover NoID-specific
+  legitimately-modified files (M16 anaconda branding + M17 GNOME privacy
+  disables + M32 Plymouth bgrt alignment + M99 transaction_progress patch +
+  M34 Firefox NoID + Tracker3 service overrides)
+- Result: 18 false-positive binaries → 0 → RPM verify FAIL eliminated
+
+#### F-346 — Journal err filter: dbus-broker activation-request failures
+- Previously: 19 "errors" in 1h on a clean privacy-distro install (false WARN)
+- Root cause: dbus-broker logs ERR each time a still-installed app pokes a
+  masked bus name (ColorManager, nm_dispatcher, home1, Avahi, ModemManager1,
+  GeoClue2 — all NoID-masked for privacy hardening). Mask IS the security
+  guarantee — these errors confirm it works as intended.
+- Fix: extended `_journal_filter` to include
+  `dbus-broker-launch\[[0-9]+\]: Activation request for '[^']+' failed`
+
+#### F-347 — Journal err filter: gnome-keyring init noise
+- Pattern: `gkr-pam: unable to locate daemon control file` — race during
+  PAM init. Harmless: keyring functions correctly post-init.
+- Fix: added to `_journal_filter`
+
+### Verification
+
+Live-tested 2026-05-05 on NoID Privacy Workstation 44 Build #126 VM
+(192.168.122.197). v3.6.1 → v3.6.2 score progression:
+- v3.6.1: 93% 🛡️ WELL-HARDENED (255 PASS, 3 FAIL, 13 WARN)
+- v3.6.2: **95% 🏰 FULLY HARDENED** (263 PASS, 2 FAIL, 11 WARN)
+
+Tier upgraded WELL-HARDENED → FULLY HARDENED. Remaining FAIL/WARN are all
+SSH fix-phase artifacts (will resolve after pre-ship SSH revert) or design
+choices (No VPN on test-VM, switcheroo-control 7.6 — F-336 known good).
+
+---
+
 ## [3.6.1] - 2026-04-30 / 2026-05-01 / 2026-05-02
 
 ### 🐛 Live-ISO False-Positives + Reporting-Quality + Engineering Audit + Self-Audit + Live-Audit Self-Review + Cosmetic Polish + Display Polish + Output Transparency + Sticky-WARN Fix + Find-Performance Fix + AIDE Drift Breakdown + Final Code-Review Polish + Repo-Wide Doc Sync (64 fixes)

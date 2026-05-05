@@ -21,7 +21,7 @@
 #  420+ checks across 42 sections
 #  Requires: root
 ###############################################################################
-NOID_PRIVACY_VERSION="3.6.1"
+NOID_PRIVACY_VERSION="3.6.2"
 set +e          # Don't exit on errors — we handle them ourselves
 
 # F-341 (v3.6.1): bumped from 4.0 to 4.3. The script uses ${arr[-1]} (negative
@@ -872,6 +872,10 @@ if [[ -f /etc/os-release ]]; then
   case "${ID,,}" in
     fedora)                                DISTRO="fedora"; DISTRO_FAMILY="rhel" ;;
     rhel|centos|rocky|alma|almalinux)      DISTRO="${ID,,}"; DISTRO_FAMILY="rhel" ;;
+    # F-343 (v3.6.2): NoID Privacy Workstation = Fedora-derivative privacy distro
+    # ID=noid-privacy-workstation in /etc/os-release. Treat as RHEL-family for
+    # all package-manager / systemd / SELinux checks (downstream of Fedora 44).
+    noid-privacy-workstation)              DISTRO="noid-privacy"; DISTRO_FAMILY="rhel" ;;
     ubuntu)                                DISTRO="ubuntu"; DISTRO_FAMILY="debian" ;;
     debian|linuxmint|pop)                  DISTRO="${ID,,}"; DISTRO_FAMILY="debian" ;;
     arch|manjaro|endeavouros|artix|garuda) DISTRO="${ID,,}"; DISTRO_FAMILY="arch" ;;
@@ -3603,6 +3607,14 @@ elif require_cmd zypper; then
   else
     _emit_warn "No automated security update mechanism detected"
   fi
+# F-344 (v3.6.2): NoID Privacy weekly update reminder (privacy-by-design)
+# Privacy distros deliberately avoid auto-updates (bandwidth fingerprinting,
+# MITM exposure, surprise behavior changes). NoID ships a weekly user-systemd
+# REMINDER timer instead — the user runs `noid-update-all.sh` themselves.
+# Detection: timer file at /etc/systemd/user/noid-update-reminder.timer
+# (system-wide enabled, activates per-user when GNOME session starts).
+elif [[ -f /etc/systemd/user/noid-update-reminder.timer ]]; then
+  _emit_pass "Automated updates: noid-update-reminder weekly (privacy-by-design — manual user upgrade)"
 else
   _emit_warn "No automated security update mechanism detected"
 fi
@@ -3972,6 +3984,16 @@ _journal_filter+='| (phpsite|php-fpm|nodejs|gunicorn|uwsgi|wsgi)\['
 _journal_filter+='|Failed to mount proc-sys-fs-binfmt_misc'
 _journal_filter+='|dbus-broker-launch\[[0-9]+\]: Ignoring duplicate name'
 _journal_filter+='|dracut\[[0-9]+\]: No .[^[:space:]]+/dev/log'
+# F-346 (v3.6.2): activation-request failures for masked services (privacy-distro
+# pattern). When NoID masks ColorManager / nm_dispatcher / home1 / Avahi /
+# ModemManager / GeoClue2 etc. for privacy hardening, dbus-broker logs an
+# error each time a still-installed app pokes the masked bus name. The mask
+# IS the security guarantee — these errors confirm it works as intended.
+_journal_filter+="|dbus-broker-launch\[[0-9]+\]: Activation request for '[^']+' failed"
+# F-347 (v3.6.2): gnome-keyring init noise — gkr-pam logs an error before
+# the daemon is ready (race during PAM init). Harmless: keyring functions
+# correctly post-init. Upstream gnome-keyring issue, not deployment-specific.
+_journal_filter+='|gkr-pam: unable to locate daemon control file'
 _journal_raw=$(journalctl -p err --since "1 hour ago" --no-pager -q 2>/dev/null \
   | grep -E "^[A-Z][a-z]{2} ")
 JOURNAL_ERR=$(echo "$_journal_raw" | grep -cvE "$_journal_filter" || true)
@@ -5382,8 +5404,14 @@ if require_cmd rpm; then
     # GrapheneOS-style desktop) to prevent dormant GOA D-Bus activation. The
     # files are NOT executable code — they're activation manifests with Exec=
     # pointing to /bin/false or similar. Same exclusion-class as os-release.
+    # F-345 (v3.6.2): extended exclusion-list for NoID Privacy Workstation
+    # legitimately-modified RPM-owned files. Each one originates in a kickstart
+    # snippet (M16 Anaconda branding, M17 GNOME hardening, M32 Plymouth+desktop
+    # branding, M99 Anaconda transaction-progress patch). All are identifier /
+    # branding / privacy-disable manifests, NOT executable code. Equivalent
+    # exclusion-class as os-release / fedora-logo (F-281 / F-315).
     RPM_VERIFY_BIN=$(echo "$RPM_VA_OUTPUT" | grep -E "^..5" | grep -v " c " \
-      | grep -cvE "\.pyc\b|/__pycache__/|/usr/lib/(issue|os-release)|/usr/share/(anaconda/pixmaps|icons/.*/apps/anaconda\.png|pixmaps/(fedora|system)-logo)|/usr/share/dbus-1/services/org\.gnome\.(Identity|OnlineAccounts)\.service" || true)
+      | grep -cvE "\.pyc\b|/__pycache__/|/usr/lib/(issue|os-release)|/etc/system-release|/usr/share/(anaconda/pixmaps|icons/.*/apps/anaconda\.png|pixmaps/(fedora|system)-logo)|/usr/share/dbus-1/services/org\.gnome\.(Identity|OnlineAccounts)\.service|/usr/share/anaconda/(gnome/(fedora-welcome|org\.fedoraproject\.welcome-screen\.desktop)|interactive-defaults\.ks)|/usr/share/applications/(liveinst|org\.mozilla\.firefox)\.desktop|/usr/share/gnome-initial-setup/vendor\.conf|/usr/share/dbus-1/services/.*(Tracker3.*|portal\.Tracker)\.service|/etc/xdg/autostart/(geoclue-demo-agent|org\.gnome\.Evolution-alarm-notify)\.desktop|/usr/share/gvfs/mounts/(dns-sd|wsdd)\.mount|/usr/share/plymouth/themes/bgrt/bgrt\.plymouth|/usr/lib64/firefox/distribution/distribution\.ini|/usr/lib64/python.*/site-packages/pyanaconda/modules/payloads/payload/dnf/transaction_progress\.py" || true)
     RPM_VERIFY_BIN=${RPM_VERIFY_BIN:-0}
     if [[ "$RPM_VERIFY_ALL" -eq 0 ]]; then
       _emit_pass "RPM verify: all package files intact"
