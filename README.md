@@ -5,7 +5,7 @@
 ### Hardening Posture Audit for Linux Desktops
 
 [![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](https://github.com/NexusOne23/noid-privacy-linux/blob/main/LICENSE)
-[![Version](https://img.shields.io/badge/version-3.6.1-green.svg)](https://github.com/NexusOne23/noid-privacy-linux/releases)
+[![Version](https://img.shields.io/badge/version-3.6.2-green.svg)](https://github.com/NexusOne23/noid-privacy-linux/releases)
 [![Pure Bash](https://img.shields.io/badge/pure-bash-4EAA25.svg?logo=gnu-bash&logoColor=white)](https://github.com/NexusOne23/noid-privacy-linux)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen.svg)](https://github.com/NexusOne23/noid-privacy-linux)
 [![Checks](https://img.shields.io/badge/checks-420%2B-orange.svg)](https://github.com/NexusOne23/noid-privacy-linux)
@@ -142,7 +142,7 @@ sudo bash noid-privacy-linux.sh --json
 ```
 $ sudo bash noid-privacy-linux.sh --ai
 
-  NoID Privacy for Linux v3.6.1 — Hardening Posture Audit for Linux Desktops
+  NoID Privacy for Linux v3.6.2 — Hardening Posture Audit for Linux Desktops
   YYYY-MM-DD HH:MM:SS | mydesktop | 6.19.x-200.fc43.x86_64
   Arch: x86_64 | Distro: Fedora Linux 43 (Workstation Edition)
   Checks: 420+ across 42 sections
@@ -245,7 +245,7 @@ Use NoID Privacy for Linux in your CI/CD pipeline to enforce privacy & security 
 ```yaml
 - name: Hardening Posture Audit
   # SECURITY: Pin to specific version, never @main (supply chain risk)
-  uses: NexusOne23/noid-privacy-linux@v3.6.1
+  uses: NexusOne23/noid-privacy-linux@v3.6.2
   id: audit
   with:
     min-score: '70'   # Fail if score < 70%
@@ -255,8 +255,8 @@ Use NoID Privacy for Linux in your CI/CD pipeline to enforce privacy & security 
 
 | Input | Default | Description |
 |-------|---------|-------------|
-| `min-score` | `0` | Minimum score to pass (0 = never fail). Canonical name since v3.5.0. |
-| `fail-threshold` | `''` | DEPRECATED alias for `min-score`. Will be removed in v4.0. |
+| `min-score` | `0` | Minimum score to pass (0 = never fail). |
+| `fail-threshold` | `''` | DEPRECATED alias for `min-score`. Use `min-score` in new workflows. |
 | `ai` | `false` | Generate AI remediation prompt in summary |
 | `skip` | `''` | Comma-separated sections to skip |
 | `args` | `''` | Additional arguments for the script |
@@ -280,7 +280,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4.2.2
-      - uses: NexusOne23/noid-privacy-linux@v3.6.1  # Pin to version, not @main
+      - uses: NexusOne23/noid-privacy-linux@v3.6.2  # Pin to version, not @main
         with:
           min-score: '70'
 ```

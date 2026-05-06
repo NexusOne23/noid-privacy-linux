@@ -182,7 +182,7 @@ jobs:
 
   api-lint:
     name: API Layer Lint
-    # v3.8: enforce capability-layer usage. Catches direct API calls
+    # Enforce capability-layer usage. Catches direct API calls
     # bypassing _fw_get_policies / _service_masked_any and the 11
     # bug-pattern classes (locale, name-shadow, grep-r, API-version,
     # regex-globals, ((var++)) bombs, systemd-analyze/free locale,
@@ -198,7 +198,7 @@ jobs:
 
   bats-tests:
     name: BATS Unit Tests
-    # v3.8: BATS test-suite preventing regressions of the 11 bug-pattern
+    # BATS test-suite preventing regressions of the 11 bug-pattern
     # classes (extended from 5 to 11 across v3.6.0 and v3.6.1) documented
     # in feedback_noid_audit_bug_patterns.md.
     runs-on: ubuntu-latest

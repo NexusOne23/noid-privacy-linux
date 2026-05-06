@@ -37,7 +37,7 @@ if [[ -n "${INPUT_ARGS:-}" ]]; then
 fi
 
 # F-272: min-score is canonical (semantic-correct name); fail-threshold
-# is the deprecated v3.x alias. Either one accepted — new takes priority.
+# is the deprecated alias. Either one accepted — new takes priority.
 MIN_SCORE_THRESHOLD="${INPUT_MIN_SCORE:-${INPUT_FAIL_THRESHOLD:-0}}"
 
 # --- Run audit (single JSON run with optional ai_prompt embedded) ---

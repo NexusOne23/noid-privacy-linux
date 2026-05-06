@@ -725,8 +725,7 @@ detection or scoring logic.
     matching actual v3.6.1 output ranges.
   * **SECURITY.md "Last Updated"** date bumped to 2026-05-03 (was
     April 30, 2026), policy version to 1.6.1.
-  * **tests/README.md** "introduced in v3.8" corrected to v3.6 (v3.8
-    label was a future-tense anachronism — current is v3.6.1).
+  * **tests/README.md** misleading version-tag corrected (anachronism cleanup).
   * **SECURITY.md supported-version table** for v3.6.x extended with
     F-337/F-338 highlights so readers see the v3.6.1 improvements
     surface-level.
@@ -833,9 +832,8 @@ F-341a/b are cosmetic doc-corrections.
   three times already during release night).
 - No new bug patterns. F-273/274/275/281/282 are all instances of the
   long-standing meta-lesson: "context-aware severity beats hardcoded
-  severity". A future v3.7 architectural change (Live-ISO mode detection)
-  will systematize this further; v3.6.1 is the targeted patch for these
-  five concrete miss-classifications.
+  severity". v3.6.1 is the targeted patch for these five concrete
+  miss-classifications.
 - Lint patterns 1–8 still pass; no new patterns added (these are logic fixes,
   not API-surface changes).
 - BATS test-suite extended with regression tests for F-273/274/275 —
@@ -850,15 +848,15 @@ F-341a/b are cosmetic doc-corrections.
 
 ## [3.6.0] - 2026-04-30
 
-### 🎯 Posture-Communication, Detection-Depth, Engineering-Discipline & Compliance — Four-Tier Sprint
+### 🎯 Posture-Communication, Detection-Depth, Engineering-Discipline & Compliance
 
-A four-themed sprint compressed into one release: honest score communication
-(v3.6 theme), real detection depth via journalctl/HSI/baseline-diff (v3.7),
-engineering rigor through capability layer + BATS tests + 8-pattern lint
-(v3.8), and CIS Level 1/Level 2/STIG mapping (v3.9). Plus 13 bugs surfaced
-by two passes of line-by-line audit on the released v3.5.0.
+Four themes shipped in one release: honest score communication, real
+detection depth via journalctl/HSI/baseline-diff, engineering rigor through
+capability layer + BATS tests + 8-pattern lint, and CIS Level 1/Level 2/STIG
+mapping. Plus 13 bugs surfaced by two passes of line-by-line audit on the
+released v3.5.0.
 
-#### Added — Posture-Communication (v3.6 tier)
+#### Added — Posture-Communication
 
 - **Tagline rename**: "Privacy & Security Audit" → "Hardening Posture Audit"
   (banner, README, help, header comment, GitHub Action description). The
@@ -893,7 +891,7 @@ by two passes of line-by-line audit on the released v3.5.0.
 - **`--verbose` / `-v` flag**: full PASS detail (boot params + sysctl keys
   individually). Explicit short flag for quick toggle.
 
-#### Added — Detection-Depth (v3.7 tier)
+#### Added — Detection-Depth
 
 - **AIDE actual integrity-check status** (Section 30): reads last
   `aide-check.service` run from `journalctl -u aide-check.service` (last
@@ -923,7 +921,7 @@ by two passes of line-by-line audit on the released v3.5.0.
   signature, new since baseline). `NOID_RPM_BASELINE_UPDATE=1` rewrites
   the baseline.
 
-#### Added — Engineering-Discipline (v3.8 tier)
+#### Added — Engineering-Discipline
 
 - **Capability detection layer** (`_detect_capabilities()` + `_CAPS[]`
   associative array): runs once at script startup. Detects firewalld
@@ -967,7 +965,7 @@ by two passes of line-by-line audit on the released v3.5.0.
   `_detect_capabilities()` body itself from Pattern 1 (it must use the
   raw API to discover whether the API exists).
 
-#### Added — Compliance (v3.9 tier)
+#### Added — Compliance
 
 - **`Docs/CIS_RHEL9_MAPPING.md`**: 52-row mapping table from NoID checks
   to CIS RHEL 9 Level 1 / Level 2 / DISA STIG control IDs. Covers
@@ -977,8 +975,7 @@ by two passes of line-by-line audit on the released v3.5.0.
 - **`--cis-l1` / `--cis-l2` / `--stig` flags**: when set, append a
   Compliance Coverage block at the end of the audit summarizing how
   many controls of the chosen tier are mapped (parsed from the doc).
-  Static doc-based summary for v3.6.0 — runtime per-finding tagging
-  is v3.10 backlog.
+  Static doc-based summary.
 - **`scripts/coverage-report.sh`**: standalone parser for
   `Docs/CIS_RHEL9_MAPPING.md` that emits coverage statistics. Used by
   the main script when compliance flags are set; also runnable
@@ -1187,12 +1184,12 @@ section below).
   array (F-014) is the single source of truth for `--skip` keys and
   TOTAL_SECTIONS count.
 
-#### Internal — Architecture Deferrals
+#### Internal — Known Architecture Notes
 
-- F-015 (nested function definitions becoming globals) deferred to v4.0 —
-  callbacks like `_de_lock_check_cb` defined inside `check_desktop_session`
-  leak to global scope per Bash semantics. Refactor to top-level helpers
-  is a large surface-area change that warrants a major version bump.
+- F-015 (nested function definitions becoming globals): callbacks like
+  `_de_lock_check_cb` defined inside `check_desktop_session` leak to global
+  scope per Bash semantics. Refactor to top-level helpers is a large
+  surface-area change; current behavior is functionally correct.
 
 ---
 

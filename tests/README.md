@@ -1,8 +1,10 @@
 # NoID Privacy for Linux — Test Suite
 
 This directory contains the BATS (Bash Automated Testing System) test-suite
-introduced in v3.6 to prevent regressions of the bug classes documented in
-the v3.5.0 → v3.6 audit (5 initial patterns; extended to 11 in v3.6.1).
+that prevents regressions of the 11 documented bug-pattern classes (locale,
+name-shadow, grep-r on symlinks, API-versioning, regex-globals, `((var<op>))`
+arithmetic-command counters, locale-aware tools missing `LC_ALL=C`, and
+unanchored `grep nameserver` on resolv.conf).
 
 ## Layout
 
@@ -10,19 +12,24 @@ the v3.5.0 → v3.6 audit (5 initial patterns; extended to 11 in v3.6.1).
 tests/
 ├── README.md                 # this file
 ├── fixtures/                 # captured command outputs for reproducible tests
-│   ├── chage-l-en.txt        # English `chage -l` output
-│   ├── chage-l-de.txt        # German `chage -l` output (locale-bug fixture)
-│   ├── chage-l-en-expiry-set.txt
-│   ├── systemctl-is-enabled-masked.txt
-│   ├── systemctl-is-enabled-disabled.txt
-│   ├── firewall-cmd-policies-deprecated.txt
-│   └── firewall-cmd-policies-new.txt
+│   ├── chage-l-en.txt                       # English `chage -l` output
+│   ├── chage-l-de.txt                       # German `chage -l` output (locale-bug fixture)
+│   ├── chage-l-en-expiry-set.txt            # `chage -l` with hardened max-days
+│   ├── firewall-cmd-policies-deprecated.txt # firewalld 0.8 --list-policies output
+│   ├── firewall-cmd-policies-new.txt        # firewalld 0.9+ --get-policies output
+│   ├── pam-no-nullok.txt                    # PAM stack without nullok
+│   ├── pam-with-nullok.txt                  # PAM stack with nullok present
+│   ├── shadow-np-accounts.txt               # /etc/shadow with NP-status accounts
+│   ├── shadow-passworded.txt                # /etc/shadow with regular accounts
+│   ├── systemctl-is-enabled-disabled.txt    # systemctl is-enabled output: disabled
+│   └── systemctl-is-enabled-masked.txt      # systemctl is-enabled output: masked
 └── unit/                     # BATS unit tests
-    ├── test_emit_functions.bats         # v3.6 _emit_* refactor
-    ├── test_chage_locale.bats           # Bug Pattern #1 (locale)
-    ├── test_pass_aggregation.bats       # v3.6 PASS-Aggregation helpers
-    ├── test_systemctl_masked.bats       # Bug Pattern #4 (API versioning)
-    └── test_vpn_regex_consistency.bats  # Bug Pattern #5 (regex globals)
+    ├── test_emit_functions.bats             # _emit_* refactor (no name shadowing)
+    ├── test_chage_locale.bats               # Bug Pattern #1 (locale)
+    ├── test_classification_severity.bats    # F-273/F-274/F-275 severity coupling
+    ├── test_pass_aggregation.bats           # PASS-Aggregation helpers
+    ├── test_systemctl_masked.bats           # Bug Pattern #4 (API versioning)
+    └── test_vpn_regex_consistency.bats      # Bug Pattern #5 (regex globals)
 ```
 
 ## Running locally
@@ -64,7 +71,7 @@ condition. The test should:
 
 This prevents future regressions of the same class — see
 `feedback_noid_audit_bug_patterns.md` (project memory) for the
-five recurring patterns.
+recurring patterns.
 
 ## CI integration
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Lint: forbid direct API calls that bypass the v3.8 capability layer
+# Lint: forbid direct API calls that bypass the v3.6 capability layer
 # or repeat any of the 11 bug-pattern classes from the 2026-04..2026-05 audits
 # (extended from 5 to 11 patterns across v3.6.0 and v3.6.1).
 #
@@ -86,7 +86,7 @@ fi
 # --- Pattern 6: hardcoded VPN-iface regex bypassing _VPN_IFACE_REGEX ---
 # Bug Pattern #5: hand-written subsets of the VPN families list silently
 # misclassify Tailscale/ZeroTier/Mullvad/etc. when only Proton/WireGuard are
-# matched. Regression magnet — re-spotted in the v3.10 audit. Use the global.
+# matched. Regression magnet — use the global.
 echo "[6/11] Checking for hardcoded VPN-iface regex (must use \$_VPN_IFACE_REGEX)..."
 violations=$(grep -nE '\(tun\|tap\|wg\|proton\|pvpn\|tailscale\|zt\|nebula\|mullvad\|nordlynx\)' "$SCRIPT" \
   | grep -vE '_VPN_IFACE_REGEX=' \

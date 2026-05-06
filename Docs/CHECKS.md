@@ -2,9 +2,9 @@
 
 Section-by-section overview of what the audit checks and why it matters.
 
-> **Version:** 3.6.1 | **Total Checks:** 420+ | **Sections:** 42
+> **Version:** 3.6.2 | **Total Checks:** 420+ | **Sections:** 42
 
-> **Cross-distro coverage** — Optimized for Fedora 43+ / RHEL 9+. Debian 12+ / Ubuntu 24.04+, Arch, openSUSE Tumbleweed work but some checks may produce false positives (Snapper-aware, GNOME-centric). DE-aware checks cover GNOME, KDE Plasma 5/6, XFCE, MATE, Cinnamon (since v3.5.0). See `--help` for `--skip` options to suppress sections that don't apply.
+> **Cross-distro coverage** — Optimized for Fedora 43+ / RHEL 9+. Debian 12+ / Ubuntu 24.04+, Arch, openSUSE Tumbleweed work but some checks may produce false positives (Snapper-aware, GNOME-centric). DE-aware checks cover GNOME, KDE Plasma 5/6, XFCE, MATE, Cinnamon. See `--help` for `--skip` options to suppress sections that don't apply.
 
 > **Output mode**: by default, repetitive PASSes (Boot params, sysctl keys)
 > are aggregated into single summary lines (e.g. "Boot hardening: 8/8 params
@@ -131,7 +131,7 @@ Audits recent login activity: failed login attempts, unusual login times, and ro
 ### Section 30: Advanced Hardening
 Checks advanced security features: USBGuard daemon + rules, coredump service state (storage-aware), compiler presence (build-host vs production-server vs desktop), AIDE/Tripwire integrity monitoring, **IMA/EVM kernel integrity with runtime measurement count** (>100 measurements = actively measuring; 0 = active but policy too narrow), FireWire DMA-attack surface, home directory permissions, shell idle TMOUT, AIDE database existence, and shell history sensitive-pattern scan. (Login banner check is in Section 12 / Filesystem.)
 
-**AIDE Integrity Status** (since v3.6, refined v3.6.1 via F-337/F-339): reads `systemctl show aide-check.service -p ExecMainStatus` (the LAST scheduled run's exit code — bitmask 0=clean, 1=added, 2=removed, 4=changed) and classifies as PASS (exit=0) or WARN (exit≠0) with the bitmask value visible in the message. On WARN, the top 5 drift paths from the journal are appended inline (Added/Removed/Changed) so users don't need to manually run `journalctl -u aide-check`. A fresh clean re-run flips PASS/WARN immediately (no 7-day journal-grep stickiness). Set `NOID_AIDE_LIVE=1` env var to additionally run a fresh `aide --check` (slow, up to 5 min) with bitmask exit-code parsing — the log is preserved on drift, deleted on clean.
+**AIDE Integrity Status**: reads `systemctl show aide-check.service -p ExecMainStatus` (the LAST scheduled run's exit code — bitmask 0=clean, 1=added, 2=removed, 4=changed) and classifies as PASS (exit=0) or WARN (exit≠0) with the bitmask value visible in the message. On WARN, the top 5 drift paths from the journal are appended inline (Added/Removed/Changed) so users don't need to manually run `journalctl -u aide-check`. A fresh clean re-run flips PASS/WARN immediately (no 7-day journal-grep stickiness). Set `NOID_AIDE_LIVE=1` env var to additionally run a fresh `aide --check` (slow, up to 5 min) with bitmask exit-code parsing — the log is preserved on drift, deleted on clean.
 
 ### Section 31: Kernel Modules & Integrity
 Audits loaded kernel modules: heuristic name-pattern scan for suspicious modules, 12 disabled filesystem modules per CIS Level 2 (cramfs, freevxfs, jffs2, hfs, hfsplus, squashfs, udf, affs, befs, sysv, qnx4, qnx6), USB storage module blacklist, and kernel module-loading lockdown state. (Thunderbolt device security and FireWire blacklist are checked in Section 21 / Hardware and Section 30 / Hardening respectively.)
@@ -145,7 +145,7 @@ Validates GRUB configuration, boot password protection, and bootloader integrity
 ### Section 34: System Integrity Checks
 Runs package verification (rpm -Va / debsums), checks for modified system binaries, and validates critical file checksums.
 
-**RPM Drift-Detection** (since v3.6, RPM-based distros): set
+**RPM Drift-Detection** (RPM-based distros): set
 `NOID_RPM_BASELINE_INIT=1` once to capture the current modified-file
 list to `/var/lib/noid-privacy/rpm-baseline.txt`. Subsequent runs diff
 against the baseline and alert only on **new** modifications since
@@ -190,7 +190,7 @@ Comprehensive credential audit: password manager detection (17 tools — KeePass
 A separate block after Section 42 — independent of `--skip keyring`:
 
 - **Firmware update status** via `fwupdmgr get-updates` (with `LC_ALL=C` for locale-stable parsing)
-- **HSI (Host Security ID) trust tier** via `fwupdmgr security` (since v3.6): HSI:0=FAIL, HSI:1=WARN, HSI:2=PASS (system-protected baseline), HSI:3+=PASS (heavily-hardened)
+- **HSI (Host Security ID) trust tier** via `fwupdmgr security`: HSI:0=FAIL, HSI:1=WARN, HSI:2=PASS (system-protected baseline), HSI:3+=PASS (heavily-hardened)
 - **HSI failing-attestation count** via `✘`-marker in `fwupdmgr security` output
 - **Thunderbolt device security level** (DMA attack prevention via per-device `/sys/bus/thunderbolt/devices/*/security`)
 
@@ -210,7 +210,7 @@ After all 42 sections, NoID Privacy for Linux calculates a **Hardening Posture S
 
 > **Score interpretation**: The score reflects **applied configuration hardening**, not whether your system is compromised. A 98% score means hardening recipes are well-applied — defense in depth requires complementary tools (AIDE/IMA for integrity monitoring, auditd for behavioral detection, chkrootkit for known-malware scanning). The script's Final Results block surfaces this disclaimer alongside the score.
 
-## 🎯 Compliance Mapping (since v3.6)
+## 🎯 Compliance Mapping
 
 Use `--cis-l1`, `--cis-l2`, or `--stig` to append a compliance coverage block at the end of the audit. The flags reference the static doc-based mapping in [`CIS_RHEL9_MAPPING.md`](CIS_RHEL9_MAPPING.md), which currently maps NoID checks to:
 

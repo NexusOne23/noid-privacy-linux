@@ -10,7 +10,7 @@ This document maps NoID checks to the **CIS Red Hat Enterprise Linux 9 Benchmark
 
 > **Compliance level**: NoID does NOT make NoID an officially CIS-certified tool. It maps NoID's findings to CIS control IDs for transparency and lets compliance-conscious users cross-reference. Official CIS audits should still use `cis-cat-pro` or equivalent.
 
-## Coverage summary (v3.9.0 initial mapping)
+## Coverage summary (v3.6.2)
 
 | Tier | Controls in CIS RHEL 9 | NoID-mapped | Coverage |
 |------|------------------------|-------------|----------|

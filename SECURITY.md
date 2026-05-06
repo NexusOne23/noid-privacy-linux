@@ -78,15 +78,16 @@ NoID Privacy for Linux is designed with security in mind:
 
 | Version | Supported          | Notes |
 | ------- | ------------------ | ----- |
-| 3.6.x   | ✅ Fully Supported | Current release — Hardening Posture rebrand, capability layer, BATS test-suite, 11-pattern API-lint (extended in v3.6.1), CIS L1/L2/STIG mapping, HSI integration, AIDE last-run authoritative (F-337), find-performance via -prune (F-338) |
-| 3.5.x   | ✅ Supported       | DE dispatcher (KDE/XFCE/MATE/Cinnamon), exit codes, signal handling, ShellCheck-clean — upgrade to 3.6.x recommended |
-| 3.4.x   | ⚠️ Limited Support  | Upgrade to 3.6.x recommended |
-| 3.3.x   | ⚠️ Limited Support  | Upgrade to 3.6.x recommended |
-| 3.1.x   | ❌ End of Life     | Upgrade to 3.6.x |
-| 2.0.x   | ❌ End of Life     | Upgrade to 3.6.x |
+| 3.6.2   | ✅ Fully Supported | Current release — Hardening Posture rebrand, capability layer, BATS test-suite, 11-pattern API-lint, CIS L1/L2/STIG mapping, HSI integration, AIDE last-run authoritative (F-337), find-performance via -prune (F-338), NoID Workstation 44 false-positive fixes (F-343..F-348) |
+| 3.6.0–3.6.1 | ✅ Supported   | Earlier 3.6 series — upgrade to 3.6.2 recommended |
+| 3.5.x   | ✅ Supported       | DE dispatcher (KDE/XFCE/MATE/Cinnamon), exit codes, signal handling, ShellCheck-clean — upgrade to 3.6.2 recommended |
+| 3.4.x   | ⚠️ Limited Support  | Upgrade to 3.6.2 recommended |
+| 3.3.x   | ⚠️ Limited Support  | Upgrade to 3.6.2 recommended |
+| 3.1.x   | ❌ End of Life     | Upgrade to 3.6.2 |
+| 2.0.x   | ❌ End of Life     | Upgrade to 3.6.2 |
 | 1.x     | ❌ Not Supported   | Legacy version |
 
-**Recommendation:** Always use the latest v3.x release.
+**Recommendation:** Use v3.6.2.
 
 ---
 
@@ -105,7 +106,7 @@ NoID Privacy for Linux is designed with security in mind:
 2. ✅ **Check the Source**
    - Download only from the official GitHub repository
    - Verify the URL: `https://github.com/NexusOne23/noid-privacy-linux`
-   - For CI/CD usage: pin to a specific version (`@v3.5.0`), never `@main`
+   - For CI/CD usage: pin to a specific version (`@v3.6.2`), never `@main`
 
 3. ✅ **Verify against the GitHub repository commit hash**
    ```bash
@@ -156,31 +157,29 @@ NoID Privacy for Linux is designed with security in mind:
 - **ShellCheck**: clean at `--severity=style` (the strictest level) — see
   `.shellcheckrc` for the project-wide rationale on SC2059 (color-format
   strings) and SC2329 (callback dispatch / signal traps). The CI gate
-  enforces `--severity=warning`; style-level cleanliness is a v3.5.0
-  improvement.
-- **API-Layer Lint** (since v3.6, extended to 11 patterns in v3.6.1):
-  `scripts/lint-api-usage.sh` enforces anti-regression patterns covering the
-  bug classes documented in `feedback_noid_audit_bug_patterns.md` — direct
-  firewalld API bypassing capability layer, `systemctl is-masked`
-  (non-existent verb), `grep -r` on symlinked dirs, bare
-  `pass()/fail()/warn()/info()` reintroductions, `chage -l` without
-  `LC_ALL=C`, hardcoded VPN-iface regex, `df -T NR==2` wrap-vulnerable
-  patterns, `fwupdmgr`/`bluetoothctl` without `LC_ALL=C`, **`((var<op>))`
-  arithmetic-command counters that bomb under `set -e`** (Pattern 9, F-291
-  + F-306 extended to all `++`/`--`/`+=`/`-=`/`*=`/`/=`/`%=` forms),
+  enforces `--severity=warning`.
+- **API-Layer Lint**: `scripts/lint-api-usage.sh` enforces 11
+  anti-regression patterns covering the bug classes documented in
+  `feedback_noid_audit_bug_patterns.md` — direct firewalld API bypassing
+  capability layer, `systemctl is-masked` (non-existent verb), `grep -r`
+  on symlinked dirs, bare `pass()/fail()/warn()/info()` reintroductions,
+  `chage -l` without `LC_ALL=C`, hardcoded VPN-iface regex, `df -T NR==2`
+  wrap-vulnerable patterns, `fwupdmgr`/`bluetoothctl` without `LC_ALL=C`,
+  **`((var<op>))` arithmetic-command counters that bomb under `set -e`**
+  (Pattern 9, all `++`/`--`/`+=`/`-=`/`*=`/`/=`/`%=` forms),
   **`systemd-analyze`/`virsh`/`resolvectl`/`free` without `LC_ALL=C`**
-  (Pattern 10, F-298 + F-307 extended `free` regex to `free -flag` forms),
-  and **unanchored `grep nameserver` on resolv.conf** (Pattern 11, F-296
-  catches commented entries reported as active DNS servers).
-- **BATS unit tests** (since v3.6): `tests/unit/` covers the bug-pattern
-  classes via `bats` runner against `tests/fixtures/`.
+  (Pattern 10, `free -flag` forms covered), and **unanchored `grep
+  nameserver` on resolv.conf** (Pattern 11, catches commented entries
+  reported as active DNS servers).
+- **BATS unit tests**: `tests/unit/` covers the bug-pattern classes via
+  `bats` runner against `tests/fixtures/`.
 - **bash -n**: Syntax validation in CI across Ubuntu 22.04/24.04,
-  Fedora 42/43/**44**, Debian 12, and **Arch Linux** (7-distro matrix
-  since v3.6). Plus a real audit-smoke test job that runs the audit on
-  Ubuntu with `--offline` and validates JSON output parses.
-- **Audit-Locale Matrix** (since v3.6): runs the audit under `en_US`,
-  `de_DE`, `fr_FR` locales to catch the locale-bug class
-  (`chage`/`fwupdmgr`/`bluetoothctl` translatable labels).
+  Fedora 42/43/**44**, Debian 12, and **Arch Linux** (7-distro matrix).
+  Plus a real audit-smoke test job that runs the audit on Ubuntu with
+  `--offline` and validates JSON output parses.
+- **Audit-Locale Matrix**: runs the audit under `en_US`, `de_DE`, `fr_FR`
+  locales to catch the locale-bug class (`chage`/`fwupdmgr`/`bluetoothctl`
+  translatable labels).
 - **Manual Review**: Every PR is reviewed for security implications.
 
 ### Verification
@@ -193,10 +192,10 @@ bash -n noid-privacy-linux.sh
 # ShellCheck (if installed)
 shellcheck noid-privacy-linux.sh
 
-# API-layer lint (since v3.6)
+# API-layer lint
 bash scripts/lint-api-usage.sh noid-privacy-linux.sh
 
-# BATS unit tests (since v3.6)
+# BATS unit tests
 bats tests/unit/
 ```
 
@@ -221,5 +220,5 @@ For licensing questions, see [LICENSE](LICENSE) or open a [Discussion](https://g
 
 ---
 
-**Last Updated**: May 3, 2026
-**Policy Version**: 1.6.1
+**Last Updated**: May 6, 2026
+**Policy Version**: 1.6.2

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Coverage-Report Generator (v3.9)
+# Coverage-Report Generator (v3.6.2)
 #
 # Parses Docs/CIS_RHEL9_MAPPING.md and generates a summary of how many
 # CIS L1 / L2 / STIG controls NoID maps to. Used by the main script when

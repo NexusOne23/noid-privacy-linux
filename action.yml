@@ -15,7 +15,7 @@ inputs:
     required: false
     default: '0'
   fail-threshold:
-    description: 'DEPRECATED alias for min-score. Use min-score in new workflows; this name will be removed in v4.0.'
+    description: 'DEPRECATED alias for min-score. Use min-score in new workflows.'
     required: false
     default: ''
   ai:

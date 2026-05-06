@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 ###############################################################################
-#  NoID Privacy for Linux v3.6.1 — Hardening Posture Audit
+#  NoID Privacy for Linux v3.6.2 — Hardening Posture Audit
 #  Copyright (C) 2026 Fabio Mantegna (NexusOne23)
 #
 #  This program is free software: you can redistribute it and/or modify
@@ -40,7 +40,7 @@ NO_COLOR=false
 AI_MODE=false
 JSON_MODE=false
 VERBOSE=false
-COMPLIANCE_MODE=""    # v3.9: cis-l1 / cis-l2 / stig — emits coverage report
+COMPLIANCE_MODE=""    # cis-l1 / cis-l2 / stig — emits coverage report
 declare -a SKIP_SECTIONS=()
 declare -a FAIL_MSGS=()
 declare -a WARN_MSGS=()
@@ -81,7 +81,7 @@ Options:
                   netleaks (network-side leak tests in vpn section),
                   summary (final results block)
 
-Environment variables (v3.7+ opt-in detection-depth features):
+Environment variables (opt-in detection-depth features):
   NOID_AIDE_LIVE=1            Run actual aide --check (slow: up to 5min)
   NOID_RPM_BASELINE_INIT=1    Capture current rpm -V state as baseline
   NOID_RPM_BASELINE_UPDATE=1  Update existing baseline with current state
@@ -96,7 +96,7 @@ Examples:
   sudo NOID_RPM_BASELINE_INIT=1 bash noid-privacy-linux.sh
   sudo bash noid-privacy-linux.sh --verbose            # full PASS detail
 
-420+ checks. Requires root. Tested on Fedora 43, RHEL 9, Debian 12, Ubuntu 24.04.
+420+ checks. Requires root. Optimized for Fedora 39+ / RHEL 9+. Tested on Ubuntu/Debian. Best-effort on Arch / openSUSE / Mint / Pop!_OS.
 EOF
   exit 0
 }
@@ -278,7 +278,7 @@ require_cmd() {
   command -v "$1" &>/dev/null
 }
 
-# --- Capability Detection Layer (v3.8) ---
+# --- Capability Detection Layer ---
 # Eliminates the bug class where API-version differences across distros
 # silently break checks. Section code uses _fw_*, _systemd_* helpers
 # instead of raw command invocations.
@@ -1517,7 +1517,7 @@ if require_cmd firewall-cmd && systemctl is-active firewalld &>/dev/null; then
   fi
 
   # Firewall Policies (firewalld 0.9+: inter-zone traffic control)
-  # v3.8: query via capability layer — automatically uses --get-policies
+  # Query via capability layer — automatically uses --get-policies
   # (0.9+) or falls back to --list-policies (0.8-) based on _CAPS detection.
   FWD_POLICIES=$(_fw_get_policies || true)
   # Normalize: --get-policies returns single line space-separated, normalize to
@@ -4952,7 +4952,7 @@ if [[ -d /sys/kernel/security/ima ]]; then
   else
     _emit_pass "IMA violations: 0"
   fi
-  # v3.7: actively-measuring signal (count > 0 means policy is hitting files)
+  # Actively-measuring signal (count > 0 means policy is hitting files)
   _IMA_COUNT_FILE=/sys/kernel/security/integrity/ima/runtime_measurements_count
   if [[ -r "$_IMA_COUNT_FILE" ]]; then
     _IMA_COUNT=$(< "$_IMA_COUNT_FILE")
@@ -5088,7 +5088,7 @@ if require_cmd aide; then
   fi
 fi
 
-# v3.7: AIDE actual integrity-check status (not just existence)
+# AIDE actual integrity-check status (not just existence)
 # Reads last scheduled run from journal + offers opt-in fresh check via
 # NOID_AIDE_LIVE=1. Without this, "AIDE installed" was a placebo signal.
 sub_header "AIDE Integrity Status"
@@ -5442,7 +5442,7 @@ if require_cmd rpm; then
       _emit_fail "RPM verify: $RPM_VERIFY_BIN binaries with changed checksums!"
     fi
 
-    # v3.7: RPM drift-detection via baseline diff
+    # RPM drift-detection via baseline diff
     # First run: NOID_RPM_BASELINE_INIT=1 captures current state
     # Subsequent runs: diff against baseline, alert on NEW modifications
     # Catches XZ-Backdoor-class changes (modified binary, valid signature,
@@ -7257,7 +7257,7 @@ if command -v fwupdmgr &>/dev/null; then
     _emit_info "Could not check firmware updates"
   fi
 
-  # v3.7: HSI (Host Security ID) — concrete firmware trust tier signal,
+  # HSI (Host Security ID) — concrete firmware trust tier signal,
   # not just "fwupd installed?". HSI:2+ = typical secure baseline,
   # HSI:0 = fundamental issues. Adds real hardware-trust dimension.
   # `fwupdmgr security` has no --no-history-check flag (that one belongs to
@@ -7472,7 +7472,7 @@ else
   printf "${CYN}Report generated: $NOW${RST}\n"
   printf "${CYN}by NexusOne23 — NoID Privacy for Linux v${NOID_PRIVACY_VERSION} | https://noid-privacy.com/linux.html${RST}\n"
 
-  # --- v3.9: Compliance coverage report (if --cis-l1 / --cis-l2 / --stig set) ---
+  # --- Compliance coverage report (if --cis-l1 / --cis-l2 / --stig set) ---
   if [[ -n "$COMPLIANCE_MODE" ]]; then
     _NOID_DIR="$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")"
     _COVERAGE_SCRIPT="$_NOID_DIR/scripts/coverage-report.sh"
@@ -7483,8 +7483,7 @@ else
         printf "${YLW}⚠️  Coverage report unavailable — see Docs/CIS_RHEL9_MAPPING.md${RST}\n"
       echo ""
       printf "${CYN}Detail: Docs/CIS_RHEL9_MAPPING.md (mapping table)${RST}\n"
-      printf "${CYN}Note:   Run-time per-check coverage requires per-finding tagging${RST}\n"
-      printf "${CYN}        (planned for v3.10 — current is static doc-based summary).${RST}\n"
+      printf "${CYN}Note:   Coverage is a static doc-based summary.${RST}\n"
     else
       printf "${YLW}⚠️  Compliance flag set but scripts/coverage-report.sh not found${RST}\n"
     fi

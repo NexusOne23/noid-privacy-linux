@@ -41,8 +41,8 @@ Thank you for your interest in contributing to NoID Privacy for Linux! This guid
 
 ### Requirements
 
-- Linux desktop (Fedora 43+, Ubuntu 24.04+, Debian 12+)
-- Bash 4.3+ (negative array indices required since v3.6.1)
+- Linux desktop — Fedora 39+ / RHEL 9+ optimized; Ubuntu 22.04+ / Debian 12+ tested; Arch / openSUSE / Mint / Pop!_OS best-effort
+- Bash 4.3+ (negative array indices required)
 - Root access for testing (`sudo`)
 - Optional but recommended: [ShellCheck](https://www.shellcheck.net/)
 
@@ -128,7 +128,7 @@ noid-privacy-linux.sh
 | `_fw_get_policies` | Capability-aware firewalld policy lister | `FWD_POLICIES=$(_fw_get_policies)` |
 | `_service_masked_any svc1 svc2` | Returns 0 if any service is masked | `_service_masked_any sshd ssh` |
 
-> **Naming convention** (v3.6+): all emitters are underscore-prefixed
+> **Naming convention**: all emitters are underscore-prefixed
 > (`_emit_*`) to prevent name-collision with CLI tools like `pass`
 > (password-store) or `info` (texinfo). The lint script
 > `scripts/lint-api-usage.sh` rejects bare-name reintroduction.
@@ -220,7 +220,7 @@ If your checks don't fit any existing section, you can propose a new one:
 5. **Add a BATS regression test** under `tests/unit/` if the check
    matches one of the 11 bug-pattern classes (locale/name-shadow/
    grep-r/API-version/regex-globals/((var<op>))-bombs/free-locale/
-   unanchored-grep-nameserver — extended from 5 to 11 in v3.6.1)
+   unanchored-grep-nameserver)
 6. **Update `--help`** skip-keyword list (alphabetical inside its tier
    — see existing format)
 
@@ -339,7 +339,7 @@ shellcheck --severity=warning noid-privacy-linux.sh
 bash scripts/lint-api-usage.sh noid-privacy-linux.sh
 ```
 
-The 11-pattern lint enforces (extended from 8 patterns to 11 in v3.6.1):
+The 11-pattern lint enforces:
 
 1. No direct firewalld policy API calls (use `_fw_get_policies`)
 2. No `systemctl is-masked` (use `_service_masked_any`)
