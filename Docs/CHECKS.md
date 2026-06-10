@@ -1,0 +1,238 @@
+# 📋 NoID Privacy for Linux — Section Overview
+
+Section-by-section overview of what the audit checks and why it matters.
+
+> **Version:** 3.7.0 | **Total Checks:** 420+ | **Sections:** 42
+
+> **Cross-distro coverage** — Optimized for Fedora 39+ / RHEL 9+. Debian 12+ / Ubuntu 22.04+, Arch, openSUSE Tumbleweed work but some checks may produce false positives (Snapper-aware, GNOME-centric). DE-aware checks cover GNOME, KDE Plasma 5/6, XFCE, MATE, Cinnamon. See `--help` for `--skip` options to suppress sections that don't apply.
+
+> **Output mode**: by default, repetitive PASSes (Boot params, sysctl keys)
+> are aggregated into single summary lines (e.g. "Boot hardening: 8/8 params
+> set"). Use `--verbose` for full per-item detail; `--json` always includes
+> all findings.
+
+> **Note**: This is a high-level overview. For the full enumeration of every
+> individual check, severity-trigger conditions, and pass/fail values, read
+> [`noid-privacy-linux.sh`](../noid-privacy-linux.sh) directly — the script
+> is intentionally one file in pure Bash, designed to be readable.
+
+---
+
+## 🛡️ Security Sections (01–34)
+
+### Section 01: Kernel & Boot Integrity
+Verifies the foundation of system security: Secure Boot status, kernel lockdown mode, LUKS full-disk encryption, UEFI firmware, and boot parameter integrity. A compromised boot chain means nothing else matters.
+
+### Section 02: SELinux / AppArmor (MAC)
+Checks Mandatory Access Control enforcement. SELinux (Fedora/RHEL) or AppArmor (Ubuntu/Debian) — verifies enforcing mode, policy status, and confined processes. MAC prevents privilege escalation even if an app is compromised.
+
+### Section 03: Firewall
+Audits firewalld zones (target, open services/ports, active interface assignments, rich rules, forward-ports, masquerading, inter-zone policies), ufw status + default-incoming policy, or iptables INPUT/FORWARD default policies — whichever firewall is present. Also checks denied-packet logging (with privacy-by-design awareness) and fails when no firewall is detected at all.
+
+### Section 04: nftables & Kill-Switch
+Checks nftables ruleset for VPN kill-switch configuration — ensuring all traffic is blocked if the VPN drops. Validates that non-VPN traffic is properly denied.
+
+### Section 05: VPN & Network
+Detects active VPN connections (WireGuard, OpenVPN, ProtonVPN, etc.), validates default route through VPN, checks for DNS leaks, IPv6 leaks, and WebRTC leaks. Verifies the VPN is actually protecting your traffic.
+
+### Section 06: Kernel Hardening (sysctl)
+Audits critical sysctl parameters: ASLR level, kernel pointer hiding (`kptr_restrict`), dmesg restriction, unprivileged BPF/userns, SYN cookies, ICMP redirects, IP forwarding, and core dump limits. These are your kernel's immune system.
+
+### Section 07: Services & Daemons
+Identifies unnecessary running services that increase attack surface: Avahi, CUPS, SSH, Samba, NFS, rpcbind, telnet, FTP. Each unnecessary service is a potential entry point.
+
+### Section 08: Open Ports & Listeners
+Uses `ss` to enumerate all listening TCP/UDP ports, identifies the process behind each, and flags unexpected listeners. Compares against expected services.
+
+### Section 09: SSH Hardening
+SSH audit (skipped with a PASS when no SSH unit is enabled or running — smallest attack surface): root login, password authentication, empty-password login (`PermitEmptyPasswords`), pubkey authentication, X11 forwarding, max auth tries, login grace time, user/group whitelists, **effective cipher/MAC/key-exchange algorithm strength** (from `sshd -T`, config fallback — sha1/md5/96-bit/CBC/3des/arcfour classes flagged), and per-user SSH key strength (DSA deprecated, RSA ≥2048/4096, ECDSA ≥P-256).
+
+### Section 10: Audit System
+Checks if auditd is running, validates audit rules, log file permissions, and configuration. The audit system is your security camera — if it's off, you're blind.
+
+### Section 11: Users & Authentication
+Audits user accounts: UID 0 accounts (should only be root), empty passwords, login shell assignments, password aging policies, sudo group membership, and PAM configuration.
+
+### Section 12: Filesystem Security
+Checks SUID/SGID binary counts against calibrated thresholds (snapshot/container-storage-aware), world-writable files on system paths **and separately in user homes** (homes are their own mounts on Fedora-default btrfs — a plain `-xdev` scan never sees them), unowned files, /tmp mount options (nosuid, noexec), **/home mount hardening** (nosuid,nodev on separate-mount /home — what keeps SUID files in user dirs inert), swappiness (ZRAM-aware), ACL support, core dump configuration, permissions on critical files (/etc/passwd, /etc/shadow, /etc/gshadow, /etc/group, /etc/crontab, sshd_config, grub.cfg), and login banners for system-info leaks. Prevents privilege escalation via filesystem tricks.
+
+### Section 13: Encryption & Crypto
+Validates LUKS encryption status and cipher strength (aes-xts = strong, aes-cbc = warn), reports key size and OpenSSL version, checks the **system-wide crypto policy** on RHEL-family (`update-crypto-policies`: LEGACY = FAIL, weakening subpolicies = WARN, FUTURE/FIPS = stricter PASS), swap encryption (ZRAM-aware, LUKS-backed swapfiles recognized), available system entropy, and hardware RNG presence. Weak crypto = false sense of security.
+
+### Section 14: Updates & Packages
+Checks for pending security updates, automatic update configuration (dnf-automatic/unattended-upgrades), repository integrity (GPG keys), and package verification.
+
+### Section 15: Rootkit & Malware Scan
+Runs **chkrootkit** (active maintenance, last release 2025-05; detects modern
+threats like XZ Backdoor, Bootkitty, BPFDoor) if installed. Filters known
+false positives.
+
+**Note on rkhunter**: If rkhunter is installed, it's reported as INFO with a
+deprecation warning — last release was 2018-02 and signatures don't cover
+post-2018 rootkits. Use chkrootkit + AIDE + IMA for modern integrity.
+
+### Section 16: Process Security
+Process counts, zombie processes, deleted-but-running binaries, and a basic
+name-pattern check (annotated as heuristic — real malware renames binaries).
+For actual integrity verification, rely on AIDE/IMA (Section 30) and
+chkrootkit (Section 15).
+
+### Section 17: Network Security (Advanced)
+Anti-spoofing kernel settings (ICMP redirects sysctl), TCP wrapper config
+(deprecated on modern systems — informational only), TCP TIME_WAIT connection
+counts, and ARP-monitoring tool detection (arpwatch/arpon/addrwatch).
+
+### Section 18: Containers & Virtualization
+Detects Docker (rootless vs rootful daemon), Podman root containers, libvirt-managed VMs, and standalone qemu-system processes invisible to virsh. Reports the user-namespace limit (user.max_user_namespaces) with severity tiers.
+
+### Section 19: Logs & Monitoring
+Counts journal errors (1h) and criticals (24h) with known-benign-noise filters, dmesg errors, OOM kills and segfaults; checks logrotate presence, journal disk usage (cross-referenced with Section 38's filesystem view), journal forwarding configuration, deleted-but-open log files, and empty syslog files when rsyslog/syslog-ng is active.
+
+### Section 20: Performance & Resources
+Monitors system resource usage that could indicate compromise: unusual CPU usage, memory pressure, disk space, and process counts.
+
+### Section 21: Hardware & Firmware
+Checks CPU vulnerability mitigations (Spectre, Meltdown, MDS, retbleed, etc.), SMART disk health (with USB-bridge fallback via `-d sat`/`-d usbjmicron`), CPU temperature via lm_sensors when available, and USB device count (excluding host root hubs).
+
+> **Note**: The Firmware update status (fwupd) and **HSI (Host Security ID)
+> firmware trust tier** (HSI:0–5 from `fwupdmgr security`) are checked in the
+> separate "Firmware & Thunderbolt" block at the end of the audit, not in
+> Section 21 itself.
+
+### Section 22: Network Interfaces (Detail)
+Detailed network view: all interfaces with state and addresses, the full routing table, and a DNS-resolution test via a root-nameserver query (`dig . NS` — no third-party domain). Promiscuous-mode detection lives in Section 05.
+
+### Section 23: Crypto & Certificates
+Counts system CA certificates (cross-distro: trust / ca-certificates.crt / /etc/ssl/certs), flags expired certificates via `openssl x509 -checkend`, and inventories per-user SSH keys and authorized_keys entries.
+
+### Section 24: Environment & Secrets
+Scans for **world-readable private key files** (content-verified via PEM
+magic strings — filename `.key` alone is NOT sufficient since uBlock Origin
+IDB and test fixtures use the same extension), `.env` files in user homes
+(uses snapshot/cache-aware find), and configuration files in `/etc` containing
+credential patterns. Snapshot directories (`.snapshots`, `timeshift-btrfs`)
+are excluded to prevent inflated counts on Snapper/Timeshift systems.
+
+### Section 25: Systemd Security
+Audits systemd unit files for security features: sandboxing (ProtectSystem, ProtectHome, NoNewPrivileges), capability restrictions, and namespace isolation.
+
+### Section 26: Desktop & GUI Security
+Checks display server security (Wayland vs X11), screen lock state across **GNOME / KDE Plasma / XFCE / MATE / Cinnamon** (DE-aware dispatcher reads kscreenlockerrc on KDE, xfce4-screensaver on XFCE, the appropriate gsettings schema on GNOME-family DEs). Falls back to GNOME-only behavior when DE cannot be detected.
+
+### Section 27: Time Sync & NTP
+Validates NTP configuration, checks for NTS (Network Time Security) support, and ensures time is properly synchronized. Time drift can break TLS and Kerberos.
+
+### Section 28: Fail2Ban
+Checks if Fail2Ban is installed and running, validates jail configuration, and verifies SSH protection is active.
+
+### Section 29: Recent Logins & Activity
+Shows the last 5 logins, failed login attempts (source IPs redacted for safe report-sharing), current sessions vs unique users (display-manager and root automation/sudo pseudo-sessions annotated), and bucketized sudo activity (exact counts deliberately not exposed — behavioral metadata).
+
+### Section 30: Advanced Hardening
+Checks advanced security features: USBGuard daemon + rules, coredump service state (storage-aware), compiler presence (build-host vs production-server vs desktop), AIDE/Tripwire integrity monitoring, **IMA/EVM kernel integrity with runtime measurement count** (>100 measurements = actively measuring; 0 = active but policy too narrow), FireWire DMA-attack surface, home directory permissions, shell idle TMOUT, AIDE database existence, and shell history sensitive-pattern scan. (Login banner check is in Section 12 / Filesystem.)
+
+**AIDE Integrity Status**: reads `systemctl show aide-check.service -p ExecMainStatus` (the LAST scheduled run's exit code — bitmask 0=clean, 1=added, 2=removed, 4=changed) and classifies as PASS (exit=0) or WARN (exit≠0) with the check timestamp and bitmask value visible in the message. **Rebaseline-aware**: if the AIDE database was re-initialized AFTER the last check (`aide --init` + db-swap), that verdict graded the replaced baseline — reported as INFO ("rebaselined after the last check") instead of a stale WARN; unparseable timestamps fail-safe into the WARN path. On WARN, the top 5 drift paths from the journal are appended inline (Added/Removed/Changed) so users don't need to manually run `journalctl -u aide-check`. A fresh clean re-run flips PASS/WARN immediately (no 7-day journal-grep stickiness). Set `NOID_AIDE_LIVE=1` env var to additionally run a fresh `aide --check` (slow, up to 5 min) with bitmask exit-code parsing — the log is preserved on drift, deleted on clean.
+
+### Section 31: Kernel Modules & Integrity
+Audits loaded kernel modules: heuristic name-pattern scan for suspicious modules, 12 disabled filesystem modules per CIS Level 2 (cramfs, freevxfs, jffs2, hfs, hfsplus, squashfs, udf, affs, befs, sysv, qnx4, qnx6), USB storage module blacklist, and kernel module-loading lockdown state. (Thunderbolt device security and FireWire blacklist are checked in Section 21 / Hardware and Section 30 / Hardening respectively.)
+
+### Section 32: Permissions & Access Control
+Audits cron infrastructure permissions and ownership (/etc/crontab + cron.d/hourly/daily/weekly/monthly), securetty TTY allowances, and core-dump limits in /etc/security/limits.conf + limits.d drop-ins. (World-writable and SUID/SGID scans live in Section 12.)
+
+### Section 33: Boot Security & Integrity
+Reports boot mode (UEFI vs legacy BIOS), kernel module signing enforcement (compile-time, runtime sig_enforce, or cmdline), installed kernel count, and rescue/emergency shell sulogin protection. (GRUB password detection lives in Section 01.)
+
+### Section 34: System Integrity Checks
+Runs package verification (rpm -Va / debsums), checks for modified system binaries, and validates critical file checksums.
+
+**RPM Drift-Detection** (RPM-based distros): set
+`NOID_RPM_BASELINE_INIT=1` once to capture the current modified-file
+list to `/var/lib/noid-privacy/rpm-baseline.txt`. Subsequent runs diff
+against the baseline and alert only on **new** modifications since
+capture. Catches XZ-Backdoor-class drift (modified binary with valid
+signature, drift between runs). `NOID_RPM_BASELINE_UPDATE=1` rewrites
+the baseline.
+
+---
+
+## 🔒 Privacy Sections (35–38)
+
+### Section 35: Browser Privacy
+Comprehensive Firefox-family audit (Firefox, LibreWolf, Tor Browser, Waterfox — native + Flatpak profiles): telemetry (`toolkit.telemetry.enabled`), health reports, WebRTC IP leaks, DNS-over-HTTPS mode, tracking protection level, third-party cookie policy, Shield Studies, saved passwords (primary-password-aware), and uBlock Origin presence. Warns on Chrome/Edge/Opera/Vivaldi (vendor telemetry); Chromium and Brave are reported as INFO.
+
+### Section 36: Application Telemetry & Privacy
+Detects and audits application-level data collection: GNOME Location Services, problem reporting (ABRT), usage statistics, **file indexer (GNOME Tracker / KDE Baloo / Recoll — DE-aware)**, Flatpak sandbox escapes (`filesystem=host`), Snap telemetry, Fedora `countme`, Ubuntu `popularity-contest`, and captive portal detection.
+
+### Section 37: Network Privacy
+Audits network-level privacy: WiFi MAC address randomization, Ethernet MAC cloning, Avahi/mDNS hostname broadcasting, LLMNR status, hostname privacy (detects real names), IPv6 privacy extensions, DHCP hostname leaking, and cups-browsed RCE risk (CVE-2024-47176).
+
+### Section 38: Data & Disk Privacy
+Checks data-at-rest privacy: recently used files size, thumbnail caches (reveal viewed images after deletion), trash size, clipboard managers (password leak risk), core dump configuration, bash history size, journald log retention, and /tmp filesystem type (tmpfs vs persistent).
+
+---
+
+## 🖥️ Desktop Sections (39–42)
+
+### Section 39: Desktop Session Security
+Audits session-level security across **GNOME / KDE Plasma / XFCE / MATE / Cinnamon**: screen lock delay (KDE LockGrace, XFCE delay-from-activation, GNOME lock-delay), idle timeout (KDE/XFCE return minutes, normalized to seconds), lock-on-suspend (KDE LockOnResume), notification previews on lock screen (KDE plasmanotifyrc DoNotDisturb), GDM auto-login, guest accounts, timed login, remote desktop/VNC/RDP detection (localhost-only listeners reported as INFO, not WARN), autostart programs, and user-switching policy (KDE kdeglobals KDE Action Restrictions).
+
+### Section 40: Webcam & Audio Privacy
+Checks media device security: webcam device detection and permissions, microphone mute status (PipeWire/PulseAudio), network audio modules (TCP exposure), PipeWire remote access, and screen sharing portal status.
+
+### Section 41: Bluetooth Privacy
+Audits Bluetooth exposure: service status, discoverable mode (visible to nearby devices), pairable mode without paired devices, and active Bluetooth without usage.
+
+### Section 42: Password & Keyring Security
+Comprehensive credential audit: password manager detection (17 tools — KeePassXC, KeePass2, KeeWeb, Bitwarden + bw-cli, rbw, 1Password + op, pass, gopass, lesspass, NordPass, Buttercup, qtpass, Enpass — using `type -P` to avoid shell-function shadow), **GNOME Keyring AND KDE KWallet** PAM auto-unlock, SSH `AddKeysToAgent` timeout, GPG agent cache TTL, plaintext secret files in home directories (subdirectory-aware via `_safe_find_home`, severity-tiered by permissions: world-readable=FAIL, group-readable=WARN, private=INFO).
+
+### Firmware & Thunderbolt (post-section block)
+
+A separate block after Section 42 — independent of `--skip keyring`:
+
+- **Firmware update status** via `fwupdmgr get-updates` (with `LC_ALL=C` for locale-stable parsing)
+- **HSI (Host Security ID) trust tier** via `fwupdmgr security`: HSI:0=FAIL, HSI:1=WARN, HSI:2=PASS (system-protected baseline), HSI:3+=PASS (heavily-hardened)
+- **HSI failing-attestation count** via `✘`-marker in `fwupdmgr security` output
+- **Thunderbolt device security level** (DMA attack prevention via per-device `/sys/bus/thunderbolt/devices/*/security`)
+
+---
+
+## 📊 Summary
+
+After all 42 sections, NoID Privacy for Linux calculates a **Hardening Posture Score** based on the ratio of PASS/FAIL/WARN results. The score provides an at-a-glance assessment of how thoroughly the documented hardening recipes have been applied — **not** a measure of compromise resistance.
+
+| Score | Rating | Meaning |
+|-------|--------|---------|
+| 95%+ | 🏰 FULLY HARDENED | All recipes applied; defense foundation complete |
+| 90-94% | 🛡️ WELL-HARDENED | Strong baseline, minor gaps |
+| 80-89% | 🛡️ MOSTLY-HARDENED | Good baseline, some improvements possible |
+| 70-79% | ⚠️ NEEDS WORK | Significant gaps in hardening |
+| <70% | 🔴 CRITICAL | Immediate attention required |
+
+> **Score interpretation**: The score reflects **applied configuration hardening**, not whether your system is compromised. A 98% score means hardening recipes are well-applied — defense in depth requires complementary tools (AIDE/IMA for integrity monitoring, auditd for behavioral detection, chkrootkit for known-malware scanning). The script's Final Results block surfaces this disclaimer alongside the score.
+
+## 🎯 Compliance Mapping
+
+Use `--cis-l1`, `--cis-l2`, or `--stig` to append a compliance coverage block at the end of the audit. The flags reference the static doc-based mapping in [`CIS_RHEL9_MAPPING.md`](CIS_RHEL9_MAPPING.md), which currently maps NoID Privacy checks to:
+
+- **CIS RHEL 9 Level 1**: 30 controls (12% coverage)
+- **CIS RHEL 9 Level 2**: 16 controls (25% coverage)
+- **DISA STIG RHEL 9**: 29 controls (11% coverage)
+
+> Server-stack benchmarks (databases, mail servers, webservers) are intentionally **out of scope** — that's [Lynis](https://cisofy.com/lynis/) territory. NoID Privacy covers the desktop/workstation subset.
+
+---
+
+## 🤖 AI Integration
+
+With the `--ai` flag, all findings are compiled into a structured prompt that you can paste directly into ChatGPT, Claude, or Gemini. The AI will:
+1. Explain each finding in plain language
+2. Provide exact commands to fix each issue
+3. Prioritize fixes by severity
+4. Ask before making changes
+
+This is what sets NoID Privacy for Linux apart — unlike Lynis, CIS, or privacy.sexy, it compiles the full findings list into a ready-to-paste AI remediation prompt.
+
+---
+
+*For the full script, see [noid-privacy-linux.sh](../noid-privacy-linux.sh)*  
+*For usage instructions, see [README.md](../README.md)*

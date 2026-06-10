@@ -1,0 +1,67 @@
+name: 'NoID Privacy for Linux'
+description: 'Hardening posture audit for Linux desktops — 420+ checks, 42 sections, AI-friendly remediation prompts'
+author: 'NexusOne23'
+
+branding:
+  icon: 'shield'
+  color: 'green'
+
+inputs:
+  # F-272 — `min-score` is the canonical input name (matches the actual
+  # semantic). `fail-threshold` is kept as a deprecated alias so existing
+  # workflows continue to work; new users should prefer `min-score`.
+  min-score:
+    description: 'Minimum score (0-100) to pass. The action fails if the score is below this value. Set to 0 to never fail.'
+    required: false
+    default: '0'
+  fail-threshold:
+    description: 'DEPRECATED alias for min-score. Use min-score in new workflows.'
+    required: false
+    default: ''
+  ai:
+    description: 'Enable --ai flag to generate a structured AI remediation prompt at the end of the audit. Copy-paste it to ChatGPT, Claude, or Gemini for automated fix instructions.'
+    required: false
+    default: 'false'
+  skip:
+    description: 'Comma-separated list of sections to skip (e.g. "rootkit,containers,browser")'
+    required: false
+    default: ''
+  args:
+    description: 'Additional arguments to pass to noid-privacy-linux.sh'
+    required: false
+    default: ''
+
+outputs:
+  score:
+    description: 'The hardening posture score (0-100)'
+  total:
+    description: 'Total number of checks performed'
+  pass:
+    description: 'Number of passed checks'
+  fail:
+    description: 'Number of failed checks'
+  warn:
+    description: 'Number of warnings'
+  info:
+    description: 'Number of informational findings'
+  rating:
+    description: 'Score rating (FULLY HARDENED / WELL-HARDENED / MOSTLY-HARDENED / NEEDS WORK / CRITICAL)'
+  badge_color:
+    description: 'Shields.io color name for the score (brightgreen/green/yellowgreen/orange/red)'
+  badge_url:
+    description: 'Pre-built Shields.io badge URL for embedding in README'
+  json:
+    description: 'Full JSON output (includes ai_prompt field if input ai=true)'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Run NoID Privacy Audit
+      shell: bash
+      env:
+        INPUT_MIN_SCORE: ${{ inputs.min-score }}
+        INPUT_FAIL_THRESHOLD: ${{ inputs.fail-threshold }}
+        INPUT_AI: ${{ inputs.ai }}
+        INPUT_SKIP: ${{ inputs.skip }}
+        INPUT_ARGS: ${{ inputs.args }}
+      run: bash "${{ github.action_path }}/entrypoint.sh"

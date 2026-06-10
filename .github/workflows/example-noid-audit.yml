@@ -1,0 +1,39 @@
+name: Hardening Posture Audit
+
+on:
+  # Run on demand
+  workflow_dispatch:
+  # Run on PRs that touch security-relevant files
+  pull_request:
+    paths:
+      - '*.sh'
+      - '.github/workflows/**'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: NoID Privacy Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        # Pin to specific version (or full commit SHA for max supply-chain safety).
+        # `@v6` floats to the v6 series; `@v6.0.3` pins minor; `@<full-sha>` pins
+        # to a specific commit. Production workflows should pin tightly.
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+
+      - name: Run NoID Privacy Audit
+        id: audit
+        # SECURITY: Pin to a specific version (or full commit SHA for max safety).
+        # Never use @main in production workflows — supply chain risk.
+        # See https://docs.github.com/en/actions/security-guides for guidance.
+        uses: NexusOne23/noid-privacy-linux@v3.7.0
+        with:
+          min-score: '70'   # canonical name since v3.5.0 (fail-threshold still works as deprecated alias)
+          # ai: 'true'        # Uncomment to generate AI remediation prompt
+          # skip: 'rootkit,containers'  # Uncomment to skip sections
+
+      - name: Print Score
+        run: |
+          echo "Hardening Posture Score: ${{ steps.audit.outputs.score }}%"

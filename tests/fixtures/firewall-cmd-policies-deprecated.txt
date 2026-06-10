@@ -1,0 +1,2 @@
+usage: see firewall-cmd man page
+firewall-cmd: error: unrecognized arguments: --list-policies

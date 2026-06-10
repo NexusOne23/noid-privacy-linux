@@ -1,0 +1,28 @@
+# NoID Privacy for Linux
+
+> NoID Privacy for Linux is a hardening posture audit for Linux desktops: 420+ privacy and security checks across 42 sections. Pure Bash, zero dependencies, fully read-only — it never modifies the system (no files changed, no configs touched, no services restarted). The `--ai` flag emits a structured remediation prompt you paste into ChatGPT, Claude, or Gemini to get fix suggestions for each finding.
+
+It audits both privacy and security surfaces that server-focused tools miss (browser privacy, app telemetry, DNS leaks, VPN kill-switch, webcam/Bluetooth, MAC randomization), in addition to kernel, firewall, SSH, encryption, MAC/SELinux, and service hardening. The score reflects configuration state (a hardening posture), not compromise resistance — it is Layer 1 (configuration hardening), complementary to integrity detection (AIDE/IMA) and behavioural monitoring (auditd).
+
+## Facts
+
+- License: GPL-3.0
+- Language: Pure Bash 4.3+, zero compiled dependencies
+- Read-only: no system modification, no telemetry, no phone-home (three opt-out leak tests contact third parties by default; `--offline` — equivalent to `--skip vpn --skip interfaces --skip netleaks` — makes it fully offline)
+- Distros: optimized for Fedora/RHEL; tested on Ubuntu/Debian; best-effort on Arch/openSUSE/Mint/Pop!_OS
+- Exit codes: 0 = clean, 1 = FAIL present, 2 = WARN-only, 130/143 = interrupted
+- Output modes: human-readable, `--json` (CI), `--ai` (remediation prompt), CIS RHEL 9 / DISA STIG coverage mapping (`--cis-l1`/`--cis-l2`/`--stig`)
+
+## Links
+
+- Repository: https://github.com/NexusOne23/noid-privacy-linux
+- Website: https://noid-privacy.com/linux.html
+- Full check reference (42 sections): https://github.com/NexusOne23/noid-privacy-linux/blob/main/Docs/CHECKS.md
+- CIS RHEL 9 / STIG mapping: https://github.com/NexusOne23/noid-privacy-linux/blob/main/Docs/CIS_RHEL9_MAPPING.md
+- License: https://github.com/NexusOne23/noid-privacy-linux/blob/main/LICENSE
+
+## NoID Privacy ecosystem
+
+- NoID Privacy — free open-source Windows hardening engine (PowerShell, GPL-3.0): https://github.com/NexusOne23/noid-privacy
+- NoID Privacy Pro — commercial Windows GUI (Backup → Apply → Verify → Restore): https://noid-privacy.com
+- NoID Privacy for Android — Google Play: https://play.google.com/store/apps/details?id=com.noid.privacy

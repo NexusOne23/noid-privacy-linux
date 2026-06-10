@@ -1,0 +1,5 @@
+port 22
+permitemptypasswords yes
+ciphers chacha20-poly1305@openssh.com,aes256-ctr,aes256-cbc,3des-cbc
+macs hmac-sha2-256-etm@openssh.com,hmac-sha1,hmac-md5-96
+kexalgorithms curve25519-sha256,diffie-hellman-group14-sha1
