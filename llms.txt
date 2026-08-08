@@ -1,0 +1,31 @@
+# NoID Privacy for Linux
+
+> NoID Privacy for Linux is a Bash hardening-posture audit for Linux desktops. It emits host-adaptive findings across 42 fixed-weight security and privacy sections and is non-remediating by default. Explicit RPM-baseline, AIDE-live, and NoID-image policy-refresh opt-ins write only their documented state/log files. Invoked system services may keep normal operational logs. The `--ai` flag emits a structured remediation prompt; model suggestions remain untrusted until reviewed.
+
+It focuses on desktop privacy surfaces (browser policy, app telemetry, DNS/VPN observations, webcam/Bluetooth, MAC randomization, session lock, and keyrings) in addition to kernel, firewall, SSH, encryption, MAC, package, and service hardening. It reports a section-weighted posture score and separate assessed-weight coverage. Neither value is a compliance result, compromise probability, or proof of a clean host.
+
+## Facts
+
+- License: GPL-3.0-or-later
+- Language: Bash 4.3+; common OS utilities are capability-detected and optional-tool absence can reduce evidence
+- Non-remediating by default: no intentional configuration changes or package-metadata refresh. No telemetry or report upload. Documented active probes contact third parties by default; `--offline` is equivalent to `--skip interfaces --skip netleaks`, suppresses every audit-generated network probe, and retains local VPN assessment. No VPN is valid and informational by itself.
+- Distros/desktops: exact validation depth is recorded in `Docs/SUPPORT.md`; parser recognition alone is not a support claim
+- Exit codes: 0 = no FAIL/WARN, 1 = FAIL present, 2 = WARN-only, 130/143 = interrupted
+- Output modes: human-readable, `--json` (CI), `--ai` (remediation prompt), CIS RHEL 9 / DISA STIG coverage mapping (`--cis-l1`/`--cis-l2`/`--stig`)
+
+## Links
+
+- Repository: https://github.com/NexusOne23/noid-privacy-linux
+- Website: https://noid-privacy.com/linux.html
+- Full check reference (42 sections): https://github.com/NexusOne23/noid-privacy-linux/blob/main/Docs/CHECKS.md
+- CIS RHEL 9 / STIG mapping: https://github.com/NexusOne23/noid-privacy-linux/blob/main/Docs/CIS_RHEL9_MAPPING.md
+- Score and coverage model: https://github.com/NexusOne23/noid-privacy-linux/blob/main/Docs/SCORING.md
+- Support and release validation: https://github.com/NexusOne23/noid-privacy-linux/blob/main/Docs/SUPPORT.md
+- License: https://github.com/NexusOne23/noid-privacy-linux/blob/main/LICENSE
+
+## NoID Privacy ecosystem
+
+- NoID Privacy — free open-source Windows hardening engine (PowerShell, GPL-3.0): https://github.com/NexusOne23/noid-privacy
+- Current Windows GUI offering: https://noid-privacy.com
+- NoID Privacy for Android — Google Play: https://play.google.com/store/apps/details?id=com.noid.privacy
+- NoID Privacy Workstation 44 — hardened Fedora 44 / GNOME 50 privacy workstation: https://github.com/NexusOne23/noid-privacy-workstation

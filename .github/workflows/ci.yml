@@ -1,0 +1,275 @@
+name: CI - Bash Quality Checks
+
+on:
+  push:
+    branches: [ main, develop, 'release/*' ]
+    tags: [ 'v*.*.*' ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  syntax-check:
+    name: Bash Syntax Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+
+      - name: Check Bash syntax
+        run: |
+          echo "Bash version: $(bash --version | head -1)"
+          while IFS= read -r -d '' script; do
+            echo "Checking ${script#./}"
+            bash -n "$script"
+          done < <(find . -type f \( -name '*.sh' -o -name '*.bash' \) -not -path './.git/*' -print0)
+          echo "✅ Syntax check passed!"
+
+  shellcheck:
+    name: ShellCheck Analysis
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+
+      - name: Install ShellCheck
+        run: sudo apt-get install -y shellcheck
+
+      - name: Run ShellCheck (style level)
+        run: |
+          echo "ShellCheck version: $(shellcheck --version | head -2 | tail -1)"
+          shellcheck --severity=style --shell=bash --format=tty \
+            noid-privacy-linux.sh entrypoint.sh scripts/*.sh \
+            tests/test_helper.bash tests/unit/*.bats
+          echo "✅ ShellCheck (style) passed!"
+
+  validate-structure:
+    name: Validate Project Structure
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+
+      - name: Check required files
+        run: |
+          echo "Checking project structure..."
+
+          failed=0
+          for f in README.md LICENSE CHANGELOG.md CONTRIBUTING.md SECURITY.md \
+                   CODE_OF_CONDUCT.md noid-privacy-linux.sh entrypoint.sh \
+                   action.yml Docs/CHECKS.md Docs/SCORING.md Docs/SUPPORT.md \
+                   Docs/CIS_RHEL9_MAPPING.md Docs/REFERENCE_REVIEW.md \
+                   scripts/coverage-report.sh; do
+            if [ -f "$f" ]; then
+              echo "  ✅ $f"
+            else
+              echo "  ❌ $f (MISSING)"
+              failed=1
+            fi
+          done
+
+          if [ "$failed" -eq 1 ]; then
+            echo ""
+            echo "❌ Missing required files!"
+            exit 1
+          else
+            echo ""
+            echo "✅ All required files present!"
+          fi
+
+      - name: Verify script header
+        run: |
+          head -1 noid-privacy-linux.sh | grep -qE '^#!(/bin/bash|/usr/bin/env bash)' \
+            && echo "✅ Shebang present" \
+            || { echo "❌ Missing shebang"; exit 1; }
+
+  syntax-compat:
+    name: Bash Syntax Compat (${{ matrix.name }})
+    # Renamed from "distro-test" to honest scope: this only checks bash syntax
+    # compatibility across distros, NOT actual cross-distro audit logic.
+    # Real cross-distro testing requires running the audit (see audit-smoke job).
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distro: ubuntu:22.04
+            name: Ubuntu 22.04
+          - distro: ubuntu:24.04
+            name: Ubuntu 24.04
+          - distro: ubuntu:26.04
+            name: Ubuntu 26.04
+          - distro: fedora:43
+            name: Fedora 43
+          - distro: fedora:44
+            name: Fedora 44
+          - distro: debian:12
+            name: Debian 12
+          - distro: debian:13
+            name: Debian 13
+          - distro: archlinux:latest
+            name: Arch Linux rolling
+          - distro: registry.opensuse.org/opensuse/leap:16.0
+            name: openSUSE Leap 16.0
+          - distro: registry.opensuse.org/opensuse/tumbleweed:latest
+            name: openSUSE Tumbleweed
+          - distro: registry.access.redhat.com/ubi9/ubi:latest
+            name: Red Hat UBI 9
+          - distro: registry.access.redhat.com/ubi10/ubi:latest
+            name: Red Hat UBI 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+
+      - name: Test syntax on ${{ matrix.name }}
+        run: |
+          docker run --rm -v "$PWD:/audit:ro" "${{ matrix.distro }}" \
+            bash -n /audit/noid-privacy-linux.sh
+          echo "✅ Bash syntax compatible on ${{ matrix.name }}"
+
+  action-smoke:
+    name: Action + Audit Smoke Test (Ubuntu)
+    # End-to-end test of the local composite Action. The entrypoint runs one
+    # real audit, validates its full JSON/score model and exposes outputs.
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl iproute2 jq net-tools
+
+      - name: Run local Action
+        id: audit
+        uses: ./
+        with:
+          args: '--offline'
+          skip: 'rootkit,audit,integrity'
+          min-score: '0'
+          min-coverage: '0'
+
+      - name: Validate exposed outputs
+        env:
+          AUDIT_JSON: ${{ steps.audit.outputs.json }}
+          AUDIT_SCORE: ${{ steps.audit.outputs.score }}
+          AUDIT_COVERAGE: ${{ steps.audit.outputs.score_coverage }}
+        run: |
+          jq -e '
+            .scoring.model == "section-risk-v1" and
+            (.scoring.sections | length == 42) and
+            (.summary.total == (.findings | length)) and
+            (.summary.total_weight == 100) and
+            (.summary.score_coverage >= 0 and .summary.score_coverage <= 100)
+          ' <<< "$AUDIT_JSON" > /dev/null
+          jq -e --arg score "$AUDIT_SCORE" --arg coverage "$AUDIT_COVERAGE" \
+            '.summary.score == ($score | tonumber) and
+             .summary.score_coverage == ($coverage | tonumber)' \
+            <<< "$AUDIT_JSON" > /dev/null
+          echo "✅ Action exposes internally consistent scoring JSON"
+
+  api-lint:
+    name: API Layer Lint
+    # Enforce capability-layer usage. Catches direct API calls
+    # bypassing _fw_get_policies / _service_masked_any and the 11
+    # bug-pattern classes (locale, name-shadow, grep-r, API-version,
+    # regex-globals, ((var++)) bombs, systemd-analyze/free locale,
+    # unanchored grep nameserver).
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+
+      - name: Run API-layer lint
+        run: bash scripts/lint-api-usage.sh noid-privacy-linux.sh
+
+  compliance-mapping:
+    name: Compliance Mapping Validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+
+      - name: Validate direct mappings and denominators
+        run: bash scripts/coverage-report.sh
+
+  bats-tests:
+    name: BATS Unit Tests
+    # BATS test-suite preventing regressions of the 11 bug-pattern
+    # classes (extended from 5 to 11 across v3.6.0 and v3.6.1).
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+
+      - name: Install BATS
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bats
+
+      - name: Run BATS unit tests
+        run: |
+          echo "BATS version: $(bats --version)"
+          echo ""
+          bats tests/unit/
+          echo ""
+          echo "✅ BATS tests passed"
+
+  audit-locale:
+    name: Audit Locale Test (${{ matrix.locale }})
+    # v3.6: locale-aware regression test.
+    # Catches the chage-locale bug class — `grep "Maximum"` fails on a
+    # non-English `chage -l` output (localized labels), causing silent FALSE
+    # PASSes on non-English systems.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        locale: [en_US.UTF-8, fr_FR.UTF-8, es_ES.UTF-8]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+
+      - name: Install dependencies + locale
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl iproute2 jq net-tools locales
+          sudo locale-gen "${{ matrix.locale }}"
+          sudo update-locale LANG="${{ matrix.locale }}"
+
+      - name: Run audit under ${{ matrix.locale }}
+        env:
+          LANG: ${{ matrix.locale }}
+          LC_ALL: ${{ matrix.locale }}
+        run: |
+          # Same exit-code logic as audit-smoke — any non-{0,1,2}
+          # under a non-English locale indicates a locale-parsing regression.
+          set +e
+          sudo -E bash noid-privacy-linux.sh --json --offline \
+            --skip rootkit --skip audit --skip integrity \
+            > /tmp/audit.json
+          AUDIT_RC=$?
+          set -e
+          echo "Audit exit code under ${{ matrix.locale }}: $AUDIT_RC"
+          case "$AUDIT_RC" in
+            0|1|2) ;;
+            *) echo "::error::Audit failed under ${{ matrix.locale }} with rc=$AUDIT_RC"
+               head -50 /tmp/audit.json
+               exit 1 ;;
+          esac
+          jq . /tmp/audit.json > /dev/null
+          echo "✅ Audit valid JSON under ${{ matrix.locale }}"
+          jq -r '.summary | "Score: \(.score)% — \(.pass) pass, \(.fail) fail, \(.warn) warn"' /tmp/audit.json

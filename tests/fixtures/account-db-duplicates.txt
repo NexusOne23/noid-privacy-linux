@@ -1,0 +1,4 @@
+alice:x:1000:1000:Alice:/home/alice:/bin/bash
+bob:x:1001:1001:Bob:/home/bob:/bin/bash
+alice:x:1002:1002:Duplicate name:/srv/alice:/usr/sbin/nologin
+carol:x:1001:1003:Duplicate ID:/home/carol:/bin/bash

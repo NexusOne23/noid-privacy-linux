@@ -1,0 +1,7 @@
+Dernier changement de mot de passe				: avr. 27, 2026
+Fin de validité du mot de passe					: jamais
+Mot de passe désactivé						: jamais
+Fin de validité du compte					: jamais
+Nombre minimum de jours entre les changements de mot de passe	: 0
+Nombre maximum de jours entre les changements de mot de passe	: 99999
+Nombre de jours d'avertissement avant la fin de validité du mot de passe	: 7
