@@ -1,0 +1,6 @@
+[terminal]
+vt = "1"
+
+[default_session]
+command = "cosmic-greeter-start"
+user = "cosmic-greeter"

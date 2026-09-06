@@ -1,0 +1,4 @@
+# auth required pam_faillock.so deny=99 unlock_time=0
+auth required pam_faillock.so preauth silent deny=3 unlock_time=600
+auth [default=die] pam_faillock.so authfail deny=5 unlock_time=900
+password requisite pam_pwquality.so try_first_pass minlen=15 dcredit=0

@@ -1,0 +1,7 @@
+Last password change					: Apr 27, 2026
+Password expires					: Jul 26, 2026
+Password inactive					: Aug 25, 2026
+Account expires						: never
+Minimum number of days between password change		: 1
+Maximum number of days between password change		: 90
+Number of days of warning before password expires	: 7
