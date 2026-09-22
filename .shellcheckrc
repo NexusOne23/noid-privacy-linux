@@ -1,0 +1,18 @@
+# Project-wide ShellCheck configuration for noid-privacy-linux.
+
+# SC2329 — "Function is never invoked. Check usage (or ignored if invoked indirectly)."
+# This audit script uses three intentional indirection patterns that ShellCheck
+# cannot statically resolve:
+#   1. signal traps:  trap 'function_name' INT TERM
+#   2. callback dispatch:  _gsettings_for_users SCHEMA KEY callback_function_name
+#                          _kreadconfig_for_users / _xfconf_for_users / _for_each_user
+#   3. DE-family routing: case "$_DE_FAMILY" → handler_function_name
+# All "never invoked" reports for these helpers are false positives.
+disable=SC2329
+
+# SC2059 — "Don't use variables in the printf format string."
+# All instances are colour escapes from the predefined RED/GRN/YLW palette,
+# never user-controlled input. Reading printf "${RED}text${RST}" alongside
+# 400+ output lines in this audit script is more legible than expanding
+# every call to printf "%stext%s" "$RED" "$RST". Treated as project style.
+disable=SC2059
