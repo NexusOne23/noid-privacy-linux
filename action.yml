@@ -1,0 +1,86 @@
+name: 'NoID Privacy for Linux'
+description: 'Security and privacy posture audit for Linux desktops — 42 risk-weighted sections with AI-friendly remediation prompts'
+author: 'NexusOne23'
+
+branding:
+  icon: 'shield'
+  color: 'green'
+
+inputs:
+  # F-272 — `min-score` is the canonical input name (matches the actual
+  # semantic). `fail-threshold` is kept as a deprecated alias so existing
+  # workflows continue to work; new users should prefer `min-score`.
+  min-score:
+    description: 'Minimum score (0-100) to pass. The action fails if the score is below this value. Set to 0 to never fail.'
+    required: false
+    default: '0'
+  min-coverage:
+    description: 'Minimum assessed risk-weight coverage (0-100). Use this with min-score so skipped or unavailable sections cannot yield a high score from limited evidence.'
+    required: false
+    default: '0'
+  fail-threshold:
+    description: 'DEPRECATED alias for min-score. Use min-score in new workflows.'
+    required: false
+    default: ''
+  ai:
+    description: 'Enable --ai to embed a structured remediation prompt. Review any model suggestions before applying changes.'
+    required: false
+    default: 'false'
+  skip:
+    description: 'Comma-separated list of sections to skip (e.g. "rootkit,containers,browser")'
+    required: false
+    default: ''
+  args:
+    description: 'Additional arguments to pass to noid-privacy-linux.sh'
+    required: false
+    default: ''
+
+outputs:
+  score:
+    description: 'The assessed desktop security/privacy posture score (0-100)'
+    value: ${{ steps.audit.outputs.score }}
+  score_coverage:
+    description: 'Percentage of the fixed risk-weight model that was assessed (0-100)'
+    value: ${{ steps.audit.outputs.score_coverage }}
+  total:
+    description: 'Total number of emitted findings'
+    value: ${{ steps.audit.outputs.total }}
+  pass:
+    description: 'Number of PASS findings'
+    value: ${{ steps.audit.outputs.pass }}
+  fail:
+    description: 'Number of FAIL findings'
+    value: ${{ steps.audit.outputs.fail }}
+  warn:
+    description: 'Number of warnings'
+    value: ${{ steps.audit.outputs.warn }}
+  info:
+    description: 'Number of informational findings'
+    value: ${{ steps.audit.outputs.info }}
+  rating:
+    description: 'Score rating, emitted with a leading status emoji (🟢 STRONG POSTURE / 🟡 MODERATE POSTURE / 🟠 WEAK POSTURE / 🔴 HIGH EXPOSURE / ⚪ LIMITED EVIDENCE)'
+    value: ${{ steps.audit.outputs.rating }}
+  badge_color:
+    description: 'Shields.io color name for the score (green/yellow/orange/red/lightgrey)'
+    value: ${{ steps.audit.outputs.badge_color }}
+  badge_url:
+    description: 'Pre-built Shields.io badge URL for embedding in README'
+    value: ${{ steps.audit.outputs.badge_url }}
+  json:
+    description: 'Full JSON output (includes ai_prompt field if input ai=true)'
+    value: ${{ steps.audit.outputs.json }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Run NoID Privacy Audit
+      id: audit
+      shell: bash
+      env:
+        INPUT_MIN_SCORE: ${{ inputs.min-score }}
+        INPUT_MIN_COVERAGE: ${{ inputs.min-coverage }}
+        INPUT_FAIL_THRESHOLD: ${{ inputs.fail-threshold }}
+        INPUT_AI: ${{ inputs.ai }}
+        INPUT_SKIP: ${{ inputs.skip }}
+        INPUT_ARGS: ${{ inputs.args }}
+      run: bash "${{ github.action_path }}/entrypoint.sh"
